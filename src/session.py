@@ -135,60 +135,86 @@ class Session:
     refine_history: list[str] = field(default_factory=list)
 
     async def search(self, query: str) -> str | None:
-        """Поиск через gateway-agent с MCP."""
-        url = f'{self.config.overmind_url.rstrip("/")}/api/v1/tasks/api'
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.config.overmind_token}",
-        }
-        request_data = {
+        """Поиск через n8n WF1 → Overmind gateway-agent с MCP novostroym.
+
+        Поток:
+          1. POST на n8n webhook → создаёт task в Overmind (gateway-agent route)
+          2. Poll Overmind каждые 1.5 сек (max 30 сек) до completed/failed
+          3. Вернуть response (ответ модели с результатами MCP)
+        """
+        n8n_url = f'{self.config.n8n_url.rstrip("/")}{self.config.n8n_endpoint}'
+        n8n_headers = {"Content-Type": "application/json"}
+        # n8n webhook открыт (как cc-daemons используют — без токена)
+
+        import time
+        import uuid
+        req_id = f"bot-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+
+        n8n_payload = {
+            "request_id": req_id,
             "query": query,
-            "service": "openrouter",
             "model": self.config.model_search,
             "system_prompt": SEARCH_PROMPT,
-            "parameters": {
-                "temperature": self.config.search_temperature,
-                "max_tokens": self.config.max_tokens_search,
-            },
-            "external_api_key": self.config.openrouter_api_key,
             "mcp_servers": ["novostroym"],
-        }
-        payload = {
-            "agent_name": "gateway-agent",
-            "endpoint": "/process",
-            "request_data": request_data,
-            "timeout_seconds": self.config.gateway_timeout,
-            "max_retries": 0,
+            "temperature": self.config.search_temperature,
+            "max_tokens": self.config.max_tokens_search,
+            "task_timeout_seconds": self.config.gateway_timeout,
         }
 
         try:
             async with aiohttp.ClientSession() as sess:
-                async with sess.post(url, json=payload, headers=headers) as resp:
-                    task = await resp.json()
-                    task_id = task.get("id")
-                    if not task_id:
-                        logger.error("Нет task_id: %s", task)
+                # 1. POST в n8n → создать task в Overmind
+                async with sess.post(
+                    n8n_url, json=n8n_payload, headers=n8n_headers,
+                    timeout=30,
+                ) as resp:
+                    text = await resp.text()
+                    if resp.status >= 400:
+                        logger.error("n8n %s: %s", resp.status, text[:300])
+                        return None
+                    try:
+                        body = json.loads(text)
+                    except json.JSONDecodeError:
+                        logger.error("n8n: bad JSON: %s", text[:200])
                         return None
 
-                base = self.config.overmind_url.rstrip("/")
-                for _ in range(15):
-                    async with sess.get(
-                        f"{base}/api/v1/tasks/api/{task_id}/status",
-                        headers=headers,
-                    ) as resp:
-                        status = (await resp.json()).get("status")
+                task_id = body.get("task_id")
+                if not task_id:
+                    logger.error("n8n: no task_id: %s", text[:300])
+                    return None
 
-                    if status == "completed":
+                # 2. Poll Overmind
+                overmind_url = self.config.overmind_url
+                overmind_headers = {
+                    "Authorization": f"Bearer {self.config.gateway_poll_token}",
+                }
+                max_attempts = self.config.gateway_timeout // 2
+                for attempt in range(max_attempts):
+                    await asyncio.sleep(2)
+                    async with sess.get(
+                        f"{overmind_url.rstrip('/')}/api/v1/tasks/api/{task_id}/status",
+                        headers=overmind_headers,
+                        timeout=10,
+                    ) as resp:
+                        if resp.status >= 400:
+                            logger.warning("poll %s: %s", task_id, resp.status)
+                            continue
+                        st = (await resp.json()).get("status")
+
+                    if st == "completed":
                         async with sess.get(
-                            f"{base}/api/v1/tasks/api/{task_id}/result",
-                            headers=headers,
+                            f"{overmind_url.rstrip('/')}/api/v1/tasks/api/{task_id}/result",
+                            headers=overmind_headers,
+                            timeout=10,
                         ) as resp:
                             r = (await resp.json()).get("result", {}) or {}
-                        return r.get("response", "")
-                    elif status in ("failed", "cancelled"):
-                        logger.warning("Поиск %s: %s", status, task_id)
+                        return r.get("response") or ""
+                    elif st in ("failed", "cancelled"):
+                        err = r.get("error", "") if False else ""
+                        logger.warning("task %s: %s", task_id, st)
                         return None
-                    await asyncio.sleep(1)
+                logger.warning("task %s: timeout", task_id)
+                return None
         except Exception as e:
             logger.error("Ошибка поиска: %s", e)
             return None

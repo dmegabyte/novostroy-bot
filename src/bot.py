@@ -115,14 +115,6 @@ def main() -> None:
     request = HTTPXRequest(
         connection_pool_size=1,
     )
-    app = (
-        Application.builder()
-        .token(config.telegram_bot_token)
-        .base_url(config.telegram_api_base_url)
-        .request(request)
-        .post_init(drop_pending_updates)
-        .build()
-    )
 
     # Очищаем pending updates при старте, чтобы не дублировать ответы
     # на старые сообщения после рестарта.
@@ -154,6 +146,15 @@ def main() -> None:
                         )
         except Exception as e:
             logger.warning("Не удалось очистить pending updates: %s", e)
+
+    app = (
+        Application.builder()
+        .token(config.telegram_bot_token)
+        .base_url(config.telegram_api_base_url)
+        .request(request)
+        .post_init(drop_pending_updates)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new", new_dialog))

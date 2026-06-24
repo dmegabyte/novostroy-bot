@@ -15,13 +15,8 @@ import logging
 from typing import Final
 
 import aiohttp
-from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-)
+from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from telegram.request import HTTPXRequest
 
 from .config import Config
@@ -82,6 +77,12 @@ async def help_command(update: Update, _context) -> None:
     )
 
 
+CONTACT_KEYWORDS = frozenset({
+    "Поделиться контактом", "поделиться контактом",
+    "оператор", "оператора", "оператору", "оператором",
+})
+
+
 async def handle_message(update: Update, _context) -> None:
     """Обработка сообщения пользователя."""
     if not update.message or not update.message.text:
@@ -94,7 +95,34 @@ async def handle_message(update: Update, _context) -> None:
     await update.message.chat.send_action("typing")
     session = get_session(user_id)
     reply = await session.process(query)
-    await update.message.reply_text(reply)
+
+    # Если в ответе бот предлагает связаться с оператором — показываем кнопку
+    if any(kw in reply for kw in CONTACT_KEYWORDS):
+        contact_btn = KeyboardButton("📞 Поделиться контактом", request_contact=True)
+        keyboard = ReplyKeyboardMarkup(
+            [[contact_btn]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        )
+        await update.message.reply_text(reply, reply_markup=keyboard)
+    else:
+        await update.message.reply_text(reply)
+
+
+async def handle_contact(update: Update, _context) -> None:
+    """Обработка отправленного контакта."""
+    contact = update.message.contact
+    user = update.effective_user
+    logger.info(
+        "Контакт от %d: %s %s, тел: %s",
+        user.id, contact.first_name, contact.last_name or "",
+        contact.phone_number,
+    )
+    # Убираем клавиатуру
+    await update.message.reply_text(
+        "Спасибо! Оператор свяжется с Вами в ближайшее время.",
+        reply_markup=ReplyKeyboardMarkup.remove_keyboard(),
+    )
 
 
 # ── Запуск ───────────────────────────────────────────────────
@@ -159,6 +187,7 @@ def main() -> None:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new", new_dialog))
     app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info("Бот запущен...")

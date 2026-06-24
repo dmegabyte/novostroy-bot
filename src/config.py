@@ -18,7 +18,7 @@ class Config:
     telegram_api_base_url: str = field(
         default_factory=lambda: os.getenv(
             "TELEGRAM_API_BASE_URL",
-            "http://127.0.0.1:8446/bot",
+            "https://telegram-bot-proxy.d-megabyte.workers.dev/bot",
         )
     )
 

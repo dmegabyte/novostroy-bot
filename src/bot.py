@@ -82,15 +82,64 @@ CONTACT_KEYWORDS = frozenset({
     "оператор", "оператора", "оператору", "оператором",
 })
 
+# Последнее сообщение каждого юзера — для dedup
+last_user_msg: dict[int, tuple[str, float]] = {}
+DEDUP_WINDOW_SEC = 30
+DEDUP_MAX_DIFF = 2  # Levenshtein distance
+
+
+def _levenshtein(a: str, b: str) -> int:
+    """Простой Levenshtein distance."""
+    if len(a) < len(b):
+        return _levenshtein(b, a)
+    if not b:
+        return len(a)
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a):
+        cur = [i + 1]
+        for j, cb in enumerate(b):
+            cur.append(min(
+                cur[j] + (ca != cb),  # insert
+                prev[j + 1] + 1,      # delete
+                prev[j] + (ca != cb), # replace
+            ))
+        prev = cur
+    return prev[-1]
+
+
+def _is_duplicate(user_id: int, query: str) -> bool:
+    """Слишком похоже на предыдущее сообщение того же юзера?"""
+    import time
+    if user_id not in last_user_msg:
+        return False
+    prev_msg, prev_time = last_user_msg[user_id]
+    if time.time() - prev_time > DEDUP_WINDOW_SEC:
+        return False
+    # Сравниваем по длине и расстоянию
+    if abs(len(prev_msg) - len(query)) > 3:
+        return False
+    if _levenshtein(prev_msg.lower(), query.lower()) <= DEDUP_MAX_DIFF:
+        return True
+    return False
+
 
 async def handle_message(update: Update, _context) -> None:
     """Обработка сообщения пользователя."""
     if not update.message or not update.message.text:
         return
 
+    import time
     user_id = update.effective_user.id
     query = update.message.text.strip()
     logger.info("Пользователь %d: %s", user_id, query)
+
+    # Dedup: если сообщение почти такое же (опечатка) — игнорируем
+    if _is_duplicate(user_id, query):
+        logger.info("Игнорируем дубль: %s", query)
+        return
+
+    # Запоминаем сообщение (для следующего dedup)
+    last_user_msg[user_id] = (query, time.time())
 
     await update.message.chat.send_action("typing")
     session = get_session(user_id)

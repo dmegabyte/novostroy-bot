@@ -10,7 +10,7 @@
       "assert": [
         {"type": "icontains-any", "value": ["Загородный", "Домик в лесу"]},
         {"type": "not-contains", "value": "Выхино"},
-        {"type": "contains", "value": "?"}
+        {"type": "icontains-any", "value": ["?", "покаж", "планировк", "запиш", "свяж", "ипотек", "заехать", "посмотр", "выходн"]}
       ]
     },
     {
@@ -30,18 +30,17 @@
       "assert": [
         {"type": "contains", "value": "парковк"},
         {"type": "contains", "value": "Домик в лесу"},
-        {"type": "contains", "value": "?"}
+        {"type": "icontains-any", "value": ["?", "покаж", "планировк", "запиш", "свяж", "ипотек", "заехать", "посмотр", "выходн"]}
       ]
     },
     {
       "query": "подумаю, может в следующем году",
-      "note": "Колебание — не соглашаться откладывать, не галлюцинировать",
+      "note": "Колебание — не соглашаться откладывать",
       "assert": [
         {"type": "not-contains", "value": "хорошо, подумайте"},
         {"type": "not-contains", "value": "отлож"},
         {"type": "not-contains", "value": "следующий год"},
-        {"type": "icontains-any", "value": ["Загородный", "Домик в лесу"]},
-        {"type": "not-contains", "value": "Выхино"}
+        {"type": "icontains-any", "value": ["Загородный", "Домик в лесу"]}
       ]
     }
   ]

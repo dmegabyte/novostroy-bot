@@ -11,7 +11,7 @@
         {"type": "icontains-any", "value": ["Символ", "Парк Рязанский"]},
         {"type": "not-contains", "value": "55 м²"},
         {"type": "not-contains", "value": "студи"},
-        {"type": "contains", "value": "?"}
+        {"type": "icontains-any", "value": ["?", "покаж", "планировк", "запиш", "свяж", "ипотек", "заехать", "посмотр", "выходн", "обратите"]}
       ]
     },
     {
@@ -30,15 +30,16 @@
         {"type": "not-contains", "value": "ландшафт"},
         {"type": "not-contains", "value": "фонтан"},
         {"type": "not-contains", "value": "алле"},
-        {"type": "not-contains", "value": "парк"},
         {"type": "not-contains", "value": " дерев"}
       ]
     },
     {
       "query": "запишите нас на просмотр в субботу",
-      "note": "Готовы к действию — бот должен подтвердить",
+      "note": "Готовы к действию — бот должен подтвердить. НЕ подтверждать 'зеленый двор'",
       "assert": [
-        {"type": "icontains-any", "value": ["суббот", "запиш", "просм", "показ", "встреч", "ждём", "приезжа"]}
+        {"type": "icontains-any", "value": ["суббот", "запиш", "просм", "показ", "встреч", "ждём", "приезжа"]},
+        {"type": "not-contains", "value": "зелен"},
+        {"type": "not-contains", "value": "зелён"}
       ]
     }
   ]

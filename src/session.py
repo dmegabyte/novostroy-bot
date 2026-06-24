@@ -184,85 +184,106 @@ class Session:
 
         Поток:
           1. POST на n8n webhook → создаёт task в Overmind (gateway-agent route)
-          2. Poll Overmind каждые 1.5 сек (max 30 сек) до completed/failed
+          2. Poll Overmind каждые 1.5 сек (max timeout) до completed/failed
           3. Вернуть response (ответ модели с результатами MCP)
+
+        При ошибке — 1 повтор (всего 2 попытки).
         """
         n8n_url = f'{self.config.n8n_url.rstrip("/")}{self.config.n8n_endpoint}'
         n8n_headers = {"Content-Type": "application/json"}
-        # n8n webhook открыт (как cc-daemons используют — без токена)
 
         import time
         import uuid
-        req_id = f"bot-{int(time.time())}-{uuid.uuid4().hex[:8]}"
 
-        n8n_payload = {
-            "request_id": req_id,
-            "query": query,
-            "model": self.config.model_search,
-            "system_prompt": SEARCH_PROMPT,
-            "mcp_servers": ["novostroym"],
-            "temperature": self.config.search_temperature,
-            "max_tokens": self.config.max_tokens_search,
-            "task_timeout_seconds": self.config.gateway_timeout,
-        }
+        for attempt in range(2):
+            req_id = f"bot-{int(time.time())}-{uuid.uuid4().hex[:8]}"
+            n8n_payload = {
+                "request_id": req_id,
+                "query": query,
+                "model": self.config.model_search,
+                "system_prompt": SEARCH_PROMPT,
+                "mcp_servers": ["novostroym"],
+                "temperature": self.config.search_temperature,
+                "max_tokens": self.config.max_tokens_search,
+                "task_timeout_seconds": self.config.gateway_timeout,
+            }
 
-        try:
-            async with aiohttp.ClientSession() as sess:
-                # 1. POST в n8n → создать task в Overmind
-                async with sess.post(
-                    n8n_url, json=n8n_payload, headers=n8n_headers,
-                    timeout=30,
-                ) as resp:
-                    text = await resp.text()
-                    if resp.status >= 400:
-                        logger.error("n8n %s: %s", resp.status, text[:300])
-                        return None
-                    try:
-                        body = json.loads(text)
-                    except json.JSONDecodeError:
-                        logger.error("n8n: bad JSON: %s", text[:200])
-                        return None
-
-                task_id = body.get("task_id")
-                if not task_id:
-                    logger.error("n8n: no task_id: %s", text[:300])
-                    return None
-
-                # 2. Poll Overmind
-                overmind_url = self.config.overmind_url
-                overmind_headers = {
-                    "Authorization": f"Bearer {self.config.gateway_poll_token}",
-                }
-                max_attempts = self.config.gateway_timeout // 2
-                for attempt in range(max_attempts):
-                    await asyncio.sleep(2)
-                    async with sess.get(
-                        f"{overmind_url.rstrip('/')}/api/v1/tasks/api/{task_id}/status",
-                        headers=overmind_headers,
-                        timeout=10,
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    # 1. POST в n8n → создать task в Overmind
+                    async with sess.post(
+                        n8n_url, json=n8n_payload, headers=n8n_headers,
+                        timeout=30,
                     ) as resp:
+                        text = await resp.text()
                         if resp.status >= 400:
-                            logger.warning("poll %s: %s", task_id, resp.status)
-                            continue
-                        st = (await resp.json()).get("status")
+                            logger.error("n8n %s: %s", resp.status, text[:300])
+                            if attempt == 0:
+                                await asyncio.sleep(1)
+                                continue
+                            return None
+                        try:
+                            body = json.loads(text)
+                        except json.JSONDecodeError:
+                            logger.error("n8n: bad JSON: %s", text[:200])
+                            if attempt == 0:
+                                await asyncio.sleep(1)
+                                continue
+                            return None
 
-                    if st == "completed":
+                    task_id = body.get("task_id")
+                    if not task_id:
+                        logger.error("n8n: no task_id: %s", text[:300])
+                        if attempt == 0:
+                            await asyncio.sleep(1)
+                            continue
+                        return None
+
+                    # 2. Poll Overmind
+                    overmind_url = self.config.overmind_url
+                    overmind_headers = {
+                        "Authorization": f"Bearer {self.config.gateway_poll_token}",
+                    }
+                    max_attempts = self.config.gateway_timeout // 2
+                    for poll_num in range(max_attempts):
+                        await asyncio.sleep(2)
                         async with sess.get(
-                            f"{overmind_url.rstrip('/')}/api/v1/tasks/api/{task_id}/result",
+                            f"{overmind_url.rstrip('/')}/api/v1/tasks/api/{task_id}/status",
                             headers=overmind_headers,
                             timeout=10,
                         ) as resp:
-                            r = (await resp.json()).get("result", {}) or {}
-                        return r.get("response") or ""
-                    elif st in ("failed", "cancelled"):
-                        err = r.get("error", "") if False else ""
-                        logger.warning("task %s: %s", task_id, st)
-                        return None
-                logger.warning("task %s: timeout", task_id)
+                            if resp.status >= 400:
+                                logger.warning("poll %s: %s", task_id, resp.status)
+                                continue
+                            st = (await resp.json()).get("status")
+
+                        if st == "completed":
+                            async with sess.get(
+                                f"{overmind_url.rstrip('/')}/api/v1/tasks/api/{task_id}/result",
+                                headers=overmind_headers,
+                                timeout=10,
+                            ) as resp:
+                                r = (await resp.json()).get("result", {}) or {}
+                            return r.get("response") or ""
+                        elif st in ("failed", "cancelled"):
+                            logger.warning("task %s: %s", task_id, st)
+                            if attempt == 0:
+                                await asyncio.sleep(1)
+                                continue
+                            return None
+
+                    logger.warning("task %s: timeout (attempt %d)", task_id, attempt + 1)
+                    if attempt == 0:
+                        await asyncio.sleep(1)
+                        continue
+                    return None
+
+            except Exception as e:
+                logger.error("Ошибка поиска (attempt %d): %s", attempt + 1, e)
+                if attempt == 0:
+                    await asyncio.sleep(1)
+                    continue
                 return None
-        except Exception as e:
-            logger.error("Ошибка поиска: %s", e)
-            return None
 
         return None
 

@@ -14,6 +14,7 @@ import asyncio
 import logging
 from typing import Final
 
+import aiohttp
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -119,8 +120,40 @@ def main() -> None:
         .token(config.telegram_bot_token)
         .base_url(config.telegram_api_base_url)
         .request(request)
+        .post_init(drop_pending_updates)
         .build()
     )
+
+    # Очищаем pending updates при старте, чтобы не дублировать ответы
+    # на старые сообщения после рестарта.
+    async def drop_pending_updates(application: Application) -> None:
+        try:
+            async with aiohttp.ClientSession() as sess:
+                # Берём последние 100 update'ов и сразу сдвигаем offset,
+                # чтобы их не обрабатывать.
+                async with sess.get(
+                    f"{config.telegram_api_base_url}/getUpdates",
+                    params={"offset": -100, "timeout": 0},
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    data = await resp.json()
+                if data.get("ok") and data.get("result"):
+                    updates = data["result"]
+                    if updates:
+                        # offset следующего update'а = max(update_id) + 1
+                        next_offset = max(u["update_id"] for u in updates) + 1
+                        async with sess.get(
+                            f"{config.telegram_api_base_url}/getUpdates",
+                            params={"offset": next_offset, "timeout": 0},
+                            timeout=aiohttp.ClientTimeout(total=5),
+                        ) as resp:
+                            await resp.read()  # подтверждаем offset
+                        logger.info(
+                            "Очищено %d pending update'ов (offset=%d)",
+                            len(updates), next_offset,
+                        )
+        except Exception as e:
+            logger.warning("Не удалось очистить pending updates: %s", e)
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new", new_dialog))

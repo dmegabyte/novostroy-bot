@@ -28,31 +28,15 @@ logging.basicConfig(
 )
 logger = logging.getLogger("tg-proxy")
 
-# ── Методы Telegram API, КОТОРЫЕ НЕ ПРИНИМАЮТ поле "text" ──
+def prepare_body_for_method(method: str, body_bytes: bytes) -> bytes:
+    """
+    Подготавливает тело запроса для Cloudflare Worker.
 
-NO_TEXT_METHODS: set[str] = {
-    "getUpdates", "getMe", "getChat", "getChatAdministrators",
-    "getChatMember", "getChatMembersCount", "deleteWebhook",
-    "getWebhookInfo", "close", "logOut", "getFile",
-    "getUserProfilePhotos", "getChatMenuButton",
-    "getMyDefaultAdministratorRights", "getMyName",
-    "getMyDescription", "getMyShortDescription",
-    "getBusinessConnection",
-}
-
-TEXT_METHODS: set[str] = {
-    "sendMessage", "editMessageText", "editMessageCaption",
-    "sendPhoto", "sendDocument", "sendVideo", "sendAudio",
-    "sendVoice", "sendSticker", "sendAnimation",
-    "answerInlineQuery", "answerCallbackQuery",
-    "setMyDescription", "setMyShortDescription", "setMyName",
-}
-
-
-def clean_body_for_method(method: str, body_bytes: bytes) -> bytes:
-    """Убирает поле text для методов, где оно невалидно."""
+    Worker ТРЕБУЕТ поле 'text' в КАЖДОМ запросе.
+    Telegram игнорирует лишние поля для методов, которые их не принимают.
+    """
     if not body_bytes:
-        return b'{}'
+        body_bytes = b'{}'
 
     try:
         data = json.loads(body_bytes)
@@ -62,14 +46,8 @@ def clean_body_for_method(method: str, body_bytes: bytes) -> bytes:
     if not isinstance(data, dict):
         return body_bytes
 
-    method_name = method.lstrip("/").split("/")[0]
-
-    if method_name in NO_TEXT_METHODS:
-        data.pop("text", None)
-    elif method_name not in TEXT_METHODS:
-        # Для неизвестных методов — оставляем text, если есть
-        # (лучше лишний text, чем 400 Bad Request)
-        pass
+    # ВСЕГДА добавляем text (worker требует)
+    data["text"] = "x"
 
     return json.dumps(data).encode()
 
@@ -101,13 +79,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         token = self.server.bot_token  # type: ignore
         target = f"{relay_url}/bot{token}/{method}"
 
-        # Очищаем body
-        cleaned = clean_body_for_method(method, body)
-
-        # Если тело пустое после чистки — добавляем заглушку
-        # Worker требует поле "text" с непустым значением
-        if len(cleaned) <= 2:  # b'{}' или пусто
-            cleaned = json.dumps({"text": "x"}).encode()
+        # Подготавливаем body для Worker (добавляем text)
+        cleaned = prepare_body_for_method(method, body)
 
         req = Request(
             target,

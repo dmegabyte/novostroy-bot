@@ -178,6 +178,7 @@ class Session:
     config: Any  # Config
     cache: dict | None = None
     refine_history: list[str] = field(default_factory=list)
+    answer_history: list[str] = field(default_factory=list)
 
     async def search(self, query: str) -> str | None:
         """Поиск через n8n WF1 → Overmind gateway-agent с MCP novostroym.
@@ -298,7 +299,15 @@ class Session:
         context_parts = [f"Исходные данные:\n{data[:3000]}"]
         if self.refine_history:
             history = "; ".join(self.refine_history[-5:])
-            context_parts.append(f"Уточнения: {history}")
+            context_parts.append(f"Уточнения клиента (по порядку): {history}")
+        # Передаём последние ответы бота — чтобы не повторяться
+        if self.answer_history:
+            prev_answers = "\n".join(
+                f"- {a[:300]}" for a in self.answer_history[-2:]
+            )
+            context_parts.append(
+                f"Мои предыдущие ответы (НЕ повторяй, задай ДРУГОЙ вопрос или подтолкни к действию):\n{prev_answers}"
+            )
         context_parts.append(f"Новый запрос: {query}")
 
         payload = {
@@ -366,15 +375,21 @@ class Session:
                 "query": query,
             }
             self.refine_history = []
+            self.answer_history = []
 
         answer_text = await self.answer(query, self.cache["data"])
         if not answer_text:
             return "Извините, не смогла сформировать ответ."
 
         self.refine_history.append(query)
+        self.answer_history.append(answer_text)
+        # Держим последние 3 ответа в истории
+        if len(self.answer_history) > 3:
+            self.answer_history = self.answer_history[-3:]
         return answer_text
 
     def reset(self) -> None:
         """Сбросить сессию."""
         self.cache = None
         self.refine_history.clear()
+        self.answer_history.clear()

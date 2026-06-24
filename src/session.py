@@ -335,8 +335,30 @@ class Session:
 
         if needs_search:
             data = await self.search(query)
-            if not data:
-                return "Не нашлось, извините."
+
+            # Логируем что вернул поиск
+            logger.info("Search result (first 500): %s", (data or "")[:500])
+
+            if not data or len(data.strip()) < 20:
+                # Поиск вернул пустоту или мусор — не кормим модель,
+                # сразу redirect на оператора
+                logger.warning("Search empty/bogus: %r", data)
+                return (
+                    "В предоставленных данных этой информации нет. "
+                    "Нажмите кнопку «Поделиться контактом», "
+                    "и наш оператор свяжется с Вами."
+                )
+
+            # Проверка: данные должны содержать ЖК с ценами
+            has_zhk = "ЖК" in data or "жк" in data.lower()
+            has_price = "млн" in data or "тыс" in data or "₽" in data
+            if not has_zhk or not has_price:
+                logger.warning("Search data has no ЖК/prices: %r", data[:300])
+                return (
+                    "В предоставленных данных этой информации нет. "
+                    "Нажмите кнопку «Поделиться контактом», "
+                    "и наш оператор свяжется с Вами."
+                )
 
             self.cache = {
                 "data": data,

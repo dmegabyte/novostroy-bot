@@ -21,6 +21,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 from .config import Config
 from .session import Session
@@ -110,7 +111,16 @@ def main() -> None:
         print("Проверьте .env файл или переменные окружения.")
         return
 
-    app = Application.builder().token(config.telegram_bot_token).build()
+    request = HTTPXRequest(
+        connection_pool_size=1,
+    )
+    app = (
+        Application.builder()
+        .token(config.telegram_bot_token)
+        .base_url(config.telegram_api_base_url)
+        .request(request)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("new", new_dialog))

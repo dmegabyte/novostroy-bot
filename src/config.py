@@ -53,8 +53,8 @@ class Config:
 
     # Параметры
     search_temperature: float = 0.0
-    answer_temperature: float = 0.3
-    max_tokens_search: int = 600
+    answer_temperature: float = 0.0
+    max_tokens_search: int = 800
     max_tokens_answer: int = 600
     gateway_timeout: int = 60
     openrouter_timeout: int = 30

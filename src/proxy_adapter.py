@@ -105,8 +105,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
         cleaned = clean_body_for_method(method, body)
 
         # Если тело пустое после чистки — добавляем заглушку
+        # Worker требует поле "text" с непустым значением
         if len(cleaned) <= 2:  # b'{}' или пусто
-            cleaned = json.dumps({"text": " "}).encode()
+            cleaned = json.dumps({"text": "x"}).encode()
 
         req = Request(
             target,

@@ -1,0 +1,136 @@
+providers:
+  - id: openrouter:google/gemini-2.5-flash-lite
+    config:
+      apiBaseUrl: https://openrouter.ai/api/v1
+      apiKey: "your_openrouter_key"
+      temperature: 0.0
+      max_tokens: 600
+
+defaultTest:
+  options:
+    runSerially: true
+
+prompts:
+  - id: answer-current
+    raw: |
+      {{system_prompt}}
+
+      ---
+
+      Исходные данные:
+      {{data}}
+
+      Новый запрос: {{query}}
+
+tests:
+  # 1. Двушка + диапазон 48-58 м²
+  - description: "T1: двушка, диапазон 48-58 м²"
+    vars:
+      system_prompt: |
+        Ты — Ирина, консультант по недвижимости. Живой человек, профессионал.
+        Используй ТОЛЬКО факты из «Исходные данные». Не выдумывай.
+        Тон: тёплый, на Вы, 3-5 предложений. Без воды.
+        Называй ЖК в кавычках.
+      data: |
+        ЖК «Новые Котельники»: от 9,8 млн руб., 48-58 м².
+        ЖК «Оранж Парк»: от 12,5 млн руб., 50-65 м².
+        ЖК «Кузьминский лес»: от 11,2 млн руб., 45-55 м².
+      query: "двушка в котельниках"
+    assert:
+      - type: contains
+        value: "Котельники"
+      - type: not-contains
+        value: "Скандинавия"
+      - type: not-contains
+        value: "Бунинские луга"
+      - type: not-contains
+        value: "9.6 млн"
+      - type: not-contains
+        value: "42 м²"
+
+  # 2. Уточнение по конкретному ЖК
+  - description: "T2: уточнение про конкретный ЖК"
+    vars:
+      system_prompt: |
+        Ты — Ирина, консультант. Только факты из данных. Не выдумывай.
+      data: |
+        ЖК «Символ»: от 14 млн руб., 38-95 м², рядом с метро.
+      query: "что в символе есть?"
+    assert:
+      - type: contains
+        value: "Символ"
+      - type: contains
+        value: "14 млн"
+      - type: not-contains
+        value: "однушка"
+      - type: not-contains
+        value: "студия"
+
+  # 3. Студии в данных, а клиент хочет двушку
+  - description: "T3: только студии, клиент хочет двушку"
+    vars:
+      system_prompt: |
+        Ты — Ирина, консультант.
+        Только факты из данных. Не выдумывай.
+        Тон: тёплый, на Вы, 3-5 предложений.
+      data: |
+        ЖК «Студия Парк»: от 4,2 млн руб., 22-28 м².
+        ЖК «Компакт»: от 4,8 млн руб., 24-30 м².
+      query: "двушка до 6 млн"
+    assert:
+      - type: icontains-any
+        value: ["не нашлось", "нет двушек", "только студии", "двушк нет", "не предлагает", "к сожалению"]
+      - type: not-contains
+        value: "двушка от 4"
+      - type: not-contains
+        value: "50 м²"
+
+  # 4. Уточнение цены — двушка за 9.8 млн
+  - description: "T4: двушка за 9.8 млн"
+    vars:
+      system_prompt: |
+        Ты — Ирина. Только факты из данных.
+      data: |
+        ЖК «Новые Котельники»: от 9,8 млн руб., 48-58 м².
+        ЖК «Оранж Парк»: от 12,5 млн руб., 50-65 м².
+        ЖК «Кузьминский лес»: от 11,2 млн руб., 45-55 м².
+      query: "двушка за 9.8 млн есть?"
+    assert:
+      - type: contains
+        value: "Котельники"
+      - type: not-contains
+        value: "9.6"
+      - type: not-contains
+        value: "9.7"
+      - type: not-contains
+        value: "Скандинавия"
+      - type: not-contains
+        value: "Бунинские луга"
+      - type: not-contains
+        value: "42 м²"
+
+  # 5. "что за двушки?"
+  - description: "T5: что за двушки?"
+    vars:
+      system_prompt: |
+        Ты — Ирина, консультант по недвижимости. Живой человек.
+        Используй ТОЛЬКО факты из «Исходные данные». Не выдумывай.
+        Тон: тёплый, на Вы, 3-5 предложений.
+        Называй ЖК в кавычках.
+      data: |
+        ЖК «Новые Котельники»: от 9,8 млн руб., 48-58 м².
+        ЖК «Оранж Парк»: от 12,5 млн руб., 50-65 м².
+      query: "и что за двушки?"
+    assert:
+      - type: contains
+        value: "Новые Котельники"
+      - type: contains
+        value: "Оранж Парк"
+      - type: not-contains
+        value: "Скандинавия"
+      - type: not-contains
+        value: "Бунинские луга"
+      - type: not-contains
+        value: "9.6"
+      - type: not-contains
+        value: "42 м²"

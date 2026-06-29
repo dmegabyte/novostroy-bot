@@ -75,9 +75,13 @@ _load_dotenv_if_present()
 from chat_tester_bot import (  # noqa: E402
     OvermindClient,
     _contract_buttons_to_rows,
+    _build_known_option_prompt,
+    _format_option_response,
     _format_operator_handoff_for_option,
+    _markup_from_chat_buttons,
     _parse_budget_callback_value,
     _pick_quick_actions,
+    _phone_captured_farewell,
     _reset_dialog_state_preserve_settings,
     _resolve_dialog_intent,
     _safe_user_error_message,
@@ -640,7 +644,8 @@ def _ux_check_response(response_text: str, search_text: str) -> list[dict]:
     )
 
     sensitive_fact_markers = {
-        "metro": ["метро", "м."],
+        # Не используем короткое "м.": оно даёт ложные срабатывания на площади/сокращения.
+        "metro": ["метро"],
         "area": ["м²", "кв. м", "квадрат"],
         "developer": ["застройщик", "девелопер"],
         "school_infra": ["школ", "садик", "детск", "парк", "паркинг"],
@@ -828,11 +833,11 @@ async def _main(suite: str, json_mode: bool, chat_max_tokens: int) -> int:
 
     # H021: unit-тесты для _pick_quick_actions — прямой вызов (без Overmind).
     # Гарантирует что кнопки бюджета опираются на min(price_min), а не на хардкод.
-    if suite in ("all", "h021", "h023", "h024", "h026", "h028"):
+    if suite in ("all", "h021", "h023", "h024", "h026", "h028", "h029"):
         if not json_mode:
-            print("  (H021/H023/H024/H026/H028 unit-тесты — без Overmind)…")
+            print("  (H021/H023/H024/H026/H028/H029 unit-тесты — без Overmind)…")
         for r in _run_h021_unit_tests():
-            if suite in ("h021", "h023", "h024", "h026", "h028") and r.suite != suite:
+            if suite in ("h021", "h023", "h024", "h026", "h028", "h029") and r.suite != suite:
                 continue
             results.append(r)
             if not json_mode:
@@ -930,7 +935,7 @@ def _run_h021_unit_tests() -> list[Result]:
         duration_ms=int((time.time() - started) * 1000),
     ))
 
-    # Тест 2: G-first-step с min(price_min)=3.5 млн → кнопки [5, 7, 8] + "без лимита"
+    # Тест 2: G-first-step больше не отдаёт простыню кнопок — только формат квартиры.
     state_g = {
         "params": {},
         "last_options": [
@@ -939,20 +944,19 @@ def _run_h021_unit_tests() -> list[Result]:
         "asked_questions": [],
     }
     rows_g = _pick_quick_actions(state_g, "G-first-step")
-    budget_callbacks_g = [
+    callbacks_g = [
         btn["callback_data"]
         for row in rows_g
         for btn in row
-        if btn.get("callback_data", "").startswith("budget:")
     ]
-    expected_g = ["budget:5m", "budget:7m", "budget:8m", "budget:none"]
-    pass_g = budget_callbacks_g == expected_g
+    expected_g = ["rooms:s", "rooms:1", "rooms:2", "rooms:3"]
+    pass_g = callbacks_g == expected_g
     results.append(Result(
         suite="h021",
-        scenario="budget_buttons_g_first_step_with_options",
+        scenario="g_first_step_buttons_are_short_format_choice",
         passed=pass_g,
-        error="" if pass_g else f"кнопки {budget_callbacks_g} != ожидаемых {expected_g}",
-        response_text=f"callbacks={budget_callbacks_g}",
+        error="" if pass_g else f"кнопки {callbacks_g} != ожидаемых {expected_g}",
+        response_text=f"callbacks={callbacks_g}",
         duration_ms=int((time.time() - started) * 1000),
     ))
 
@@ -1093,6 +1097,22 @@ def _run_h021_unit_tests() -> list[Result]:
         duration_ms=int((time.time() - started) * 1000),
     ))
 
+    memory_options = [
+        {"idx": 1, "name": "ЖК «Первый»", "price": "5 млн", "price_min": 5_000_000, "finishing": "без отделки"},
+        {"idx": 2, "name": "ЖК «Второй»", "price": "7 млн", "price_min": 7_000_000, "finishing": "есть отделка"},
+    ]
+    state_finish = {"last_options": memory_options, "selected_option": None}
+    intent_finish = _resolve_dialog_intent("с отделкой", state_finish)
+    pass_finish = intent_finish.get("intent") == "filter_finish" and intent_finish.get("options", [{}])[0].get("name") == "ЖК «Второй»"
+    results.append(Result(
+        suite="h028",
+        scenario="finish_refinement_uses_memory_not_new_search",
+        passed=pass_finish,
+        error="" if pass_finish else f"intent_finish={intent_finish}",
+        response_text=f"intent_finish={intent_finish}",
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
     handoff = _format_operator_handoff_for_option(opt).lower()
     pass_handoff = "оператор" in handoff and "mcp" not in handoff and "json" not in handoff and "хотите оставить номер" in handoff
     results.append(Result(
@@ -1101,6 +1121,134 @@ def _run_h021_unit_tests() -> list[Result]:
         passed=pass_handoff,
         error="" if pass_handoff else f"bad handoff text: {handoff}",
         response_text=handoff,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    # H029/H030/H031: продающая карточка, weak recovery и лимит fallback-кнопок.
+    rich_opt = {
+        "idx": 1,
+        "name": "Жилой квартал «Новые Котельники»",
+        "location": "Котельники",
+        "price": "от 5.75 млн",
+        "price_min": 5_750_000,
+        "area": "от 26.8 м²",
+        "ready": "сдан (2025)",
+    }
+    card = _format_option_response(rich_opt)
+    card_low = card.lower()
+    dry_markers = ["локация:", "цена:", "отделка:", "готовность/срок:"]
+    pass_card = (
+        not any(m in card_low for m in dry_markers)
+        and "хотите посмотреть этот вариант подробнее" in card_low
+        and "сравнить с похожими" in card_low
+        and "по нему вижу" in card_low
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="selected_option_is_sales_card_not_field_dump",
+        passed=pass_card,
+        error="" if pass_card else f"card is not sales-like enough: {card}",
+        response_text=card,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    weak_state = {"params": {"rooms": "s", "max_price": 5_000_000, "district": "msk"}, "asked_questions": []}
+    weak_rows = _pick_quick_actions(weak_state, "C-narrow-empty")
+    weak_callbacks = [btn["callback_data"] for row in weak_rows for btn in row]
+    pass_weak = (
+        "action:operator" in weak_callbacks
+        and weak_callbacks[-1] == "action:operator"
+        and any(cb in weak_callbacks for cb in ("budget:none", "district:mo", "action:show_near"))
+        and len(weak_callbacks) > 1
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="weak_result_operator_is_not_only_next_step",
+        passed=pass_weak,
+        error="" if pass_weak else f"weak callbacks bad: {weak_callbacks}",
+        response_text=f"callbacks={weak_callbacks}",
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    fallback_rows = _markup_from_chat_buttons({"_buttons": []}, {"params": {}, "asked_questions": []}, "Что ищем?", "G-first-step")
+    fallback_count = sum(len(row) for row in fallback_rows)
+    pass_limit = 0 < fallback_count <= 4
+    results.append(Result(
+        suite="h029",
+        scenario="fallback_buttons_are_limited_to_four",
+        passed=pass_limit,
+        error="" if pass_limit else f"fallback rows exceed limit: {fallback_rows}",
+        response_text=f"rows={fallback_rows}",
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    farewell = _phone_captured_farewell().lower()
+    pass_farewell = (
+        "спасибо" in farewell
+        and "номер" in farewell
+        and "оператор" in farewell
+        and "свяжется" in farewell
+        and "актуаль" in farewell
+        and "mcp" not in farewell
+        and "json" not in farewell
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="phone_captured_has_human_farewell",
+        passed=pass_farewell,
+        error="" if pass_farewell else f"bad farewell: {_phone_captured_farewell()}",
+        response_text=_phone_captured_farewell(),
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    details_prompt = _build_known_option_prompt(rich_opt, "Клиент нажал «Да, подробнее»")
+    details_prompt_low = details_prompt.lower()
+    pass_details_prompt = (
+        "новый живой ответ" in details_prompt_low
+        and "новый широкий поиск не нужен" in details_prompt_low
+        and "оставить контакт" in details_prompt_low
+        and "актуальные квартиры" in details_prompt_low
+        and "не придумывай" in details_prompt_low
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="details_prompt_uses_llm_context_and_soft_contact",
+        passed=pass_details_prompt,
+        error="" if pass_details_prompt else f"bad details prompt: {details_prompt}",
+        response_text=details_prompt,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    selected_rows = _markup_from_chat_buttons(
+        {"_buttons": []},
+        {"params": {}, "asked_questions": [], "last_options": [rich_opt], "selected_option": rich_opt},
+        card,
+        "selected-option",
+    )
+    # Фолбэк для выбранного варианта не должен давать хаотичные кнопки; live-ветка использует _selected_option_rows.
+    contract_rows = _contract_buttons_to_rows(
+        [
+            {"text": "Да, подробнее", "action": "details", "value": {"option_index": 1}},
+            {"text": "Сравнить с похожими", "action": "show_near", "value": {}},
+            {"text": "📞 Оператор", "action": "operator", "value": {}},
+        ],
+        {"last_options": [rich_opt], "selected_option": rich_opt, "last_result": {"found": True}},
+        "Хотите оставить контакт, чтобы оператор проверил актуальные квартиры?",
+    )
+    contract_callbacks = [btn["callback_data"] for row in contract_rows for btn in row]
+    pass_contract = (
+        "action:details:1" in contract_callbacks
+        and "action:show_near" in contract_callbacks
+        and "action:operator" in contract_callbacks
+        and len(contract_callbacks) <= 4
+        and selected_rows is not None
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="details_buttons_allow_operator_after_selected_context",
+        passed=pass_contract,
+        error="" if pass_contract else f"bad contract callbacks: {contract_callbacks}; fallback={selected_rows}",
+        response_text=f"callbacks={contract_callbacks}",
         duration_ms=int((time.time() - started) * 1000),
     ))
 
@@ -1231,7 +1379,7 @@ def _run_required_deploy_gate() -> Result:
     return _run_deploy_smoke_test()
 def main() -> None:
     p = argparse.ArgumentParser(description="nmbot test agent — codex + H016 + golden")
-    p.add_argument("--suite", default="all", choices=["all", "codex", "h016", "golden", "h021", "h023", "h024", "h026", "h028", "deploy", "dialog"])
+    p.add_argument("--suite", default="all", choices=["all", "codex", "h016", "golden", "h021", "h023", "h024", "h026", "h028", "h029", "deploy", "dialog"])
     p.add_argument("--json", action="store_true", help="JSON-режим для CI")
     p.add_argument("--chat-max-tokens", type=int, default=10000)
     args = p.parse_args()

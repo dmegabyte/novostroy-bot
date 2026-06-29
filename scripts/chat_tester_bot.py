@@ -162,6 +162,36 @@ class OvermindClient:
         )
         return response_text, {**new_params, **chat_params}, search_meta, chat_meta
 
+    async def explain_known_option(
+        self,
+        option: dict[str, Any],
+        client_request: str,
+        chat_model: str = CHAT_MODEL,
+        timeout: int = 600,
+    ) -> tuple[str, dict]:
+        """Chat-only presenter: новый живой ответ по уже загруженной карточке, без нового MCP-поиска."""
+        session = await self.ensure_session()
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OVERMIND_TOKEN}",
+        }
+        chat_query = _build_known_option_prompt(option, client_request)
+        chat_request_data = {
+            "query": chat_query,
+            "service": "openrouter",
+            "model": chat_model,
+            "system_prompt": CHAT_SYSTEM_PROMPT,
+            "parameters": {
+                "temperature": 0.3,
+                "max_tokens": 4000,
+            },
+            "external_api_key": OPENROUTER_API_KEY,
+        }
+        response_text, _params, _retries, chat_meta = await self._chat_with_retry(
+            chat_request_data, headers, timeout, uid=0
+        )
+        return response_text, chat_meta
+
     async def _run_gateway_request(self, request_data: dict, headers: dict, timeout: int) -> tuple[str, dict]:
         """Возвращает (response_text, metadata). При ошибке возвращает (error_text, {})."""
         session = await self.ensure_session()
@@ -501,6 +531,15 @@ def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
             sorted_opts = with_finish or sorted_opts
         return {"intent": "sort_price_asc", "options": sorted_opts[:3]}
 
+    if "ремонт" in t or "отдел" in t:
+        with_finish = [
+            o for o in options
+            if "отдел" in str(o.get("finishing", "")).lower()
+            and "без отдел" not in str(o.get("finishing", "")).lower()
+        ]
+        if with_finish:
+            return {"intent": "filter_finish", "options": with_finish[:3]}
+
     return {"intent": "new_search"}
 
 
@@ -536,40 +575,127 @@ def _operator_funnel_sentence() -> str:
     return "Хотите, предложу оставить номер для связи?"
 
 
-def _format_option_response(option: dict[str, Any]) -> str:
-    parts = [f"{option.get('idx')}-й вариант — {option.get('name')}".replace("1-й", "Первый").replace("2-й", "Второй").replace("3-й", "Третий")]
-    if option.get("location"):
-        parts.append(f"локация: {option['location']}")
-    if option.get("price"):
-        parts.append(f"цена {option['price']}")
+def _phone_captured_farewell() -> str:
+    return (
+        "Спасибо, номер получила. Передам оператору ваш запрос вместе с тем, что уже обсудили, "
+        "чтобы не начинать всё заново. Он свяжется с вами и проверит актуальные варианты, наличие и условия."
+    )
+
+
+def _build_known_option_prompt(option: dict[str, Any], client_request: str) -> str:
+    """Контекст для LLM: раскрыть выбранный ЖК по уже известным данным, без нового поиска и выдумок."""
+    safe_option = {
+        key: value
+        for key, value in option.items()
+        if key in {"idx", "name", "location", "price", "area", "finishing", "ready", "developer", "metro", "why_close"}
+        and not _looks_missing(value)
+    }
+    return (
+        "Клиент уже выбрал вариант из предыдущего списка. Новый широкий поиск не нужен.\n"
+        f"Запрос/действие клиента: {client_request}\n\n"
+        "Доступные подтверждённые данные по выбранному варианту:\n"
+        f"{json.dumps(safe_option, ensure_ascii=False, indent=2)}\n\n"
+        "Сформулируй новый живой ответ Ирины по этим данным: расскажи максимум полезного, что подтверждено в карточке. "
+        "Не повторяй дословно предыдущую карточку. Не придумывай метро, инфраструктуру, скидки, ипотеку, наличие, бронь, этажи или корпуса. "
+        "Так как клиент уже выбрал конкретный ЖК и попросил подробнее, в конце мягко предложи оставить контакт, чтобы оператор проверил актуальные квартиры, наличие и условия. "
+        "Если клиент просит актуальное наличие, бронь, конкретную квартиру, этаж, корпус, ипотеку, скидку или показ — не подтверждай это сама, а объясни, что это проверит оператор. "
+        "Верни валидный JSON с полями response, params, buttons. Кнопки должны отвечать последнему вопросу."
+    )
+
+
+def _selected_option_rows(idx: int) -> list[list[dict]]:
+    return [[
+        {"text": "Да, подробнее", "callback_data": f"action:details:{idx}"},
+        {"text": "Сравнить с похожими", "callback_data": "action:show_near"},
+    ]]
+
+
+def _option_ordinal(idx: Any) -> str:
+    labels = {1: "Первый", 2: "Второй", 3: "Третий"}
+    try:
+        num = int(idx)
+    except (TypeError, ValueError):
+        num = 0
+    return labels.get(num, f"{num}-й" if num else "Этот")
+
+
+def _looks_missing(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return (
+        not text
+        or text in {"нет", "не указан", "не указано", "информация отсутствует", "none", "null"}
+        or "отсутств" in text
+    )
+
+
+def _option_benefit(option: dict[str, Any]) -> str:
+    """Короткая польза для клиента только из известных полей, без выдумок."""
+    ready = str(option.get("ready") or "").lower()
+    finishing = str(option.get("finishing") or "").lower()
+    price_min = option.get("price_min")
+    if "сдан" in ready or "готов" in ready:
+        return "его стоит смотреть, если хочется готовый корпус без ожидания"
+    if "отдел" in finishing and "без отдел" not in finishing:
+        return "его удобно рассматривать, если не хочется начинать с чернового ремонта"
+    if price_min:
+        return "он может быть хорошей отправной точкой по бюджету среди найденных вариантов"
     if option.get("area"):
-        parts.append(f"площадь {option['area']}")
-    if option.get("finishing"):
-        parts.append(f"отделка: {option['finishing']}")
-    if option.get("ready"):
-        parts.append(f"готовность/срок: {option['ready']}")
-    if option.get("metro"):
-        parts.append(f"метро: {option['metro']}")
-    if option.get("developer") and str(option.get("developer")).lower() not in ("не указан", "нет", ""):
-        parts.append(f"застройщик: {option['developer']}")
+        return "по нему уже есть понятный ориентир по площади"
+    return "по нему можно быстро проверить актуальные квартиры"
+
+
+def _format_option_response(option: dict[str, Any]) -> str:
+    name = option.get("name") or "этот вариант"
+    intro = f"{_option_ordinal(option.get('idx'))} вариант — {name}."
+    facts: list[str] = []
+    if not _looks_missing(option.get("location")):
+        facts.append(f"локация — {option['location']}")
+    if not _looks_missing(option.get("price")):
+        facts.append(f"цена — {option['price']}")
+    if not _looks_missing(option.get("area")):
+        facts.append(f"площадь — {option['area']}")
+    if not _looks_missing(option.get("finishing")):
+        facts.append(f"отделка — {option['finishing']}")
+    if not _looks_missing(option.get("ready")):
+        facts.append(f"готовность — {option['ready']}")
+
+    if facts:
+        fact_text = "По нему вижу: " + "; ".join(facts[:3]) + "."
     else:
-        if not option.get("finishing"):
-            parts.append("по отделке в данных нет подтверждения")
-    if option.get("why_close"):
-        parts.append(f"нюанс: {option['why_close']}")
-    return ". ".join(parts) + ". Хотите посмотреть этот вариант подробнее или сравнить с другим ЖК?"
+        fact_text = "По нему есть базовая карточка в базе, но без лишних подтверждённых деталей."
+    benefit = _option_benefit(option)
+    nuance = f" Важно: {option['why_close']}." if not _looks_missing(option.get("why_close")) else ""
+    return f"{intro} {fact_text} Поэтому {benefit}.{nuance} Хотите посмотреть этот вариант подробнее или сравнить с похожими?"
 
 
 def _format_cheaper_response(options: list[dict[str, Any]]) -> str:
     if not options:
         return f"По последнему списку не вижу вариантов дешевле. {_operator_funnel_sentence()}"
+    return _format_options_summary_response(
+        options,
+        "Из более доступных по последнему списку вижу",
+        "Какой из этих вариантов рассмотреть подробнее?",
+    )
+
+
+def _format_options_summary_response(options: list[dict[str, Any]], lead: str, question: str) -> str:
     chunks = []
     for o in options[:3]:
         price = f", {o['price']}" if o.get("price") else ""
         loc = f" ({o['location']})" if o.get("location") else ""
         finish = f", отделка: {o['finishing']}" if o.get("finishing") else ""
         chunks.append(f"{o['name']}{loc}{price}{finish}")
-    return "Из более дешёвых по последнему списку: " + "; ".join(chunks) + f". {_operator_funnel_sentence()}"
+    return f"{lead}: " + "; ".join(chunks) + f". {question}"
+
+
+def _option_select_rows(options: list[dict[str, Any]], max_count: int = 3) -> list[list[dict]]:
+    row = []
+    for option in options[:max_count]:
+        idx = option.get("idx") or len(row) + 1
+        name = str(option.get("name") or f"Вариант {idx}").replace("Жилой квартал", "ЖК")
+        short = re.sub(r"^(ЖК|МФК)\s+", "", name).strip(" «»")
+        row.append({"text": f"{idx}. {short[:22]}", "callback_data": f"option:{idx}"})
+    return [row] if row else []
 
 
 # H021: кнопки бюджета генерируются из реальных цен в last_options.
@@ -691,11 +817,33 @@ def _contract_buttons_to_rows(buttons: Any, state: dict, response_text: str) -> 
     return [row] if row else []
 
 
+def _limit_button_rows(rows: list[list[dict]], max_buttons: int = 4) -> list[list[dict]]:
+    """PRODUCT_TZ: максимум 4 кнопки в одном ответе, даже для fallback."""
+    limited: list[list[dict]] = []
+    count = 0
+    for row in rows:
+        clean_row: list[dict] = []
+        for button in row:
+            if count >= max_buttons:
+                break
+            text = str(button.get("text") or "").strip()
+            callback = str(button.get("callback_data") or "").strip()
+            if not text or not callback or _BUTTON_TECH_WORDS.search(text):
+                continue
+            clean_row.append({"text": text, "callback_data": callback})
+            count += 1
+        if clean_row:
+            limited.append(clean_row)
+        if count >= max_buttons:
+            break
+    return limited
+
+
 def _markup_from_chat_buttons(chat_meta: dict, state: dict, response_text: str, scenario: str) -> list[list[dict]]:
     rows = _contract_buttons_to_rows(chat_meta.get("_buttons"), state, response_text)
     if rows:
-        return rows
-    return _pick_quick_actions(state, scenario)
+        return _limit_button_rows(rows)
+    return _limit_button_rows(_pick_quick_actions(state, scenario))
 
 
 def _pick_quick_actions(state: dict, scenario: str) -> list[list[dict]]:
@@ -712,17 +860,8 @@ def _pick_quick_actions(state: dict, scenario: str) -> list[list[dict]]:
             {"text": "Студия", "callback_data": "rooms:s"},
             {"text": "1-к", "callback_data": "rooms:1"},
             {"text": "2-к", "callback_data": "rooms:2"},
-            {"text": "3-к", "callback_data": "rooms:3"},
+            {"text": "Больше 2 комнат", "callback_data": "rooms:3"},
         ])
-        budget_row = _budget_buttons_from_options(state, max_count=3) + [
-            {"text": "без лимита", "callback_data": "budget:none"},
-        ]
-        rows.append(budget_row)
-        if "renovation" not in asked:
-            rows.append([
-                {"text": "С отделкой", "callback_data": "renovation:yes"},
-                {"text": "Без отделки", "callback_data": "renovation:no"},
-            ])
     elif scenario == "A-found-some":
         # нашли 1-2 ЖК, спросить бюджет/комнаты если не указаны
         if "max_price" not in p and "budget" not in asked:
@@ -736,10 +875,9 @@ def _pick_quick_actions(state: dict, scenario: str) -> list[list[dict]]:
     elif scenario == "C-narrow-empty":
         # узкий пустой: показать near или оператора
         rows.append([
-            {"text": "🔎 Показать близкие", "callback_data": "action:show_near"},
-            {"text": "📍 Расширить район", "callback_data": "action:expand_district"},
-        ])
-        rows.append([
+            {"text": "Расширить бюджет", "callback_data": "budget:none"},
+            {"text": "Смотреть МО", "callback_data": "district:mo"},
+            {"text": "Похожие варианты", "callback_data": "action:show_near"},
             {"text": "📞 Оператор", "callback_data": "action:operator"},
         ])
     elif scenario == "D-wide-empty":
@@ -908,7 +1046,7 @@ def main() -> None:
                 "• «двушка с отделкой в Солнцево до 15 млн»\n"
                 "• «квартира в Котельниках»\n"
                 "• «студия в пределах МКАД»\n\n"
-                "Если ничего не найду — предложу оператора."
+                "Напишите, что ищете, а я покажу подходящие варианты и помогу выбрать следующий шаг."
             ),
             parse_mode="HTML",
         )
@@ -965,7 +1103,36 @@ def main() -> None:
         uid = update.effective_user.id if update.effective_user else 0
         state = user_state.setdefault(uid, _default_state())
 
-        if query.data.startswith("action:details:") or query.data.startswith("option:"):
+        if query.data.startswith("action:details:"):
+            raw_idx = query.data.rsplit(":", 1)[-1]
+            try:
+                idx = int(raw_idx)
+            except ValueError:
+                return
+            option = _option_by_index(state, idx)
+            if not option:
+                return
+            state["selected_option"] = option
+            await query.answer("Раскрываю подробнее")
+            try:
+                response, chat_meta = await client.explain_known_option(
+                    option=option,
+                    client_request="Клиент нажал кнопку «Да, подробнее» по выбранному ЖК.",
+                    chat_model=state["chat_model"],
+                )
+                kb_rows = _markup_from_chat_buttons(chat_meta, state, response, "selected-option-details")
+                markup = {"inline_keyboard": kb_rows} if kb_rows else None
+            except Exception:
+                LOGGER.exception("details callback chat failed")
+                response = _format_option_response(option)
+                markup = {"inline_keyboard": _selected_option_rows(idx)}
+            _log_event({"kind": "callback", "uid": uid, "callback": query.data,
+                        "dialog_intent": "details_known_option", "selected_option": option.get("name"),
+                        "response_text": response})
+            await query.edit_message_text(_to_html(response), parse_mode="HTML", reply_markup=markup)
+            return
+
+        if query.data.startswith("option:"):
             raw_idx = query.data.rsplit(":", 1)[-1]
             try:
                 idx = int(raw_idx)
@@ -978,10 +1145,7 @@ def main() -> None:
             response = _format_option_response(option)
             _log_event({"kind": "callback", "uid": uid, "callback": query.data,
                         "dialog_intent": "select_option", "selected_option": option.get("name")})
-            kb = {"inline_keyboard": [[
-                {"text": "Похожие варианты", "callback_data": "action:show_near"},
-                {"text": "📞 Оператор", "callback_data": "action:operator"},
-            ]]}
+            kb = {"inline_keyboard": _selected_option_rows(idx)}
             await query.edit_message_text(_to_html(response), parse_mode="HTML", reply_markup=kb)
             return
 
@@ -1053,7 +1217,7 @@ def main() -> None:
             phone = "".join(ch for ch in text if ch.isdigit() or ch == "+")
             if 10 <= len(phone) <= 15:
                 _log_event({"kind": "phone_captured", "uid": uid, "phone": phone})
-                await update.message.reply_text("Номер принят, передам оператору в ближайшее время.")
+                await update.message.reply_text(_phone_captured_farewell())
                 return
             else:
                 await update.message.reply_text("Похоже, это не номер. Напишите телефон в формате +7XXXXXXXXXX или просто продиктуйте цифрами.")
@@ -1088,7 +1252,8 @@ def main() -> None:
                 "error": None,
                 "cost": {},
             })
-            kb = {"inline_keyboard": [[{"text": "📞 Связаться с оператором", "callback_data": "action:operator"}]]}
+            idx = int(dialog_intent["option"].get("idx") or 1)
+            kb = {"inline_keyboard": _selected_option_rows(idx)}
             await update.message.reply_text(_to_html(response), reply_markup=kb, parse_mode="HTML")
             return
 
@@ -1115,7 +1280,8 @@ def main() -> None:
             return
 
         if dialog_intent.get("intent") == "sort_price_asc":
-            response = _format_cheaper_response(dialog_intent.get("options", []))
+            options = dialog_intent.get("options", [])
+            response = _format_cheaper_response(options)
             _log_event({
                 "kind": "user_message",
                 "uid": uid,
@@ -1134,7 +1300,38 @@ def main() -> None:
                 "error": None,
                 "cost": {},
             })
-            kb = {"inline_keyboard": [[{"text": "📞 Связаться с оператором", "callback_data": "action:operator"}]]}
+            kb_rows = _option_select_rows(options)
+            kb = {"inline_keyboard": kb_rows} if kb_rows else None
+            await update.message.reply_text(_to_html(response), reply_markup=kb, parse_mode="HTML")
+            return
+
+        if dialog_intent.get("intent") == "filter_finish":
+            options = dialog_intent.get("options", [])
+            response = _format_options_summary_response(
+                options,
+                "С отделкой по последнему списку вижу",
+                "Какой вариант раскрыть подробнее?",
+            )
+            _log_event({
+                "kind": "user_message",
+                "uid": uid,
+                "user_text": text,
+                "dialog_intent": "filter_finish",
+                "search_model": state["search_model"],
+                "chat_model": state["chat_model"],
+                "mcp": state["mcp"],
+                "params_before": params_before,
+                "params_after": dict(state.get("params", {})),
+                "params_delta": {},
+                "response_text": response,
+                "response_len": len(response),
+                "duration_ms": 0,
+                "is_error": False,
+                "error": None,
+                "cost": {},
+            })
+            kb_rows = _option_select_rows(options)
+            kb = {"inline_keyboard": kb_rows} if kb_rows else None
             await update.message.reply_text(_to_html(response), reply_markup=kb, parse_mode="HTML")
             return
 

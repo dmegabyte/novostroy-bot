@@ -1,153 +1,168 @@
-# Novostroy AI Bot
+# nmbot — Novostroy AI Бот
 
-Telegram-бот для подбора квартир в новостройках Москвы и области.
+Проект Telegram-бота для подбора квартир в новостройках Москвы и области (Ирина).
+
+## Единственная актуальная версия
+
+- **Прод**: `novostroy-bot.service` на VPS
+- **Путь прод-кода**: `/home/neiro/novostroy-bot`
+- **Запуск**: `python3 -m src.bot`
+- **Локальная копия**: `/home/ser/ai/projects/nmbot` — только для разработки, тестов и документации
+- **Путаться не надо**: в этой доке не используется отдельный бот `tsbot`; ориентир один — `novostroy-bot`
 
 ## Архитектура
 
-Двухмодельный пайплайн:
-
 ```
-Пользователь → [Telegram Bot]
-                    ↓
-         [Session — кэш истории]
-                    ↓
-         [Gateway Agent] → Gemini 3.1 Lite (T=0) + MCP novostroym
-                    ↓                   
-         [OpenRouter] → Gemini 2.5 Flash Lite (T=0.8) → ответ
-                    ↓
-              Пользователь
+┌─────────────────────────────────────────────────────────────────┐
+│                    ПРОДАКШН (VPS)                              │
+│  systemd: novostroy-bot.service                                │
+│  репо:  github.com/dmegabyte/novostroy-bot.git                 │
+│  путь:  /home/neiro/novostroy-bot                              │
+│  пуск:  python3 -m src.bot                                     │
+│  хост:  neiro@193.107.155.236:1905                             │
+│                                                                │
+│  Пользователь → [Telegram Bot] → [Cloudflare Worker Proxy]     │
+│                                → [Gateway Agent] → MCP search   │
+│                                → [OpenRouter] → Gemini ответ    │
+└─────────────────────────────────────────────────────────────────┘
+                              ↑
+                              | (тесты и промпты отсюда)
+┌─────────────────────────────────────────────────────────────────┐
+│                ЛОКАЛЬНЫЙ СТЕНД                                  │
+│  путь:  /home/ser/ai/projects/nmbot                            │
+│  бот:   scripts/chat_tester_bot.py  (рабочая копия)            │
+│  тесты: scripts/nmbot_test_agent.py                            │
+│  промпты: prompts/chat_v1.txt, prompts/search_v1.txt           │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-- **Поиск:** Gemini 3.1 Flash Lite через gateway-agent с MCP novostroym
-- **Ответ:** Gemini 2.5 Flash Lite напрямую через OpenRouter API (без gateway)
-- **Сессия:** кэш данных MCP — уточнения обрабатываются без нового поиска
-- **Telegram:** через Cloudflare Worker `telegram-bot-proxy` (прозрачный прокси Bot API)
+**Двухмодельный пайплайн (общий для dev и prod):**
+1. `google/gemini-3.1-flash-lite-preview` — поиск через MCP `novostroym`, сбор фактов и ссылок.
+2. `google/gemini-2.5-flash` — финальное общение с клиентом по найденным фактам, без прямого MCP.
 
-## Быстрый старт
+## Диагностика (единая точка входа)
 
 ```bash
-# 1. Скопировать .env и заполнить
-cp .env.example .env
-# → TELEGRAM_BOT_TOKEN, OVERMIND_TOKEN, OPENROUTER_API_KEY
+# Полный статус (VPS + local + лог)
+bash scripts/nmbot_diag.sh
 
-# 2. Установить зависимости
-pip install -r requirements.txt
+# Только статус продакшн-бота (PID, uptime, memory, коммит)
+bash scripts/nmbot_diag.sh --quick
 
-# 3. Запустить
-python -m src.bot
+# Только последние строки лога
+bash scripts/nmbot_diag.sh --logs
 ```
 
-## Переменные окружения
-
-| Переменная | Описание |
-|-----------|----------|
-| `TELEGRAM_BOT_TOKEN` | Токен Telegram бота |
-| `TELEGRAM_API_BASE_URL` | URL Cloudflare Worker для прокси Bot API |
-| `OVERMIND_URL` | URL gateway-agent (по умолч. https://overmind.aiaxel.ru) |
-| `OVERMIND_TOKEN` | Токен gateway-agent |
-| `OPENROUTER_API_KEY` | Ключ OpenRouter API |
-
-## Cloudflare Worker
-
-Прокси для Telegram Bot API:
-- Worker: `telegram-bot-proxy.d-megabyte.workers.dev`
-- Код: `tools/telegram-proxy-worker.js` (в `cc-daemons` репо)
-- Деплой: `cd worker && wrangler deploy`
-
-## Команды бота
-
-- `/start` — начало работы
-- `/new` — сбросить историю диалога
-- `/help` — справка
-
-## Примеры диалогов
-
-```
-👤 Подберите однушку до 11 млн в Москве
-💬 Нашла несколько вариантов однокомнатных квартир в Москве до 11 млн.
-
-👤 А что по планировкам?
-💬 (из кэша — без нового поиска)
-
-👤 А есть варианты дешевле 9 млн?  
-💬 (новый поиск — изменился бюджет)
-```
-
-## Деплой на сервере
-
+**Эквивалент вручную** (если нужно без скрипта):
 ```bash
-# Клонировать
-git clone https://github.com/dmegabyte/novostroy-bot.git
-cd novostroy-bot
-
-# Установить зависимости (system-wide)
-pip install -r requirements.txt --break-system-packages
-
-# Создать .env с реальными токенами
-cp .env.example .env && nano .env
-chmod 600 .env
-
-# Создать user-level systemd сервис
-mkdir -p ~/.config/systemd/user
-cat > ~/.config/systemd/user/novostroy-bot.service << 'EOF'
-[Unit]
-Description=Novostroy AI Telegram Bot
-After=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=/home/neiro/novostroy-bot
-ExecStart=/usr/bin/python3 -m src.bot
-Restart=always
-RestartSec=10
-Environment=PYTHONUNBUFFERED=1
-EnvironmentFile=/home/neiro/novostroy-bot/.env
-StandardOutput=append:/home/neiro/novostroy-bot/logs/bot.log
-StandardError=append:/home/neiro/novostroy-bot/logs/bot.log
-
-[Install]
-WantedBy=default.target
-EOF
-
-# Запустить
-systemctl --user daemon-reload
-systemctl --user enable --now novostroy-bot
-
-# Проверить
-systemctl --user status novostroy-bot
-tail -f logs/bot.log
+ssh -p 1905 neiro@193.107.155.236 "systemctl --user status novostroy-bot.service --no-pager"
+ssh -p 1905 neiro@193.107.155.236 "tail -20 /home/neiro/novostroy-bot/logs/bot.log"
 ```
 
-## Структура
+## Структура проекта
 
 ```
-novostroy-bot/
-├── .env.example
+nmbot/
+├── .env                  # токены (заполнить из vault)
 ├── .gitignore
+├── AGENTS.md             # контекст для opencode/ЧАТИ
 ├── README.md
 ├── requirements.txt
-├── run.sh
-└── src/
-    ├── __init__.py
-    ├── bot.py         # Telegram бот (3 команды + диалог)
-    ├── config.py      # Конфиг из переменных окружения
-    └── session.py     # Сессия с кэшем и триггерами
+├── scripts/
+│   ├── chat_cli.py            # CLI-клиент (двухшаговый запрос)
+│   ├── chat_tester_bot.py     # Telegram бот (dev-экземпляр)
+│   ├── nmbot_diag.sh          # ★ единая диагностика (единственная точка входа)
+│   ├── nmbot_deploy_smoke.py  # проверка live-процесса dev-бота
+│   ├── nmbot_test_agent.py    # CLI-агент автотестирования
+│   ├── nmbot_quality.py       # оперативная проверка логов
+│   ├── or_cost.py             # OpenRouter cost tracking
+│   ├── or_monitor.py          # мониторинг + auto-block
+│   └── run_bot.sh             # запуск dev-бота
+├── logs/                     # логи dev-бота
+│   ├── bot.log
+│   ├── bot.err
+│   ├── dialogs-*.jsonl
+│   └── hypotheses.jsonl
+├── prompts/
+│   ├── chat_v1.txt            # Chat-промпт (Ирина)
+│   └── search_v1.txt          # Search-промпт (MCP)
+└── docs/
+    ├── CHANGELOG.md
+    ├── CODEX.md
+    ├── EXPERIMENTS.md
+    └── GOLDEN_DIALOGS.md
 ```
 
-## Prompt eval (promptfoo)
+## Прод (VPS) vs Dev (локально)
 
-Качество answer-промпта проверяется через [promptfoo](https://promptfoo.dev/).
+| | Production (VPS) | Dev (локально) |
+|---|---|---|
+| **Где** | `neiro@193.107.155.236:1905` | `/home/ser/ai/projects/nmbot` |
+| **Запуск** | `systemctl --user start novostroy-bot` | `bash scripts/run_bot.sh` |
+| **Код** | `python3 -m src.bot` (модуль) | `python scripts/chat_tester_bot.py` |
+| **Репозиторий** | `github.com/dmegabyte/novostroy-bot.git` | локальная рабочая копия |
+| **Telegram** | через Cloudflare Worker proxy | напрямую Bot API |
+| **Лог** | `/home/neiro/novostroy-bot/logs/bot.log` | `logs/bot.log` |
+| **Диагностика** | `bash scripts/nmbot_diag.sh` | `bash scripts/nmbot_diag.sh` |
+
+## Быстрый старт (dev)
 
 ```bash
-cd promptfoo/
-promptfoo eval
+cd /home/ser/ai/projects/nmbot
+
+# 1. Виртуальное окружение
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 2. Токены (из vault secret/projects/NOVOSTROY_AI)
+cat > .env << 'EOF'
+TELEGRAM_BOT_TOKEN=...     # из .env.bot основного проекта
+OVERMIND_URL=https://overmind.aiaxel.ru
+OVERMIND_TOKEN=...         # NOVOSTROY_M_TOKEN из vault
+OPENROUTER_API_KEY=...     # openrouter_token из vault
+EOF
+
+# 3. CLI-тест
+source .venv/bin/activate
+export $(grep -v '^#' .env | xargs)
+python scripts/chat_cli.py "Найди однушку до 8 млн в Москве"
+
+# 4. Telegram бот (dev)
+python scripts/chat_tester_bot.py
 ```
 
-5 тестов проверяют:
-1. **T1** — двушка + диапазон: выдаёт только ЖК из данных, не выдумывает
-2. **T2** — уточнение по конкретному ЖК: использует данные без галлюцинаций
-3. **T3** — студии в данных, клиент хочет двушку: честно говорит что двушек нет
-4. **T4** — уточнение цены: цитирует данные, не выдумывает цены
-5. **T5** — "что за двушки?": перечисляет ЖК из данных
+## Токены (vault)
 
-**Результат:** 5/5 passed. Промпт не галлюцинирует.
+Все токены лежат в `secret/projects/NOVOSTROY_AI`:
+
+| Поле .env | Ключ vault | Описание |
+|-----------|-----------|----------|
+| `OVERMIND_TOKEN` | `NOVOSTROY_M_TOKEN` | Bearer-токен для Overmind API (gateway-agent) |
+| `OPENROUTER_API_KEY` | `openrouter_token` | Ключ OpenRouter |
+| `TELEGRAM_BOT_TOKEN` | — | Из `.env.bot` основного проекта |
+
+## Команды TG-бота (dev)
+
+- `/start` — приветствие с настройками
+- `/model` — выбрать модель поиска (inline-клавиатура)
+- `/mcp` — включить/выключить MCP novostroym
+- `/reset` — сброс настроек
+- `/status` — текущие настройки
+
+## Тестирование
+
+```bash
+# CLI-агент автотестов (12+ сценариев)
+python3 scripts/nmbot_test_agent.py
+python3 scripts/nmbot_test_agent.py --suite deploy   # + live deploy-smoke
+python3 scripts/nmbot_test_agent.py --suite dialog   # контрольный диалог
+python3 scripts/nmbot_test_agent.py --json           # JSON для CI
+```
+
+## Документация
+
+- [`docs/CHANGELOG.md`](docs/CHANGELOG.md) — история изменений (H001–H025)
+- [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md) — реестр гипотез и метрики
+- [`docs/CODEX.md`](docs/CODEX.md) — свод правил диалога (codex)
+- [`docs/GOLDEN_DIALOGS.md`](docs/GOLDEN_DIALOGS.md) — эталонные few-shot примеры

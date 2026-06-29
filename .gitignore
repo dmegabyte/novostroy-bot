@@ -6,3 +6,6 @@ venv/
 *.log
 promptfoo/.env
 promptfoo/eval-results.json
+logs/
+worker/.wrangler/
+*.bak-*

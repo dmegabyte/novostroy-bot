@@ -243,7 +243,7 @@ class OvermindClient:
         return {}
 
     @staticmethod
-    def _parse_chat_json(response_text: str) -> tuple[str, dict]:
+    def _parse_chat_json(response_text: str) -> tuple[str, dict, list[dict]]:
         try:
             s = response_text.find("{")
             e = response_text.rfind("}") + 1
@@ -251,10 +251,15 @@ class OvermindClient:
                 data = json.loads(response_text[s:e])
                 resp_text = data.get("response", response_text)
                 params = data.get("params", {})
-                return resp_text, params if isinstance(params, dict) else {}
+                buttons = data.get("buttons", [])
+                return (
+                    resp_text,
+                    params if isinstance(params, dict) else {},
+                    buttons if isinstance(buttons, list) else [],
+                )
         except json.JSONDecodeError:
             pass
-        return response_text, {}
+        return response_text, {}, []
 
     async def _chat_with_retry(
         self,
@@ -269,26 +274,30 @@ class OvermindClient:
         # H007-A: strip markdown-обёртку ДО парсинга JSON, чтобы _parse_chat_json
         # работал с чистым текстом (без ```json ... ```).
         chat_result = _strip_markdown(chat_result)
-        response_text, chat_params = self._parse_chat_json(chat_result)
+        response_text, chat_params, chat_buttons = self._parse_chat_json(chat_result)
+        chat_meta = {**chat_meta, "_buttons": chat_buttons}
         retries = 0
-        # Признак невалидного JSON: не нашли params, и это не служебная ошибка
-        is_invalid = not chat_params and not response_text.startswith("❌") and not response_text.startswith("⏱️")
+        # Признак невалидного JSON: не нашли JSON response/buttons/params, и это не служебная ошибка.
+        parsed_ok = response_text != chat_result or bool(chat_params) or bool(chat_buttons)
+        is_invalid = not parsed_ok and not response_text.startswith("❌") and not response_text.startswith("⏱️")
         while is_invalid and retries < 2:
             retries += 1
             chat_result, chat_meta = await self._run_gateway_request(chat_request_data, headers, timeout)
             chat_result = _strip_markdown(chat_result)  # H007-A
-            response_text_new, chat_params = self._parse_chat_json(chat_result)
+            response_text_new, chat_params, chat_buttons = self._parse_chat_json(chat_result)
+            chat_meta = {**chat_meta, "_buttons": chat_buttons}
+            parsed_ok = response_text_new != chat_result or bool(chat_params) or bool(chat_buttons)
             _log_event({
                 "kind": "user_message_retry",
                 "uid": uid,
                 "stage": "chat",
                 "attempt": retries,
-                "recovered": bool(chat_params),
+                "recovered": parsed_ok,
                 "raw_len": len(chat_result),
             })
-            if chat_params:
+            if parsed_ok:
                 response_text = response_text_new
-            is_invalid = not chat_params and not response_text.startswith("❌") and not response_text.startswith("⏱️")
+            is_invalid = not parsed_ok and not response_text.startswith("❌") and not response_text.startswith("⏱️")
         return response_text, chat_params, retries, chat_meta
 
 
@@ -351,6 +360,8 @@ def _default_state() -> dict[str, Any]:
         "params": {},
         "last_result": {},  # {found, exact_count, near_count, scenario}
         "last_options": [],  # H016: последние варианты для «второй»/«подешевле»
+        "selected_option": None,  # PRODUCT_TZ: выбранный ЖК/вариант для follow-up и operator_context
+        "turns_after_results": 0,
         "last_search_response": {},  # H026: полный структурированный MCP/search JSON для follow-up без нового MCP
         "asked_questions": [],  # список заданных уточнений (чтобы не повторять)
     }
@@ -445,6 +456,16 @@ def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
     """H016: быстрый resolver follow-up сообщений, которые ссылаются на прошлый список."""
     t = text.lower().replace("ё", "е")
     options = state.get("last_options") or []
+    selected = state.get("selected_option")
+
+    # PRODUCT_TZ: «да», «подробнее», «интересно» после выбора варианта — это подтверждение
+    # интереса к выбранному ЖК, а не повод заново спрашивать бюджет/комнаты.
+    if selected and re.search(r"(^|\s)(да|подробнее|интересно|подходит|расскажи|хочу|ок|ага)(\s|$)", t):
+        return {"intent": "select_option", "option": selected}
+
+    if selected and _needs_operator_for_selected_option(t):
+        return {"intent": "operator_for_selected", "option": selected}
+
     if not options:
         return {"intent": "new_search"}
 
@@ -481,6 +502,34 @@ def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
         return {"intent": "sort_price_asc", "options": sorted_opts[:3]}
 
     return {"intent": "new_search"}
+
+
+def _needs_operator_for_selected_option(text_l: str) -> bool:
+    """После выбора ЖК живые данные не придумываем: наличие/бронь/показ/ипотека — к оператору."""
+    triggers = (
+        "налич", "актуаль", "брон", "заброни", "показ", "посмотреть",
+        "ипотек", "ставк", "скид", "торг", "этаж", "корпус", "квартир",
+        "планиров", "платеж", "платёж", "первонач", "звон", "оператор", "менеджер",
+    )
+    return any(trig in text_l for trig in triggers)
+
+
+def _format_operator_handoff_for_option(option: dict[str, Any]) -> str:
+    name = option.get("name") or "этот вариант"
+    known: list[str] = []
+    if option.get("price"):
+        known.append(f"по цене вижу {option['price']}")
+    if option.get("area"):
+        known.append(f"по площади вижу {option['area']}")
+    if option.get("finishing"):
+        known.append(f"по отделке: {option['finishing']}")
+    if option.get("ready"):
+        known.append(f"по готовности: {option['ready']}")
+    known_text = "; ".join(known) if known else "базовые данные по нему есть"
+    return (
+        f"По {name} {known_text}. Актуальное наличие, бронь, этаж, корпус, скидки и условия лучше проверить у оператора — "
+        "там уже нужна живая проверка. Хотите оставить номер для связи?"
+    )
 
 
 def _operator_funnel_sentence() -> str:
@@ -550,6 +599,103 @@ def _budget_buttons_from_options(state: dict, max_count: int = 3) -> list[dict]:
         {"text": f"до {t} млн", "callback_data": f"budget:{t}m"}
         for t in candidates
     ]
+
+
+_BUTTON_TECH_WORDS = re.compile(
+    r"\b(?:mcp|json|facts|near|search_response|last_options|prompt|model|traceback|openrouter|overmind)\b",
+    re.IGNORECASE,
+)
+
+
+def _option_by_index(state: dict, idx: int) -> dict[str, Any] | None:
+    options = state.get("last_options") or []
+    if 1 <= idx <= len(options):
+        return options[idx - 1]
+    return None
+
+
+def _operator_button_allowed(state: dict, response_text: str) -> bool:
+    """Операторская кнопка не должна появляться в первом полезном ответе с вариантами."""
+    result = state.get("last_result") or {}
+    has_results = bool(result.get("found"))
+    has_selected = bool(state.get("selected_option"))
+    response_l = response_text.lower()
+    response_offers_operator = "оператор" in response_l or "номер" in response_l
+    return (not has_results) or has_selected or response_offers_operator
+
+
+def _callback_from_contract_button(button: dict[str, Any], state: dict, response_text: str) -> str | None:
+    action = str(button.get("action") or "").strip()
+    value = button.get("value") if isinstance(button.get("value"), dict) else {}
+
+    if action in ("details", "select_option"):
+        idx_raw = value.get("option_index") or button.get("option_index")
+        if idx_raw is None and len(state.get("last_options") or []) == 1:
+            idx_raw = 1
+        try:
+            idx = int(idx_raw)
+        except (TypeError, ValueError):
+            return None
+        if not _option_by_index(state, idx):
+            return None
+        return f"action:details:{idx}" if action == "details" else f"option:{idx}"
+
+    if action == "filter":
+        field = str(value.get("field") or "").strip()
+        raw = value.get("value")
+        if field == "rooms":
+            if raw in (0, "0", "s", "studio", "студия"):
+                return "rooms:s"
+            if str(raw) in ("1", "2", "3"):
+                return f"rooms:{raw}"
+            if str(raw).lower() in ("3plus", "4", "больше 2 комнат"):
+                return "rooms:3"
+        if field in ("max_price", "budget"):
+            if raw is None:
+                return "budget:none"
+            try:
+                mln = round(float(raw) / 1_000_000)
+            except (TypeError, ValueError):
+                return None
+            return f"budget:{mln}m" if mln > 0 else None
+        if field in ("finish", "has_renovation", "renovation"):
+            return "renovation:yes" if bool(raw) else "renovation:no"
+        if field == "district" and raw:
+            district = str(raw).strip()
+            if district in ("msk", "newmsk", "mo", "any"):
+                return f"district:{district}"
+
+    if action == "show_near":
+        return "action:show_near"
+    if action == "expand_search":
+        return "action:expand_district"
+    if action == "operator" and _operator_button_allowed(state, response_text):
+        return "action:operator"
+    return None
+
+
+def _contract_buttons_to_rows(buttons: Any, state: dict, response_text: str) -> list[list[dict]]:
+    """PRODUCT_TZ §8: кнопки приходят из chat-фазы, но код валидирует контракт."""
+    if not isinstance(buttons, list):
+        return []
+    row: list[dict] = []
+    for button in buttons[:4]:
+        if not isinstance(button, dict):
+            continue
+        text = str(button.get("text") or "").strip()
+        if not text or len(text) > 32 or _BUTTON_TECH_WORDS.search(text):
+            continue
+        callback = _callback_from_contract_button(button, state, response_text)
+        if callback:
+            row.append({"text": text, "callback_data": callback})
+    return [row] if row else []
+
+
+def _markup_from_chat_buttons(chat_meta: dict, state: dict, response_text: str, scenario: str) -> list[list[dict]]:
+    rows = _contract_buttons_to_rows(chat_meta.get("_buttons"), state, response_text)
+    if rows:
+        return rows
+    return _pick_quick_actions(state, scenario)
 
 
 def _pick_quick_actions(state: dict, scenario: str) -> list[list[dict]]:
@@ -639,6 +785,22 @@ def _infer_scenario(state: dict, search_meta: dict) -> str:
     if 0 < cnt <= 2:
         return "A-found-some"
     return ""
+
+
+def _refresh_search_state(state: dict, search_meta: dict) -> None:
+    """Обновляет память по последнему поиску: raw search_response, options, counters."""
+    search_text = search_meta.get("_response_text") or ""
+    search_resp = _json_from_text(search_text)
+    state["last_search_response"] = search_resp if isinstance(search_resp, dict) else {}
+    state["last_options"] = _extract_options(search_text)
+    facts = search_resp.get("facts", []) if isinstance(search_resp, dict) else []
+    near = search_resp.get("near", []) if isinstance(search_resp, dict) else []
+    state["last_result"] = {
+        "found": bool(facts) or bool(near),
+        "exact_count": len(facts) if isinstance(facts, list) else 0,
+        "near_count": len(near) if isinstance(near, list) else 0,
+        "geo_mismatch": bool(search_resp.get("missing") and not facts and not near and state.get("params", {}).get("district") in (None,)),
+    }
 
 
 # ── Experiment Loop logging ─────────────────────────────────
@@ -803,6 +965,26 @@ def main() -> None:
         uid = update.effective_user.id if update.effective_user else 0
         state = user_state.setdefault(uid, _default_state())
 
+        if query.data.startswith("action:details:") or query.data.startswith("option:"):
+            raw_idx = query.data.rsplit(":", 1)[-1]
+            try:
+                idx = int(raw_idx)
+            except ValueError:
+                return
+            option = _option_by_index(state, idx)
+            if not option:
+                return
+            state["selected_option"] = option
+            response = _format_option_response(option)
+            _log_event({"kind": "callback", "uid": uid, "callback": query.data,
+                        "dialog_intent": "select_option", "selected_option": option.get("name")})
+            kb = {"inline_keyboard": [[
+                {"text": "Похожие варианты", "callback_data": "action:show_near"},
+                {"text": "📞 Оператор", "callback_data": "action:operator"},
+            ]]}
+            await query.edit_message_text(_to_html(response), parse_mode="HTML", reply_markup=kb)
+            return
+
         # H013: кнопки выбора параметров — обновляем state и повторяем ask
         if query.data.startswith("budget:"):
             val = query.data[7:]
@@ -849,8 +1031,9 @@ def main() -> None:
             if new_params:
                 state["params"] = {**state.get("params", {}), **new_params}
             response = _strip_markdown(response)
+            _refresh_search_state(state, search_meta)
             scenario = _infer_scenario(state, search_meta)
-            kb_rows = _pick_quick_actions(state, scenario)
+            kb_rows = _markup_from_chat_buttons(chat_meta, state, response, scenario)
             markup = {"inline_keyboard": kb_rows} if kb_rows else None
             await indicator.edit_text(_to_html(response), parse_mode="HTML", reply_markup=markup)
         except Exception as e:
@@ -885,6 +1068,7 @@ def main() -> None:
         # без нового общего поиска через Overmind.
         dialog_intent = _resolve_dialog_intent(text, state)
         if dialog_intent.get("intent") == "select_option":
+            state["selected_option"] = dialog_intent["option"]
             response = _format_option_response(dialog_intent["option"])
             _log_event({
                 "kind": "user_message",
@@ -903,6 +1087,28 @@ def main() -> None:
                 "is_error": False,
                 "error": None,
                 "cost": {},
+            })
+            kb = {"inline_keyboard": [[{"text": "📞 Связаться с оператором", "callback_data": "action:operator"}]]}
+            await update.message.reply_text(_to_html(response), reply_markup=kb, parse_mode="HTML")
+            return
+
+        if dialog_intent.get("intent") == "operator_for_selected":
+            option = dialog_intent["option"]
+            state["selected_option"] = option
+            state["operator_context"] = {
+                "selected_option": option.get("name"),
+                "known_facts": option,
+                "client_question": text,
+                "reason": "selected_option_live_details",
+            }
+            response = _format_operator_handoff_for_option(option)
+            _log_event({
+                "kind": "operator_handoff_ready",
+                "uid": uid,
+                "user_text": text,
+                "selected_option": option.get("name"),
+                "reason": "selected_option_live_details",
+                "response_text": response,
             })
             kb = {"inline_keyboard": [[{"text": "📞 Связаться с оператором", "callback_data": "action:operator"}]]}
             await update.message.reply_text(_to_html(response), reply_markup=kb, parse_mode="HTML")
@@ -1000,21 +1206,12 @@ def main() -> None:
             },
         })
 
-        # H013: заполним last_result + scenario, чтобы _pick_quick_actions выбрал кнопки
-        search_text = search_meta.get("_response_text") or ""
-        search_resp = _json_from_text(search_text)
-        state["last_search_response"] = search_resp if isinstance(search_resp, dict) else {}
-        state["last_options"] = _extract_options(search_text)
-        facts = search_resp.get("facts", []) if isinstance(search_resp, dict) else []
-        near = search_resp.get("near", []) if isinstance(search_resp, dict) else []
-        state["last_result"] = {
-            "found": bool(facts) or bool(near),
-            "exact_count": len(facts) if isinstance(facts, list) else 0,
-            "near_count": len(near) if isinstance(near, list) else 0,
-            "geo_mismatch": bool(search_resp.get("missing") and not facts and not near and state.get("params", {}).get("district") in (None,)),
-        }
+        # H013/H028: заполним last_result/options, затем берём buttons[] из chat-контракта.
+        _refresh_search_state(state, search_meta)
+        if state.get("last_result", {}).get("found"):
+            state["turns_after_results"] = int(state.get("turns_after_results") or 0) + 1
         scenario = _infer_scenario(state, search_meta)
-        kb_rows = _pick_quick_actions(state, scenario)
+        kb_rows = _markup_from_chat_buttons(chat_meta, state, response, scenario)
         markup: dict | None = {"inline_keyboard": kb_rows} if kb_rows else None
 
         # H009: операторская кнопка при полностью пустом ответе или явном запросе оператора

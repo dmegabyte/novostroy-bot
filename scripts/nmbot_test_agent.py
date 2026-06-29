@@ -74,6 +74,8 @@ _load_dotenv_if_present()
 
 from chat_tester_bot import (  # noqa: E402
     OvermindClient,
+    _contract_buttons_to_rows,
+    _format_operator_handoff_for_option,
     _parse_budget_callback_value,
     _pick_quick_actions,
     _reset_dialog_state_preserve_settings,
@@ -192,7 +194,7 @@ def _parse_search_response(search_text: str) -> dict:
 def _has_stale_5m_budget(text: str) -> bool:
     """Ловим именно старый бюджет 5 млн, но не цены вроде 15.49 млн."""
     low = _normalise_ru_text(text)
-    return bool(re.search(r"(?<!\d)5\s*(?:млн|миллион)", low))
+    return bool(re.search(r"(?<![\d.,])5\s*(?:млн|миллион)", low))
 
 
 def _system_observability_checks(
@@ -826,11 +828,11 @@ async def _main(suite: str, json_mode: bool, chat_max_tokens: int) -> int:
 
     # H021: unit-тесты для _pick_quick_actions — прямой вызов (без Overmind).
     # Гарантирует что кнопки бюджета опираются на min(price_min), а не на хардкод.
-    if suite in ("all", "h021", "h023", "h024", "h026"):
+    if suite in ("all", "h021", "h023", "h024", "h026", "h028"):
         if not json_mode:
-            print("  (H021/H023/H024/H026 unit-тесты — без Overmind)…")
+            print("  (H021/H023/H024/H026/H028 unit-тесты — без Overmind)…")
         for r in _run_h021_unit_tests():
-            if suite in ("h021", "h023", "h024", "h026") and r.suite != suite:
+            if suite in ("h021", "h023", "h024", "h026", "h028") and r.suite != suite:
                 continue
             results.append(r)
             if not json_mode:
@@ -1059,6 +1061,49 @@ def _run_h021_unit_tests() -> list[Result]:
         duration_ms=int((time.time() - started) * 1000),
     ))
 
+    # H028: PRODUCT_TZ buttons[] — кнопки должны отвечать вопросу и не тащить раннего оператора.
+    opt = {"idx": 1, "name": "ЖК «Новые Котельники»", "price": "5.75-6.98 млн", "price_min": 5_750_000}
+    state_buttons = {"last_options": [opt], "last_result": {"found": True}, "selected_option": None}
+    rows = _contract_buttons_to_rows([
+        {"text": "Да, подробнее", "action": "details", "value": {"option_index": 1}},
+        {"text": "MCP JSON", "action": "details", "value": {"option_index": 1}},
+        {"text": "📞 Оператор", "action": "operator"},
+    ], state_buttons, "Хотите узнать подробнее про этот ЖК?")
+    expected_rows = [[{"text": "Да, подробнее", "callback_data": "action:details:1"}]]
+    pass_buttons = rows == expected_rows
+    results.append(Result(
+        suite="h028",
+        scenario="contract_buttons_filter_tech_and_early_operator",
+        passed=pass_buttons,
+        error="" if pass_buttons else f"rows {rows} != {expected_rows}",
+        response_text=f"rows={rows}",
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    state_selected = {"selected_option": opt, "last_options": [opt]}
+    intent_yes = _resolve_dialog_intent("да", state_selected).get("intent")
+    intent_booking = _resolve_dialog_intent("можно забронировать?", state_selected).get("intent")
+    pass_memory = intent_yes == "select_option" and intent_booking == "operator_for_selected"
+    results.append(Result(
+        suite="h028",
+        scenario="selected_option_yes_and_booking_do_not_restart_questionnaire",
+        passed=pass_memory,
+        error="" if pass_memory else f"intent_yes={intent_yes}; intent_booking={intent_booking}",
+        response_text=f"intent_yes={intent_yes}; intent_booking={intent_booking}",
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    handoff = _format_operator_handoff_for_option(opt).lower()
+    pass_handoff = "оператор" in handoff and "mcp" not in handoff and "json" not in handoff and "хотите оставить номер" in handoff
+    results.append(Result(
+        suite="h028",
+        scenario="operator_handoff_is_human_and_no_technical_leak",
+        passed=pass_handoff,
+        error="" if pass_handoff else f"bad handoff text: {handoff}",
+        response_text=handoff,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
     return results
 
 
@@ -1186,7 +1231,7 @@ def _run_required_deploy_gate() -> Result:
     return _run_deploy_smoke_test()
 def main() -> None:
     p = argparse.ArgumentParser(description="nmbot test agent — codex + H016 + golden")
-    p.add_argument("--suite", default="all", choices=["all", "codex", "h016", "golden", "h021", "h023", "h024", "h026", "deploy", "dialog"])
+    p.add_argument("--suite", default="all", choices=["all", "codex", "h016", "golden", "h021", "h023", "h024", "h026", "h028", "deploy", "dialog"])
     p.add_argument("--json", action="store_true", help="JSON-режим для CI")
     p.add_argument("--chat-max-tokens", type=int, default=10000)
     args = p.parse_args()

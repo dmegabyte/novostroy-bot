@@ -24,6 +24,13 @@ def _required_env(name: str) -> str:
     return value
 
 
+def _overmind_token() -> str:
+    token = _env("OVERMIND_TOKEN") or _env("GATEWAY_POLL_TOKEN")
+    if not token:
+        raise RuntimeError("OVERMIND_TOKEN/GATEWAY_POLL_TOKEN is not set")
+    return token
+
+
 def _strip_markdown(text: str) -> str:
     t = (text or "").strip()
     if t.startswith("```"):
@@ -36,7 +43,7 @@ def _strip_markdown(text: str) -> str:
 
 
 async def _create_task(session: aiohttp.ClientSession, request_data: dict[str, Any], timeout: int) -> dict[str, Any]:
-    token = _required_env("OVERMIND_TOKEN")
+    token = _overmind_token()
     overmind_url = _env("OVERMIND_URL", "https://overmind.aiaxel.ru").rstrip("/")
     payload = {
         "agent_name": "gateway-agent",
@@ -54,7 +61,7 @@ async def _create_task(session: aiohttp.ClientSession, request_data: dict[str, A
 
 
 async def _poll_task(session: aiohttp.ClientSession, task_id: int, timeout: int) -> dict[str, Any]:
-    token = _required_env("OVERMIND_TOKEN")
+    token = _overmind_token()
     overmind_url = _env("OVERMIND_URL", "https://overmind.aiaxel.ru").rstrip("/")
     headers = {"Authorization": f"Bearer {token}"}
     start = time.monotonic()

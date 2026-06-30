@@ -65,6 +65,13 @@ def _required_env(name: str) -> str:
     return value
 
 
+def _overmind_token() -> str:
+    token = _env("OVERMIND_TOKEN") or _env("GATEWAY_POLL_TOKEN")
+    if not token:
+        raise RuntimeError("OVERMIND_TOKEN/GATEWAY_POLL_TOKEN is not set")
+    return token
+
+
 def _trim(value: Any, limit: int = 6000) -> str:
     if isinstance(value, str):
         text = value
@@ -132,7 +139,7 @@ async def classify_scene(
     }
 
     try:
-        token = _required_env("OVERMIND_TOKEN")
+        token = _overmind_token()
         overmind_url = _env("OVERMIND_URL", "https://overmind.aiaxel.ru").rstrip("/")
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
         task_payload = {

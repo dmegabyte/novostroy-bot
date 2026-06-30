@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-06-30 — Safe follow-up fallback и без «уточняется» 🧯
+
+### Live-бот не должен ломаться, если follow-up LLM недоступен
+- **Проблема:** на VPS у `novostroy-bot.service` был `GATEWAY_POLL_TOKEN`, но не `OVERMIND_TOKEN`. Из-за этого follow-up classifier падал на ответе `да` после вопроса “Хотите, передам оператору...?” и бот уходил в общий fallback “Уточните...” вместо operator handoff.
+- **Фикс:** `followup_intent_classifier.py`, `scene_classifier.py` и `text_style_tool.py` теперь умеют брать токен из `OVERMIND_TOKEN` или `GATEWAY_POLL_TOKEN`. В `chat_tester_bot.py` добавлен локальный safety-net для очевидных коротких ответов, если LLM-classifier всё равно недоступен.
+- **Копирайтинг:** клиенту больше не показываем `уточняется` как значение цены/отделки и усилили `chat_v1.txt`: не писать “в базе”, “активные объявления”, “уточняется”, “поиск выполнен”.
+- **Автотесты:** добавлены `ux_e2e/local_followup_fallback_handles_operator_offer_without_llm` и H029 `missing_fields_do_not_say_utochnyaetsya_to_client`.
+
+---
+
 ## 2026-06-30 — Expanded follow-up phrase matrix 🧪
 
 ### Проверены короткие фразы после выбранного ЖК

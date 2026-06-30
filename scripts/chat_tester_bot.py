@@ -553,6 +553,33 @@ def _clarification_from_followup(meta: dict[str, Any], state: dict[str, Any]) ->
     return "Уточните, пожалуйста, что сделать дальше: продолжить подбор или изменить условия?"
 
 
+def _local_followup_intent(text: str, state: dict[str, Any]) -> str:
+    """Safety-net для очевидных коротких ответов, если LLM-classifier недоступен.
+
+    Это не основной «мозг» диалога, а fail-open защита: live-бот не должен
+    ломаться на «да» после вопроса про оператора только из-за env/сети.
+    """
+    t = text.lower().replace("ё", "е").strip()
+    offer = str(state.get("last_offer_type") or "")
+    yes = bool(re.fullmatch(r"(да|ага|угу|ок|хорошо|давай|хочу)", t))
+    no = bool(re.fullmatch(r"(нет|неа|не надо|не нужно)", t))
+    if offer == "operator_for_selected":
+        if yes:
+            return "operator_for_selected"
+        if no:
+            return "reject_offer"
+        if re.search(r"(зачем|почему|для чего)", t):
+            return "explain_operator_reason"
+        if re.search(r"(продолж|подбор|дальше|еще|ещё|вариант)", t):
+            return "continue_selection"
+    if offer == "compare_selected":
+        if yes:
+            return "compare_selected"
+        if no:
+            return "reject_offer"
+    return ""
+
+
 def _operator_reason_response(state: dict[str, Any]) -> str:
     selected = state.get("selected_option") or {}
     name = selected.get("name") if isinstance(selected, dict) else "этот ЖК"
@@ -910,8 +937,9 @@ def _looks_missing(value: Any) -> bool:
     text = str(value or "").strip().lower()
     return (
         not text
-        or text in {"нет", "не указан", "не указано", "информация отсутствует", "none", "null"}
+        or text in {"нет", "не указан", "не указано", "информация отсутствует", "none", "null", "уточняется"}
         or "отсутств" in text
+        or "уточн" in text
     )
 
 
@@ -933,7 +961,7 @@ def _format_location_value(value: Any) -> str:
 
 def _format_price_value(value: Any, price_min: Any = None) -> str:
     text = str(value or "").strip()
-    if not text and not price_min:
+    if _looks_missing(text) and not price_min:
         return ""
     if text and not re.fullmatch(r"\d+(?:\.\d+)?", text.replace(" ", "")):
         return text
@@ -1101,9 +1129,9 @@ def _format_cheaper_response(options: list[dict[str, Any]]) -> str:
 def _format_options_summary_response(options: list[dict[str, Any]], lead: str, question: str) -> str:
     chunks = []
     for idx, o in enumerate(options[:3], start=1):
-        price = f", {o['price']}" if o.get("price") else ""
-        loc = f" ({o['location']})" if o.get("location") else ""
-        finish = f", отделка: {o['finishing']}" if o.get("finishing") else ""
+        price = f", {_format_price_value(o.get('price'), o.get('price_min'))}" if not _looks_missing(o.get("price")) else ""
+        loc = f" ({_format_location_value(o['location'])})" if not _looks_missing(o.get("location")) else ""
+        finish = f", отделка: {o['finishing']}" if not _looks_missing(o.get("finishing")) else ""
         chunks.append(f"{idx}. {o['name']}{loc}{price}{finish}")
     return _format_numbered_list_spacing(f"{lead}:\n" + "\n".join(chunks) + f"\n{question}")
 
@@ -1696,6 +1724,8 @@ def main() -> None:
                 "state": _followup_state_payload(state),
             })
             followup_intent = followup_meta.get("intent")
+            if followup_meta.get("fallback_used"):
+                followup_intent = _local_followup_intent(text, state) or followup_intent
             selected = state.get("selected_option")
             if followup_intent == "compare_selected" and selected:
                 selected_name = _compact_option_text(selected.get("name"))

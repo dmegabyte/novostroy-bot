@@ -87,6 +87,7 @@ from chat_tester_bot import (  # noqa: E402
     _continue_selection_response,
     _clarification_from_followup,
     _followup_state_payload,
+    _local_followup_intent,
     _markup_from_chat_buttons,
     _prepare_response_text,
     _parse_budget_callback_value,
@@ -1376,6 +1377,25 @@ def _run_h021_unit_tests() -> list[Result]:
         error=json.dumps({"expected": phrase_expectations, "actual": phrase_results}, ensure_ascii=False),
     )
 
+    local_fallback_results = {
+        phrase: _local_followup_intent(phrase, phrase_state)
+        for phrase in ["да", "нет", "зачем", "продолжить", "подбор"]
+    }
+    local_fallback_pass = local_fallback_results == {
+        "да": "operator_for_selected",
+        "нет": "reject_offer",
+        "зачем": "explain_operator_reason",
+        "продолжить": "continue_selection",
+        "подбор": "continue_selection",
+    }
+    add_result(
+        "ux_e2e",
+        "local_followup_fallback_handles_operator_offer_without_llm",
+        local_fallback_pass,
+        response_text=json.dumps(local_fallback_results, ensure_ascii=False),
+        error=json.dumps(local_fallback_results, ensure_ascii=False),
+    )
+
     raw_opt = {
         "idx": 3,
         "name": "ЖК «Сиреневый парк»",
@@ -1392,6 +1412,27 @@ def _run_h021_unit_tests() -> list[Result]:
         passed=pass_raw_format,
         error="" if pass_raw_format else f"raw fields leaked to client: {raw_card}",
         response_text=raw_card,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    missing_opt = {
+        "idx": 1,
+        "name": "Холланд парк",
+        "location": "Москва",
+        "price": "уточняется",
+        "finishing": "уточняется",
+        "ready": "2026",
+    }
+    missing_card = _format_option_response(missing_opt, purpose="investment")
+    missing_list = _format_options_summary_response([missing_opt], "Можно посмотреть", "Какой разобрать дальше?")
+    missing_low = (missing_card + "\n" + missing_list).lower()
+    pass_no_utochnyaetsya = "уточняется" not in missing_low and "по цене вижу ориентир уточняется" not in missing_low
+    results.append(Result(
+        suite="h029",
+        scenario="missing_fields_do_not_say_utochnyaetsya_to_client",
+        passed=pass_no_utochnyaetsya,
+        error="" if pass_no_utochnyaetsya else f"bad missing wording: {missing_card}\n---\n{missing_list}",
+        response_text=f"{missing_card}\n---\n{missing_list}",
         duration_ms=int((time.time() - started) * 1000),
     ))
 

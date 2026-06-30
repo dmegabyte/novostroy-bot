@@ -26,6 +26,8 @@ from typing import Any
 
 import aiohttp
 
+import text_style_tool
+
 # ── Конфигурация ─────────────────────────────────────────────
 
 OVERMIND_URL = os.getenv("OVERMIND_URL", "https://overmind.aiaxel.ru")
@@ -72,8 +74,44 @@ def _strip_markdown(text: str) -> str:
             t = t[:-3].rstrip()
     return t
 
+
+def _extract_response_text(text: str) -> str:
+    raw = _strip_markdown(text).strip()
+    try:
+        s = raw.find("{")
+        e = raw.rfind("}") + 1
+        if s >= 0 and e > s:
+            data = json.loads(raw[s:e])
+            if isinstance(data, dict) and isinstance(data.get("response"), str):
+                return data["response"]
+    except json.JSONDecodeError:
+        pass
+    return raw
+
+
+async def _maybe_style_text(session: aiohttp.ClientSession, text: str, *, context: str, intent: str, scene: str) -> str:
+    if not STYLE_TOOL_ENABLED or not text.strip():
+        return text
+    try:
+        styled, _meta = await text_style_tool.rewrite_text(
+            session,
+            text=text,
+            context=context,
+            intent=intent,
+            tone="live",
+            scene=scene,
+            model=STYLE_TOOL_MODEL,
+        )
+        styled = (styled or "").strip()
+        return styled or text
+    except Exception as e:
+        print(f"[WARN] text style tool failed: {e}", file=sys.stderr)
+        return text
+
 SEARCH_MODEL = "google/gemini-3.1-flash-lite-preview"
 CHAT_MODEL = "google/gemini-2.5-flash"
+STYLE_TOOL_ENABLED = os.getenv("NMBOT_TEXT_STYLE_TOOL", "1") != "0"
+STYLE_TOOL_MODEL = os.getenv("NMBOT_STYLE_MODEL", "google/gemini-3.1-flash-lite-preview")
 
 # Промпты читаются из prompts/*.txt (P002 — единый источник правды)
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
@@ -237,7 +275,14 @@ async def ask_two_stage(
         max_tokens=chat_max_tokens,
     )
     # H007-A: strip markdown-обёртку ДО парсинга/печати/логирования.
-    chat_response = _strip_markdown(chat_response)
+    chat_response = _extract_response_text(chat_response)
+    chat_response = await _maybe_style_text(
+        session,
+        chat_response,
+        context=query,
+        intent="chat_response",
+        scene="cli",
+    )
     # H004: retry на пустой/мусорный chat-ответ (≤2 повтора)
     retries = 0
     while retries < 2 and (not chat_response or "{" not in chat_response):

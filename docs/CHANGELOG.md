@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-06-30 — Response-model eval journal ✅
+
+### nmbot/Irina: baseline + Chinese + small Qwen eval tables ✅
+- **Что:** прогнал `scripts/nmbot_response_model_eval.py` на одной и той же базе из 10 кейсов и обновил `docs/RESPONSE_MODEL_EVAL.md` как единый журнал качества моделей без дублей.
+- **Baseline (5 моделей):** `google/gemini-2.5-flash` — `0.962` / `5.1 сек`; `google/gemini-3.1-flash-lite-preview` — `0.938` / `5.0 сек`; `anthropic/claude-3-haiku` — `0.900`; `openai/gpt-4o-mini` — `0.862`; `deepseek/deepseek-v4-flash` — `0.792` / `45.4 сек`.
+- **Chinese run (5 моделей):** лучший китайский кандидат — `deepseek/deepseek-v3.2` (`0.946`, `11.4 сек`), затем `qwen/qwen3-235b-a22b-2507` (`0.938`, `10.6 сек`). `z-ai/glm-4.7-flash` дал `0.938`, но был очень медленным (`50.0 сек`).
+- **Small Qwen run:** `qwen/qwen3-32b` и `qwen/qwen3-14b` — оба `0.938`, но медленнее Gemini; `qwen/qwen3-30b-a3b-instruct-2507` — `0.885`; `qwen/qwen-2.5-7b-instruct` — `0.815`; `qwen/qwen3.5-9b` не завершил полный прогон (timeout на probe).
+- **Impact:** теперь в журнале есть актуальная точка опоры по моделям: основной ответчик остаётся `google/gemini-2.5-flash`, запасные кандидаты — `google/gemini-3.1-flash-lite-preview`, `deepseek/deepseek-v3.2`, `qwen/qwen3-235b-a22b-2507`, а из малых Qwen — `qwen/qwen3-32b` / `qwen/qwen3-14b`.
+
+---
+
 ## 2026-06-26 — H025: Обязательный контрольный диалог перед отдачей ✅
 
 ### H025 — `--suite dialog`: `/start` + «двувшка в котельниках» как live gate ✅

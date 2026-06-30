@@ -26,6 +26,8 @@ from typing import Any, Final
 
 import aiohttp
 
+import text_style_tool
+
 # ── Конфигурация ─────────────────────────────────────────────
 
 OVERMIND_URL = os.getenv("OVERMIND_URL", "https://overmind.aiaxel.ru")
@@ -67,6 +69,9 @@ AVAILABLE_MODELS = [
     "openai/gpt-4o-mini",
 ]
 
+STYLE_TOOL_ENABLED: Final[bool] = os.getenv("NMBOT_TEXT_STYLE_TOOL", "1") != "0"
+STYLE_TOOL_MODEL: Final[str] = os.getenv("NMBOT_STYLE_MODEL", "google/gemini-3.1-flash-lite-preview")
+
 LOGGER: Final = logging.getLogger("chat_tester_bot")
 
 
@@ -81,6 +86,27 @@ def _safe_json_preview(obj: Any, limit: int = 2000) -> str:
 def _safe_user_error_message(_error: str | None = None) -> str:
     """H024: человекочитаемая ошибка без OpenRouter/choices/traceback/JSON для Telegram."""
     return SAFE_UPSTREAM_ERROR_TEXT
+
+
+async def _maybe_style_text(client: "OvermindClient", text: str, *, intent: str, scene: str, context: str = "") -> str:
+    if not STYLE_TOOL_ENABLED or not text.strip():
+        return text
+    try:
+        session = await client.ensure_session()
+        styled, _meta = await text_style_tool.rewrite_text(
+            session,
+            text=text,
+            context=context,
+            intent=intent,
+            tone="live",
+            scene=scene,
+            model=STYLE_TOOL_MODEL,
+        )
+        styled = (styled or "").strip()
+        return styled or text
+    except Exception:
+        LOGGER.exception("text style tool failed: intent=%s scene=%s", intent, scene)
+        return text
 
 
 class OvermindClient:
@@ -281,11 +307,10 @@ class OvermindClient:
                 data = json.loads(response_text[s:e])
                 resp_text = data.get("response", response_text)
                 params = data.get("params", {})
-                buttons = data.get("buttons", [])
                 return (
                     resp_text,
                     params if isinstance(params, dict) else {},
-                    buttons if isinstance(buttons, list) else [],
+                    [],  # buttons намеренно игнорируем: Ирина отвечает живым текстом без inline-кнопок.
                 )
         except json.JSONDecodeError:
             pass
@@ -397,8 +422,23 @@ def _format_numbered_list_spacing(text: str) -> str:
 
 
 def _prepare_response_text(text: str) -> str:
-    """Финальный лёгкий postprocess перед логом/Telegram: только форматирование, без изменения смысла."""
-    return _format_numbered_list_spacing(text)
+    """Финальный postprocess перед логом/Telegram.
+
+    Защитный слой: если модель всё-таки вернула JSON строкой, пользователю уходит
+    только поле response. params/buttons остаются внутренними и в Telegram не
+    показываются.
+    """
+    raw = _strip_markdown(str(text or "")).strip()
+    try:
+        s = raw.find("{")
+        e = raw.rfind("}") + 1
+        if s >= 0 and e > s:
+            data = json.loads(raw[s:e])
+            if isinstance(data, dict) and isinstance(data.get("response"), str):
+                raw = data["response"]
+    except json.JSONDecodeError:
+        pass
+    return _format_numbered_list_spacing(raw)
 
 
 # H013: дефолтный state пользователя + динамические quick-actions
@@ -508,6 +548,17 @@ def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
     t = text.lower().replace("ё", "е")
     options = state.get("last_options") or []
     selected = state.get("selected_option")
+
+    if selected and options and re.search(r"(похож|сравн|друг|еще|ещё|альтернатив)", t):
+        def _compact_name(value: Any) -> str:
+            return re.sub(r"[^а-яa-z0-9]+", " ", str(value or "").lower().replace("ё", "е")).strip()
+
+        selected_name = _compact_name(selected.get("name"))
+        other_options = [
+            option for option in options
+            if _compact_name(option.get("name")) != selected_name
+        ]
+        return {"intent": "compare_others", "options": other_options[:3]}
 
     # PRODUCT_TZ: «да», «подробнее», «интересно» после выбора варианта — это подтверждение
     # интереса к выбранному ЖК, а не повод заново спрашивать бюджет/комнаты.
@@ -630,7 +681,7 @@ def _build_known_option_prompt(option: dict[str, Any], client_request: str) -> s
         "Не повторяй дословно предыдущую карточку. Не придумывай метро, инфраструктуру, скидки, ипотеку, наличие, бронь, этажи или корпуса. "
         "Так как клиент уже выбрал конкретный ЖК и попросил подробнее, в конце мягко предложи оставить контакт, чтобы оператор проверил актуальные квартиры, наличие и условия. "
         "Если клиент просит актуальное наличие, бронь, конкретную квартиру, этаж, корпус, ипотеку, скидку или показ — не подтверждай это сама, а объясни, что это проверит оператор. "
-        "Верни валидный JSON с полями response, params, buttons. Кнопки должны отвечать последнему вопросу."
+        "Верни валидный JSON только с полями response и params. Inline-кнопки не формируй. Следующий шаг предложи живым текстом."
     )
 
 
@@ -669,10 +720,7 @@ def _dialog_state_preview(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _selected_option_rows(idx: int) -> list[list[dict]]:
-    return [[
-        {"text": "Да, подробнее", "callback_data": f"action:details:{idx}"},
-        {"text": "Сравнить с похожими", "callback_data": "action:show_near"},
-    ]]
+    return []
 
 
 def _option_ordinal(idx: Any) -> str:
@@ -795,13 +843,7 @@ def _format_options_summary_response(options: list[dict[str, Any]], lead: str, q
 
 
 def _option_select_rows(options: list[dict[str, Any]], max_count: int = 3) -> list[list[dict]]:
-    row = []
-    for option in options[:max_count]:
-        idx = option.get("idx") or len(row) + 1
-        name = str(option.get("name") or f"Вариант {idx}").replace("Жилой квартал", "ЖК")
-        short = re.sub(r"^(ЖК|МФК)\s+", "", name).strip(" «»")
-        row.append({"text": f"{idx}. {short[:22]}", "callback_data": f"option:{idx}"})
-    return [row] if row else []
+    return []
 
 
 # H021: кнопки бюджета генерируются из реальных цен в last_options.
@@ -907,20 +949,8 @@ def _callback_from_contract_button(button: dict[str, Any], state: dict, response
 
 
 def _contract_buttons_to_rows(buttons: Any, state: dict, response_text: str) -> list[list[dict]]:
-    """PRODUCT_TZ §8: кнопки приходят из chat-фазы, но код валидирует контракт."""
-    if not isinstance(buttons, list):
-        return []
-    row: list[dict] = []
-    for button in buttons[:4]:
-        if not isinstance(button, dict):
-            continue
-        text = str(button.get("text") or "").strip()
-        if not text or len(text) > 32 or _BUTTON_TECH_WORDS.search(text):
-            continue
-        callback = _callback_from_contract_button(button, state, response_text)
-        if callback:
-            row.append({"text": text, "callback_data": callback})
-    return [row] if row else []
+    """Inline-кнопки отключены: даже валидный buttons[] из модели не отправляем."""
+    return []
 
 
 def _limit_button_rows(rows: list[list[dict]], max_buttons: int = 4) -> list[list[dict]]:
@@ -946,10 +976,7 @@ def _limit_button_rows(rows: list[list[dict]], max_buttons: int = 4) -> list[lis
 
 
 def _markup_from_chat_buttons(chat_meta: dict, state: dict, response_text: str, scenario: str) -> list[list[dict]]:
-    rows = _contract_buttons_to_rows(chat_meta.get("_buttons"), state, response_text)
-    if rows:
-        return _limit_button_rows(rows)
-    return _limit_button_rows(_pick_quick_actions(state, scenario))
+    return []
 
 
 def _pick_quick_actions(state: dict, scenario: str) -> list[list[dict]]:
@@ -1093,7 +1120,7 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
+        from telegram import ReplyKeyboardRemove, Update
         from telegram.ext import (
             Application,
             CallbackQueryHandler,
@@ -1117,14 +1144,6 @@ def main() -> None:
 
     client = OvermindClient()
     user_state: dict[int, dict] = {}
-
-    def contact_request_markup() -> ReplyKeyboardMarkup:
-        return ReplyKeyboardMarkup(
-            [[KeyboardButton("📱 Поделиться контактом", request_contact=True)]],
-            resize_keyboard=True,
-            one_time_keyboard=True,
-            input_field_placeholder="Нажмите кнопку или напишите номер",
-        )
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         uid = update.effective_user.id if update.effective_user else 0
@@ -1238,13 +1257,20 @@ def main() -> None:
                     chat_model=state["chat_model"],
                 )
                 response = _prepare_response_text(response)
+                response = await _maybe_style_text(
+                    client,
+                    response,
+                    intent="details_known_option",
+                    scene="selected_option_details",
+                    context=str(option.get("name") or ""),
+                )
                 kb_rows = _markup_from_chat_buttons(chat_meta, state, response, "selected-option-details")
                 markup = {"inline_keyboard": kb_rows} if kb_rows else None
             except Exception:
                 LOGGER.exception("details callback chat failed")
                 response = _prepare_response_text(_format_option_response(option, state.get("params", {}).get("purpose")))
                 kb_rows = _selected_option_rows(idx)
-                markup = {"inline_keyboard": kb_rows}
+                markup = None
             _log_event({"kind": "callback", "uid": uid, "callback": query.data,
                         "button_text": button_text,
                         "dialog_intent": "details_known_option", "selected_option": option.get("name"),
@@ -1267,6 +1293,13 @@ def main() -> None:
                 return
             state["selected_option"] = option
             response = _prepare_response_text(_format_option_response(option, state.get("params", {}).get("purpose")))
+            response = await _maybe_style_text(
+                client,
+                response,
+                intent="select_option",
+                scene="selected_option",
+                context=str(option.get("name") or ""),
+            )
             kb_rows = _selected_option_rows(idx)
             _log_event({"kind": "callback", "uid": uid, "callback": query.data,
                         "button_text": button_text,
@@ -1274,9 +1307,8 @@ def main() -> None:
                         "state_before": state_before_callback,
                         "state_after": _dialog_state_preview(state),
                         "response_text": response, "buttons": _button_log_preview(kb_rows)})
-            kb = {"inline_keyboard": kb_rows}
             state["last_buttons"] = kb_rows
-            await query.edit_message_text(_to_html(response), parse_mode="HTML", reply_markup=kb)
+            await query.edit_message_text(_to_html(response), parse_mode="HTML")
             return
 
         # H013: кнопки выбора параметров — обновляем state и повторяем ask
@@ -1306,11 +1338,8 @@ def main() -> None:
                         "state_before": state_before_callback,
                         "state_after": _dialog_state_preview(state)})
             state["last_buttons"] = []
-            await query.edit_message_text("Передаю оператору. Нажмите кнопку «Поделиться контактом» или напишите номер — передам запрос вместе с контекстом диалога.")
-            await query.message.reply_text(
-                "Так оператор сможет быстрее связаться и проверить актуальные варианты.",
-                reply_markup=contact_request_markup(),
-            )
+            await query.edit_message_text("Напишите номер для связи текстом — передам запрос оператору вместе с контекстом диалога.")
+            await query.message.reply_text("Так оператор сможет быстрее связаться и проверить актуальные варианты.")
             return
         elif query.data == "toggle_mcp":
             state["mcp"] = not state["mcp"]
@@ -1336,6 +1365,13 @@ def main() -> None:
             if new_params:
                 state["params"] = {**state.get("params", {}), **new_params}
             response = _prepare_response_text(_strip_markdown(response))
+            response = await _maybe_style_text(
+                client,
+                response,
+                intent="callback_search",
+                scene="callback_search",
+                context=json.dumps(state.get("params", {}), ensure_ascii=False),
+            )
             _refresh_search_state(state, search_meta)
             scenario = _infer_scenario(state, search_meta)
             kb_rows = _markup_from_chat_buttons(chat_meta, state, response, scenario)
@@ -1381,6 +1417,13 @@ def main() -> None:
         if dialog_intent.get("intent") == "select_option":
             state["selected_option"] = dialog_intent["option"]
             response = _prepare_response_text(_format_option_response(dialog_intent["option"], state.get("params", {}).get("purpose")))
+            response = await _maybe_style_text(
+                client,
+                response,
+                intent="select_option",
+                scene="followup_selected_option",
+                context=str(dialog_intent["option"].get("name") or ""),
+            )
             idx = int(dialog_intent["option"].get("idx") or 1)
             kb_rows = _selected_option_rows(idx)
             _log_event({
@@ -1402,9 +1445,8 @@ def main() -> None:
                 "error": None,
                 "cost": {},
             })
-            kb = {"inline_keyboard": kb_rows}
             state["last_buttons"] = kb_rows
-            await update.message.reply_text(_to_html(response), reply_markup=kb, parse_mode="HTML")
+            await update.message.reply_text(_to_html(response), parse_mode="HTML")
             return
 
         if dialog_intent.get("intent") == "operator_for_selected":
@@ -1417,6 +1459,13 @@ def main() -> None:
                 "reason": "selected_option_live_details",
             }
             response = _prepare_response_text(_format_operator_handoff_for_option(option))
+            response = await _maybe_style_text(
+                client,
+                response,
+                intent="operator_handoff",
+                scene="followup_operator",
+                context=str(option.get("name") or ""),
+            )
             kb_rows = [[{"text": "📞 Связаться с оператором", "callback_data": "action:operator"}]]
             _log_event({
                 "kind": "operator_handoff_ready",
@@ -1427,14 +1476,58 @@ def main() -> None:
                 "response_text": response,
                 "buttons": _button_log_preview(kb_rows),
             })
-            kb = {"inline_keyboard": kb_rows}
             state["last_buttons"] = kb_rows
-            await update.message.reply_text(_to_html(response), reply_markup=kb, parse_mode="HTML")
+            await update.message.reply_text(_to_html(response), parse_mode="HTML")
+            return
+
+        if dialog_intent.get("intent") == "compare_others":
+            options = dialog_intent.get("options", [])
+            response = _prepare_response_text(_format_options_summary_response(
+                options,
+                "Сравню с другими вариантами из последнего списка",
+                "Какой из них раскрыть подробнее?",
+            ))
+            response = await _maybe_style_text(
+                client,
+                response,
+                intent="compare_others",
+                scene="followup_compare",
+                context=", ".join(str(o.get("name") or "") for o in options[:3]),
+            )
+            kb_rows = _option_select_rows(options)
+            _log_event({
+                "kind": "user_message",
+                "uid": uid,
+                "user_text": text,
+                "dialog_intent": "compare_others",
+                "search_model": state["search_model"],
+                "chat_model": state["chat_model"],
+                "mcp": state["mcp"],
+                "params_before": params_before,
+                "params_after": dict(state.get("params", {})),
+                "params_delta": {},
+                "response_text": response,
+                "response_len": len(response),
+                "buttons": _button_log_preview(kb_rows),
+                "duration_ms": 0,
+                "is_error": False,
+                "error": None,
+                "cost": {},
+            })
+            state["last_buttons"] = kb_rows
+            await update.message.reply_text(_to_html(response), parse_mode="HTML")
             return
 
         if dialog_intent.get("intent") == "sort_price_asc":
             options = dialog_intent.get("options", [])
             response = _prepare_response_text(_format_cheaper_response(options))
+            response = await _maybe_style_text(
+                client,
+                response,
+                intent="sort_price_asc",
+                scene="followup_cheaper",
+                context=", ".join(str(o.get("name") or "") for o in options[:3]),
+            )
             kb_rows = _option_select_rows(options)
             _log_event({
                 "kind": "user_message",
@@ -1467,6 +1560,13 @@ def main() -> None:
                 "С отделкой по последнему списку вижу",
                 "Какой вариант раскрыть подробнее?",
             ))
+            response = await _maybe_style_text(
+                client,
+                response,
+                intent="filter_finish",
+                scene="followup_finish",
+                context=", ".join(str(o.get("name") or "") for o in options[:3]),
+            )
             kb_rows = _option_select_rows(options)
             _log_event({
                 "kind": "user_message",
@@ -1535,6 +1635,13 @@ def main() -> None:
         c_cost, c_in, c_out, c_used = _meta_cost(chat_meta)
 
         response = _prepare_response_text(_strip_markdown(response))
+        response = await _maybe_style_text(
+            client,
+            response,
+            intent="main_search",
+            scene="first_reply" if not state.get("last_result", {}).get("found") else "results_reply",
+            context=json.dumps({"params": state.get("params", {}), "query": text}, ensure_ascii=False),
+        )
 
         # H013/H028: заполним last_result/options, затем берём buttons[] из chat-контракта.
         _refresh_search_state(state, search_meta)
@@ -1573,15 +1680,14 @@ def main() -> None:
             },
         })
 
-        # H009: операторская кнопка при полностью пустом ответе или явном запросе оператора
+        # H009: операторская воронка теперь без кнопок — просим номер обычным текстом.
         wants_operator = (
             any(trig in text.lower() for trig in ("оператор", "живой человек", "менеджер", "перезвоните"))
             or ("передам" in response.lower() and "оператор" in response.lower())
         )
         if wants_operator and not error_text:
-            kb = {"inline_keyboard": [[{"text": "📞 Связаться с оператором", "callback_data": "action:operator"}]]}
-            await update.message.reply_text("Нажмите кнопку, чтобы передать запрос оператору, или напишите номер для связи текстом:",
-                                            reply_markup=kb)
+            state["awaiting_phone"] = True
+            await update.message.reply_text("Если хотите, напишите номер для связи текстом — передам запрос оператору с контекстом диалога.")
 
         # Telegram лимит 4096 символов на сообщение.
         # H027: обычный короткий ответ тоже обязан заменить индикатор поиска.
@@ -1619,7 +1725,6 @@ def main() -> None:
 
         await update.message.reply_text(
             "Контакт пришёл без понятного номера. Напишите телефон текстом в формате +7XXXXXXXXXX.",
-            reply_markup=contact_request_markup(),
         )
 
     builder = Application.builder().token(TELEGRAM_BOT_TOKEN)

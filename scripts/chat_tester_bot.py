@@ -26,6 +26,10 @@ from typing import Any, Final
 
 import aiohttp
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import scene_classifier
 from style_scenes import get_scene_rules
 import text_style_tool
@@ -47,8 +51,8 @@ SAFE_UPSTREAM_ERROR_TEXT = (
 
 # Experiment Loop: активная гипотеза (см. docs/EXPERIMENTS.md)
 ACTIVE_H_ID: Final[str] = os.getenv("NMBOT_H_ID", "H001")
-LOGS_DIR: Final[Path] = Path(__file__).resolve().parent.parent / "logs"
-PROMPTS_DIR: Final[Path] = Path(__file__).resolve().parent.parent / "prompts"
+LOGS_DIR: Final[Path] = REPO_ROOT / "logs"
+PROMPTS_DIR: Final[Path] = REPO_ROOT / "prompts"
 
 
 def _load_prompt(name: str) -> str:

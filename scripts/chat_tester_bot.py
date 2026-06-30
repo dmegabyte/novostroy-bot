@@ -699,7 +699,45 @@ def _option_benefit(option: dict[str, Any]) -> str:
     return "по нему можно быстро проверить актуальные квартиры"
 
 
-def _format_option_response(option: dict[str, Any]) -> str:
+def _family_reason_from_facts(option: dict[str, Any]) -> str:
+    """Продающая причина для family-сценария только из подтверждённых полей."""
+    raw_text = json.dumps(option.get("raw") or {}, ensure_ascii=False).lower()
+    if "закрыт" in raw_text or "двор без машин" in raw_text:
+        return (
+            "отличный вариант для семьи: закрытый двор или двор без машин даёт ребёнку больше "
+            "пространства для прогулок, а родителям — спокойствия"
+        )
+    if "детск" in raw_text:
+        return (
+            "хороший выбор для семьи благодаря детской инфраструктуре — "
+            "повседневные вопросы с ребёнком будет проще закрывать рядом с домом"
+        )
+    if "школ" in raw_text or "сад" in raw_text:
+        return (
+            "удобный вариант для семей с детьми: школа или детский сад помогают сделать "
+            "ежедневные маршруты проще"
+        )
+    if "парк" in raw_text:
+        return (
+            "подойдёт семье, которая ценит прогулки и отдых рядом с домом: "
+            "парк или зелёная зона добавляют больше сценариев для жизни с ребёнком"
+        )
+    ready = str(option.get("ready") or "").lower()
+    finishing = str(option.get("finishing") or "").lower()
+    if "сдан" in ready or "готов" in ready:
+        return "практичный вариант для семьи: готовый корпус проще планировать под переезд и обустройство"
+    if "отдел" in finishing and "без отдел" not in finishing:
+        return "удобный вариант для быстрого переезда: отделка экономит время и силы на ремонте"
+    if not _looks_missing(option.get("area")):
+        return "стоит рассмотреть семье, которой важно подобрать комфортную площадь под свой образ жизни"
+    if option.get("price_min"):
+        return "хорошая отправная точка для семейного выбора: сразу понятен бюджет входа"
+    if not _looks_missing(option.get("location")):
+        return "интересный вариант для семьи в этой локации — можно подобрать подходящий формат квартиры"
+    return "вариант стоит рассмотреть для семьи: можно подобрать подходящую квартиру и уточнить детали покупки"
+
+
+def _format_option_response(option: dict[str, Any], purpose: Any = None) -> str:
     name = option.get("name") or "этот вариант"
     intro = f"{_option_ordinal(option.get('idx'))} вариант — {name}."
     facts: list[str] = []
@@ -720,7 +758,10 @@ def _format_option_response(option: dict[str, Any]) -> str:
         fact_text = "По нему есть базовая карточка в базе, но без лишних подтверждённых деталей."
     benefit = _option_benefit(option)
     nuance = f" Важно: {option['why_close']}." if not _looks_missing(option.get("why_close")) else ""
-    return f"{intro} {fact_text} Поэтому {benefit}.{nuance} Хотите посмотреть этот вариант подробнее или сравнить с похожими?"
+    family_note = ""
+    if str(purpose or "").lower() == "family":
+        family_note = f" {_family_reason_from_facts(option).capitalize()}."
+    return f"{intro} {fact_text} Поэтому {benefit}.{family_note}{nuance} Хотите посмотреть этот вариант подробнее или сравнить с похожими?"
 
 
 def _format_cheaper_response(options: list[dict[str, Any]]) -> str:
@@ -1109,8 +1150,6 @@ def main() -> None:
     async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         uid = update.effective_user.id if update.effective_user else 0
         state = user_state.setdefault(uid, _default_state())
-        state_before_callback = _dialog_state_preview(state)
-        button_text = _callback_button_text(state.get("last_buttons"), query.data)
         _log_event({"kind": "command", "uid": uid, "command": "/status",
                     "search_model": state["search_model"], "chat_model": state["chat_model"], "mcp": state["mcp"]})
         await update.message.reply_text(
@@ -1159,6 +1198,8 @@ def main() -> None:
 
         uid = update.effective_user.id if update.effective_user else 0
         state = user_state.setdefault(uid, _default_state())
+        state_before_callback = _dialog_state_preview(state)
+        button_text = _callback_button_text(state.get("last_buttons"), query.data)
 
         if query.data.startswith("action:details:"):
             raw_idx = query.data.rsplit(":", 1)[-1]
@@ -1183,7 +1224,7 @@ def main() -> None:
                 markup = {"inline_keyboard": kb_rows} if kb_rows else None
             except Exception:
                 LOGGER.exception("details callback chat failed")
-                response = _prepare_response_text(_format_option_response(option))
+                response = _prepare_response_text(_format_option_response(option, state.get("params", {}).get("purpose")))
                 kb_rows = _selected_option_rows(idx)
                 markup = {"inline_keyboard": kb_rows}
             _log_event({"kind": "callback", "uid": uid, "callback": query.data,
@@ -1207,7 +1248,7 @@ def main() -> None:
                 await query.edit_message_text("Этот вариант уже не вижу в текущем списке. Напишите запрос ещё раз — обновлю подборку.")
                 return
             state["selected_option"] = option
-            response = _prepare_response_text(_format_option_response(option))
+            response = _prepare_response_text(_format_option_response(option, state.get("params", {}).get("purpose")))
             kb_rows = _selected_option_rows(idx)
             _log_event({"kind": "callback", "uid": uid, "callback": query.data,
                         "button_text": button_text,
@@ -1317,7 +1358,7 @@ def main() -> None:
         dialog_intent = _resolve_dialog_intent(text, state)
         if dialog_intent.get("intent") == "select_option":
             state["selected_option"] = dialog_intent["option"]
-            response = _prepare_response_text(_format_option_response(dialog_intent["option"]))
+            response = _prepare_response_text(_format_option_response(dialog_intent["option"], state.get("params", {}).get("purpose")))
             idx = int(dialog_intent["option"].get("idx") or 1)
             kb_rows = _selected_option_rows(idx)
             _log_event({

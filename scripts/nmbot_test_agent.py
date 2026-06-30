@@ -1157,6 +1157,32 @@ def _run_h021_unit_tests() -> list[Result]:
         duration_ms=int((time.time() - started) * 1000),
     ))
 
+    family_opt = {
+        "idx": 2,
+        "name": "Бусиновский парк",
+        "location": "Москва",
+        "price": "от 12.4 млн",
+        "area": "от 38 м²",
+        "ready": "сдан",
+        "raw": {},
+    }
+    family_card = _format_option_response(family_opt, purpose="family")
+    family_card_low = family_card.lower()
+    bad_family_phrases = ["в данных", "подтверждения", "не буду придумывать", "mcp", "json"]
+    pass_family_card = (
+        "для семьи" in family_card_low
+        and any(word in family_card_low for word in ("практич", "переезд", "ребён", "ребен", "площад", "бюджет"))
+        and not any(phrase in family_card_low for phrase in bad_family_phrases)
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="family_selected_option_has_selling_reason_not_disclaimer",
+        passed=pass_family_card,
+        error="" if pass_family_card else f"bad family card: {family_card}",
+        response_text=family_card,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
     weak_state = {"params": {"rooms": "s", "max_price": 5_000_000, "district": "msk"}, "asked_questions": []}
     weak_rows = _pick_quick_actions(weak_state, "C-narrow-empty")
     weak_callbacks = [btn["callback_data"] for row in weak_rows for btn in row]

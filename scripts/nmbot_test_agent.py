@@ -1195,9 +1195,9 @@ def _run_h021_unit_tests() -> list[Result]:
     dry_markers = ["локация:", "цена:", "отделка:", "готовность/срок:"]
     pass_card = (
         not any(m in card_low for m in dry_markers)
-        and "хотите сравнить этот вариант с похожими" in card_low
+        and "хотите, передам оператору" in card_low
         and "\n\n" in card
-        and "по нему вижу" in card_low
+        and "по цене вижу" in card_low
         and "баз" not in card_low
     )
     results.append(Result(
@@ -1306,13 +1306,41 @@ def _run_h021_unit_tests() -> list[Result]:
     }
     raw_card = _format_option_response(raw_opt)
     raw_low = raw_card.lower()
-    pass_raw_format = "локация — москва" in raw_low and "от 17,7 млн рублей" in raw_low and "17720677" not in raw_card and "msk" not in raw_low
+    pass_raw_format = "по локации вижу: москва" in raw_low and "от 17,7 млн рублей" in raw_low and "17720677" not in raw_card and "msk" not in raw_low
     results.append(Result(
         suite="h029",
         scenario="selected_option_formats_raw_mcp_fields_for_client",
         passed=pass_raw_format,
         error="" if pass_raw_format else f"raw fields leaked to client: {raw_card}",
         response_text=raw_card,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    investment_2025_opt = {
+        "idx": 1,
+        "name": "ЖК «Гранель Ильинойс»",
+        "location": "mo",
+        "price": "9400000",
+        "price_min": 9_400_000,
+        "ready": "конец 2025 года",
+    }
+    investment_card = _format_option_response(investment_2025_opt, purpose="investment")
+    investment_low = investment_card.lower()
+    pass_investment_2025 = (
+        "гранель ильинойс" in investment_low
+        and "от 9,4 млн рублей" in investment_low
+        and "московская область" in investment_low
+        and "уже должен быть сдан" in investment_low
+        and "не нужно закладывать долгий срок ожидания" in investment_low
+        and "оператор" in investment_low
+        and "2025 года; это вариант с ожиданием" not in investment_low
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="selected_option_2025_deadline_is_treated_as_due_for_investment",
+        passed=pass_investment_2025,
+        error="" if pass_investment_2025 else f"bad investment 2025 card: {investment_card}",
+        response_text=investment_card,
         duration_ms=int((time.time() - started) * 1000),
     ))
 

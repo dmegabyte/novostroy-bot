@@ -919,6 +919,68 @@ def _format_price_value(value: Any, price_min: Any = None) -> str:
     return f"от {pretty} млн рублей"
 
 
+def _extract_year(value: Any) -> int | None:
+    match = re.search(r"\b(20\d{2})\b", str(value or ""))
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return None
+
+
+def _format_ready_sentence(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    low = text.lower().replace("ё", "е")
+    if "сдан" in low or "готов" in low:
+        return f"по срокам это готовый вариант: {text}"
+    year = _extract_year(text)
+    current_year = datetime.now(timezone.utc).year
+    if year and year < current_year:
+        return f"срок сдачи — {text}, то есть по срокам объект уже должен быть сдан"
+    if year and year == current_year:
+        return f"срок сдачи — {text}, то есть это ближайший срок без долгого ожидания"
+    if year and year > current_year:
+        return f"срок сдачи — {text}; это вариант с ожиданием до сдачи"
+    return f"срок/готовность — {text}"
+
+
+def _selected_option_fact_sentences(option: dict[str, Any]) -> list[str]:
+    facts: list[str] = []
+    name = option.get("name") or "варианту"
+    if not _looks_missing(option.get("price")):
+        facts.append(f"По цене вижу ориентир {_format_price_value(option['price'], option.get('price_min'))}.")
+    if not _looks_missing(option.get("location")):
+        facts.append(f"По локации вижу: {_format_location_value(option['location'])}.")
+    if not _looks_missing(option.get("ready")):
+        facts.append(_format_ready_sentence(option["ready"]).capitalize() + ".")
+    if not _looks_missing(option.get("area")):
+        facts.append(f"По площади есть ориентир: {option['area']}.")
+    if not _looks_missing(option.get("finishing")):
+        facts.append(f"По отделке указано: {option['finishing']}.")
+    if not _looks_missing(option.get("metro")):
+        facts.append(f"По транспорту вижу метро: {option['metro']}.")
+    if not _looks_missing(option.get("developer")):
+        facts.append(f"Застройщик: {option['developer']}.")
+    if not facts:
+        facts.append(f"По {name} вижу только короткую карточку без дополнительных подтверждённых деталей.")
+    return facts
+
+
+def _investment_note_from_facts(option: dict[str, Any]) -> str:
+    ready_sentence = _format_ready_sentence(option.get("ready"))
+    why_close = str(option.get("why_close") or "").strip()
+    if ready_sentence and any(word in ready_sentence.lower() for word in ("сдан", "готов", "должен быть сдан", "ближайший срок")):
+        return "Для инвестиции это полезно тем, что не нужно закладывать долгий срок ожидания до готовности."
+    if why_close:
+        return f"Для инвестиционного сценария это стоит учитывать: {why_close}."
+    if option.get("price_min"):
+        return "Для инвестиции здесь понятен бюджет входа, но доходность и ликвидность нужно проверять отдельно."
+    return "Для инвестиции по нему нужно отдельно проверить спрос, ликвидность и актуальное наличие квартир."
+
+
 def _option_benefit(option: dict[str, Any]) -> str:
     """Короткая польза для клиента только из известных полей, без выдумок."""
     ready = str(option.get("ready") or "").lower()
@@ -929,7 +991,7 @@ def _option_benefit(option: dict[str, Any]) -> str:
     if "отдел" in finishing and "без отдел" not in finishing:
         return "его удобно рассматривать, если не хочется начинать с чернового ремонта"
     if price_min:
-        return "он может быть хорошей отправной точкой по бюджету среди найденных вариантов"
+        return "по нему уже понятен бюджет входа"
     if option.get("area"):
         return "по нему уже есть понятный ориентир по площади"
     return "по нему можно быстро проверить актуальные квартиры"
@@ -967,7 +1029,7 @@ def _family_reason_from_facts(option: dict[str, Any]) -> str:
     if not _looks_missing(option.get("area")):
         return "стоит рассмотреть семье, которой важно подобрать комфортную площадь под свой образ жизни"
     if option.get("price_min"):
-        return "хорошая отправная точка для семейного выбора: сразу понятен бюджет входа"
+        return "для семейного выбора уже понятен бюджет входа"
     if not _looks_missing(option.get("location")):
         return "интересный вариант для семьи в этой локации — можно подобрать подходящий формат квартиры"
     return "вариант стоит рассмотреть для семьи: можно подобрать подходящую квартиру и уточнить детали покупки"
@@ -976,29 +1038,26 @@ def _family_reason_from_facts(option: dict[str, Any]) -> str:
 def _format_option_response(option: dict[str, Any], purpose: Any = None) -> str:
     name = option.get("name") or "этот вариант"
     intro = f"{_option_ordinal(option.get('idx'))} вариант — {name}."
-    facts: list[str] = []
-    if not _looks_missing(option.get("location")):
-        facts.append(f"локация — {_format_location_value(option['location'])}")
-    if not _looks_missing(option.get("price")):
-        facts.append(f"цена — {_format_price_value(option['price'], option.get('price_min'))}")
-    if not _looks_missing(option.get("area")):
-        facts.append(f"площадь — {option['area']}")
-    if not _looks_missing(option.get("finishing")):
-        facts.append(f"отделка — {option['finishing']}")
-    if not _looks_missing(option.get("ready")):
-        facts.append(f"готовность — {option['ready']}")
+    fact_text = " ".join(_selected_option_fact_sentences(option)[:5])
+    purpose_low = str(purpose or "").lower()
 
-    if facts:
-        fact_text = "По нему вижу: " + "; ".join(facts[:3]) + "."
+    if purpose_low == "family":
+        scenario_note = _family_reason_from_facts(option).capitalize() + "."
+    elif purpose_low in {"investment", "invest", "инвестиции", "инвест", "инвестиций"}:
+        scenario_note = _investment_note_from_facts(option)
     else:
-        fact_text = "По нему есть только короткая карточка без дополнительных подтверждённых деталей."
-    benefit = _option_benefit(option)
-    nuance = f" Важно: {option['why_close']}." if not _looks_missing(option.get("why_close")) else ""
-    family_note = ""
-    if str(purpose or "").lower() == "family":
-        family_note = f" {_family_reason_from_facts(option).capitalize()}."
-    body = f"{fact_text}\n\nПоэтому {benefit}.{family_note}{nuance}"
-    return f"{intro}\n\n{body}\n\nХотите сравнить этот вариант с похожими?"
+        scenario_note = f"Поэтому { _option_benefit(option) }."
+
+    nuance = ""
+    if not _looks_missing(option.get("why_close")) and purpose_low not in {"investment", "invest", "инвестиции", "инвест", "инвестиций"}:
+        nuance = f"\n\nВажно: {option['why_close']}."
+
+    check_next = (
+        "Что стоит проверить отдельно: актуальное наличие квартир, конкретные корпуса, "
+        "этажи и условия покупки."
+    )
+    question = "Хотите, передам оператору именно этот ЖК и ваш запрос?"
+    return f"{intro}\n\n{fact_text}\n\n{scenario_note}{nuance}\n\n{check_next}\n\n{question}"
 
 
 def _format_cheaper_response(options: list[dict[str, Any]]) -> str:
@@ -1685,7 +1744,7 @@ def main() -> None:
                 "cost": {},
             })
             state["last_buttons"] = kb_rows
-            _remember_bot_response(state, response, offer_type="compare_selected", answer_kind="selected_option_card")
+            _remember_bot_response(state, response, offer_type="operator_for_selected", answer_kind="selected_option_card")
             await update.message.reply_text(_to_html(response), parse_mode="HTML")
             return
 

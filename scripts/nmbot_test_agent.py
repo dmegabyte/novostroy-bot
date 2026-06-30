@@ -1334,6 +1334,48 @@ def _run_h021_unit_tests() -> list[Result]:
         error=f"reason={reason_text}\n--- continue={continue_text}",
     )
 
+    # UX_E2E: расширенный набор коротких follow-up фраз вокруг выбранного ЖК.
+    # Это не проверка всех словарных форм, а контракт маршрутизации: явное сравнение сравнивает,
+    # явная бронь/детали ведут к оператору, мягкие/неясные фразы уходят в classifier, а не повторяют карточку.
+    phrase_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": e2e_option,
+        "params": {"purpose": "investment"},
+        "dialog_window": [],
+        "selected_option_card_shown_count": 1,
+    }
+    _remember_bot_response(
+        phrase_state,
+        "Хотите, передам оператору именно этот ЖК и ваш запрос?",
+        offer_type="operator_for_selected",
+        answer_kind="selected_option_card",
+    )
+    phrase_expectations = {
+        "да": "followup_classifier",
+        "нет": "followup_classifier",
+        "возможно": "followup_classifier",
+        "наверное": "followup_classifier",
+        "зачем": "followup_classifier",
+        "продолжить": "followup_classifier",
+        "подбор": "followup_classifier",
+        "хочу еще варианты": "compare_others",
+        "сравни": "compare_others",
+        "не надо": "followup_classifier",
+        "что по нему известно": "followup_classifier",
+        "бронь": "operator_for_selected",
+        "этажи": "operator_for_selected",
+    }
+    phrase_results = {phrase: _resolve_dialog_intent(phrase, phrase_state).get("intent") for phrase in phrase_expectations}
+    phrase_pass = all(phrase_results[p] == expected for p, expected in phrase_expectations.items())
+    add_result(
+        "ux_e2e",
+        "selected_option_short_phrase_routing_matrix",
+        phrase_pass,
+        response_text=json.dumps(phrase_results, ensure_ascii=False),
+        error=json.dumps({"expected": phrase_expectations, "actual": phrase_results}, ensure_ascii=False),
+    )
+
     raw_opt = {
         "idx": 3,
         "name": "ЖК «Сиреневый парк»",

@@ -26,6 +26,8 @@ from typing import Any
 
 import aiohttp
 
+import scene_classifier
+from style_scenes import get_scene_rules
 import text_style_tool
 
 # ── Конфигурация ─────────────────────────────────────────────
@@ -89,7 +91,15 @@ def _extract_response_text(text: str) -> str:
     return raw
 
 
-async def _maybe_style_text(session: aiohttp.ClientSession, text: str, *, context: str, intent: str, scene: str) -> str:
+async def _maybe_style_text(
+    session: aiohttp.ClientSession,
+    text: str,
+    *,
+    context: str,
+    intent: str,
+    scene: str,
+    scene_rules: str = "",
+) -> str:
     if not STYLE_TOOL_ENABLED or not text.strip():
         return text
     try:
@@ -100,6 +110,7 @@ async def _maybe_style_text(session: aiohttp.ClientSession, text: str, *, contex
             intent=intent,
             tone="live",
             scene=scene,
+            scene_rules=scene_rules,
             model=STYLE_TOOL_MODEL,
         )
         styled = (styled or "").strip()
@@ -276,12 +287,21 @@ async def ask_two_stage(
     )
     # H007-A: strip markdown-обёртку ДО парсинга/печати/логирования.
     chat_response = _extract_response_text(chat_response)
+    scene_meta = await scene_classifier.classify_scene(
+        session,
+        user_text=query,
+        search_response=search_response,
+        memory={},
+        draft_response=chat_response,
+    )
+    scene = str(scene_meta.get("scene") or "default_safe_reply")
     chat_response = await _maybe_style_text(
         session,
         chat_response,
-        context=query,
+        context=search_response,
         intent="chat_response",
-        scene="cli",
+        scene=scene,
+        scene_rules=get_scene_rules(scene),
     )
     # H004: retry на пустой/мусорный chat-ответ (≤2 повтора)
     retries = 0

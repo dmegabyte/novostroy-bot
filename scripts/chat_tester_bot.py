@@ -26,6 +26,8 @@ from typing import Any, Final
 
 import aiohttp
 
+import scene_classifier
+from style_scenes import get_scene_rules
 import text_style_tool
 
 # ── Конфигурация ─────────────────────────────────────────────
@@ -88,7 +90,15 @@ def _safe_user_error_message(_error: str | None = None) -> str:
     return SAFE_UPSTREAM_ERROR_TEXT
 
 
-async def _maybe_style_text(client: "OvermindClient", text: str, *, intent: str, scene: str, context: str = "") -> str:
+async def _maybe_style_text(
+    client: "OvermindClient",
+    text: str,
+    *,
+    intent: str,
+    scene: str,
+    context: str = "",
+    scene_rules: str = "",
+) -> str:
     if not STYLE_TOOL_ENABLED or not text.strip():
         return text
     try:
@@ -100,6 +110,7 @@ async def _maybe_style_text(client: "OvermindClient", text: str, *, intent: str,
             intent=intent,
             tone="live",
             scene=scene,
+            scene_rules=scene_rules,
             model=STYLE_TOOL_MODEL,
         )
         styled = (styled or "").strip()
@@ -1635,12 +1646,32 @@ def main() -> None:
         c_cost, c_in, c_out, c_used = _meta_cost(chat_meta)
 
         response = _prepare_response_text(_strip_markdown(response))
+        scene_meta = await scene_classifier.classify_scene(
+            await client.ensure_session(),
+            user_text=text,
+            search_response=search_meta.get("_response_text", ""),
+            memory={
+                "params": state.get("params", {}),
+                "selected_option": state.get("selected_option"),
+                "last_options": state.get("last_options", [])[:3],
+            },
+            draft_response=response,
+        )
+        style_scene = str(scene_meta.get("scene") or "default_safe_reply")
         response = await _maybe_style_text(
             client,
             response,
             intent="main_search",
-            scene="first_reply" if not state.get("last_result", {}).get("found") else "results_reply",
-            context=json.dumps({"params": state.get("params", {}), "query": text}, ensure_ascii=False),
+            scene=style_scene,
+            scene_rules=get_scene_rules(style_scene),
+            context=json.dumps(
+                {
+                    "params": state.get("params", {}),
+                    "query": text,
+                    "search_response": search_meta.get("_response_text", ""),
+                },
+                ensure_ascii=False,
+            ),
         )
 
         # H013/H028: заполним last_result/options, затем берём buttons[] из chat-контракта.

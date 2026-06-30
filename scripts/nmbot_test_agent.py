@@ -83,6 +83,8 @@ from chat_tester_bot import (  # noqa: E402
     _format_options_summary_response,
     _format_numbered_list_spacing,
     _format_operator_handoff_for_option,
+    _clarification_from_followup,
+    _followup_state_payload,
     _markup_from_chat_buttons,
     _prepare_response_text,
     _parse_budget_callback_value,
@@ -92,9 +94,11 @@ from chat_tester_bot import (  # noqa: E402
     _phone_log_meta,
     _reset_dialog_state_preserve_settings,
     _resolve_dialog_intent,
+    _remember_bot_response,
     _safe_user_error_message,
     _visible_options_from_response,
 )
+from followup_intent_classifier import normalize_intent  # noqa: E402
 
 
 # ── Типы ─────────────────────────────────────────────────────
@@ -1109,7 +1113,7 @@ def _run_h021_unit_tests() -> list[Result]:
     intent_yes = _resolve_dialog_intent("да", state_selected).get("intent")
     intent_details = _resolve_dialog_intent("подробнее", state_selected).get("intent")
     intent_booking = _resolve_dialog_intent("можно забронировать?", state_selected).get("intent")
-    pass_memory = intent_yes == "select_option" and intent_details == "operator_for_selected" and intent_booking == "operator_for_selected"
+    pass_memory = intent_yes == "followup_classifier" and intent_details == "operator_for_selected" and intent_booking == "operator_for_selected"
     results.append(Result(
         suite="h028",
         scenario="selected_option_yes_and_booking_do_not_restart_questionnaire",
@@ -1253,6 +1257,44 @@ def _run_h021_unit_tests() -> list[Result]:
             f"rows={e2e_rows}; visible={[o.get('name') for o in e2e_visible_options]}; "
             f"three={e2e_select_three}; two_text={e2e_select_two_text}; more={e2e_more}; card={e2e_card}; handoff={e2e_handoff}"
         ),
+    )
+
+    # UX_E2E: короткие «да/нет/возможно» после карточки не должны снова выбирать тот же ЖК.
+    followup_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": e2e_option,
+        "params": {"purpose": "investment"},
+        "dialog_window": [],
+        "selected_option_card_shown_count": 1,
+    }
+    _remember_bot_response(
+        followup_state,
+        "По «Амурскому парку» вижу цену и локацию.\n\nХотите сравнить этот вариант с похожими?",
+        offer_type="compare_selected",
+        answer_kind="selected_option_card",
+    )
+    yes_intent = _resolve_dialog_intent("да", followup_state)
+    no_intent = _resolve_dialog_intent("нет", followup_state)
+    maybe_intent = _resolve_dialog_intent("возможно", followup_state)
+    payload = _followup_state_payload(followup_state)
+    clarify_text = _clarification_from_followup({"intent": "clarify", "confidence": 0.4}, followup_state)
+    e2e_followup_pass = (
+        yes_intent.get("intent") == "followup_classifier"
+        and no_intent.get("intent") == "followup_classifier"
+        and maybe_intent.get("intent") == "followup_classifier"
+        and payload.get("last_offer_type") == "compare_selected"
+        and payload.get("last_bot_question") == "Хотите сравнить этот вариант с похожими?"
+        and "смысл неясен" not in clarify_text.lower()
+        and "уточните" in clarify_text.lower()
+        and normalize_intent("has_options") == "clarify"
+    )
+    add_result(
+        "ux_e2e",
+        "short_replies_go_to_followup_classifier_not_repeat_card",
+        e2e_followup_pass,
+        response_text=f"yes={yes_intent}; no={no_intent}; maybe={maybe_intent}; payload={payload}; clarify={clarify_text}",
+        error=f"yes={yes_intent}; no={no_intent}; maybe={maybe_intent}; payload={payload}; clarify={clarify_text}",
     )
 
     raw_opt = {

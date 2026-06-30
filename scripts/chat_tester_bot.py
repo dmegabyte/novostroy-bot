@@ -31,6 +31,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import scene_classifier
+import followup_intent_classifier
 from style_scenes import get_scene_rules
 import text_style_tool
 
@@ -478,6 +479,11 @@ def _default_state() -> dict[str, Any]:
         "last_search_response": {},  # H026: полный структурированный MCP/search JSON для follow-up без нового MCP
         "asked_questions": [],  # список заданных уточнений (чтобы не повторять)
         "last_buttons": [],  # последние реально отправленные inline-кнопки для полного dialog log
+        "dialog_window": [],  # последние реплики user/bot для понимания «да/нет/возможно» в контексте
+        "last_bot_question": "",
+        "last_offer_type": "",
+        "last_answer_kind": "",
+        "selected_option_card_shown_count": 0,
     }
 
 
@@ -492,6 +498,59 @@ def _reset_dialog_state_preserve_settings(state: dict[str, Any]) -> dict[str, An
     fresh["chat_model"] = state.get("chat_model", fresh["chat_model"])
     fresh["mcp"] = state.get("mcp", fresh["mcp"])
     return fresh
+
+
+def _append_dialog_turn(state: dict[str, Any], role: str, text: str, limit: int = 6) -> None:
+    """Храним короткое окно диалога, чтобы «да/нет/возможно» понимались в контексте."""
+    window = list(state.get("dialog_window") or [])
+    window.append({"role": role, "text": str(text or "")[:1200]})
+    state["dialog_window"] = window[-limit:]
+
+
+def _extract_last_question(text: str) -> str:
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    for line in reversed(lines):
+        if "?" in line:
+            return line
+    return ""
+
+
+def _remember_bot_response(state: dict[str, Any], text: str, *, offer_type: str = "", answer_kind: str = "") -> None:
+    _append_dialog_turn(state, "bot", text)
+    question = _extract_last_question(text)
+    if question:
+        state["last_bot_question"] = question
+    if offer_type:
+        state["last_offer_type"] = offer_type
+    if answer_kind:
+        state["last_answer_kind"] = answer_kind
+
+
+def _followup_state_payload(state: dict[str, Any]) -> dict[str, Any]:
+    selected = state.get("selected_option") or {}
+    return {
+        "params": dict(state.get("params") or {}),
+        "selected_option": selected.get("name") if isinstance(selected, dict) else None,
+        "visible_options": [o.get("name") for o in (state.get("visible_options") or [])[:3]],
+        "last_bot_question": state.get("last_bot_question") or "",
+        "last_offer_type": state.get("last_offer_type") or "",
+        "last_answer_kind": state.get("last_answer_kind") or "",
+        "selected_option_card_shown_count": int(state.get("selected_option_card_shown_count") or 0),
+    }
+
+
+def _clarification_from_followup(meta: dict[str, Any], state: dict[str, Any]) -> str:
+    question = str(meta.get("clarification_question") or "").strip()
+    if question:
+        return question
+    offer = str(state.get("last_offer_type") or "")
+    if offer == "compare_selected":
+        return "Уточните, пожалуйста: сравнить этот ЖК с похожими или проверить актуальные квартиры у оператора?"
+    if offer == "operator_for_selected":
+        return "Уточните, пожалуйста: передать оператору или продолжить подбор здесь?"
+    if offer == "choose_option":
+        return "Какой вариант посмотрим подробнее — первый, второй или третий?"
+    return "Уточните, пожалуйста, что сделать дальше: продолжить подбор или изменить условия?"
 
 
 def _parse_budget_callback_value(value: str) -> int | None:
@@ -638,12 +697,12 @@ def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
     if selected and _needs_operator_for_selected_option(t):
         return {"intent": "operator_for_selected", "option": selected}
 
-    # PRODUCT_TZ: «да», «интересно», «подходит» после выбора варианта — это подтверждение
-    # интереса к выбранному ЖК, а не повод заново спрашивать бюджет/комнаты.
-    # Но «подробнее»/«расскажи» после уже раскрытой карточки ведём к оператору выше:
-    # новых подтверждённых данных в памяти нет, повторять ту же карточку нельзя.
-    if selected and re.search(r"(^|\s)(да|интересно|подходит|хочу|ок|ага)(\s|$)", t):
-        return {"intent": "select_option", "option": selected}
+    # Короткие смысловые ответы после вопроса Ирины («да», «нет», «хочу»,
+    # «возможно», «наверное») нельзя понимать без контекста. Их отдаём
+    # follow-up classifier'у: он видит last_bot_question/last_offer_type и
+    # возвращает действие. Так бот не повторяет карточку на «да».
+    if selected and re.fullmatch(r"\s*[а-яa-z\s]{1,40}\s*", t):
+        return {"intent": "followup_classifier", "option": selected}
 
     if not options:
         return {"intent": "new_search"}
@@ -800,6 +859,9 @@ def _dialog_state_preview(state: dict[str, Any]) -> dict[str, Any]:
         "selected_option": selected.get("name") if isinstance(selected, dict) else None,
         "turns_after_results": state.get("turns_after_results"),
         "awaiting_phone": bool(state.get("awaiting_phone")),
+        "last_bot_question": state.get("last_bot_question"),
+        "last_offer_type": state.get("last_offer_type"),
+        "last_answer_kind": state.get("last_answer_kind"),
     }
 
 
@@ -1527,12 +1589,72 @@ def main() -> None:
             return
 
         params_before = dict(state.get("params", {}))
+        _append_dialog_turn(state, "user", text)
 
         # H016: короткие follow-up сообщения («второй», «подешевле») решаем из памяти,
         # без нового общего поиска через Overmind.
         dialog_intent = _resolve_dialog_intent(text, state)
+        if dialog_intent.get("intent") == "followup_classifier":
+            followup_meta = await followup_intent_classifier.classify_followup_intent(
+                await client.ensure_session(),
+                user_text=text,
+                dialog_window=state.get("dialog_window") or [],
+                state=_followup_state_payload(state),
+            )
+            _log_event({
+                "kind": "followup_intent",
+                "uid": uid,
+                "user_text": text,
+                "meta": followup_meta,
+                "state": _followup_state_payload(state),
+            })
+            followup_intent = followup_meta.get("intent")
+            selected = state.get("selected_option")
+            if followup_intent == "compare_selected" and selected:
+                selected_name = _compact_option_text(selected.get("name"))
+                options = state.get("visible_options") or state.get("last_options") or []
+                dialog_intent = {
+                    "intent": "compare_others",
+                    "options": [
+                        option for option in options
+                        if _compact_option_text(option.get("name")) != selected_name
+                    ][:3],
+                }
+            elif followup_intent == "operator_for_selected" and selected:
+                dialog_intent = {"intent": "operator_for_selected", "option": selected}
+            elif followup_intent == "update_search_params":
+                params_delta = followup_meta.get("params_delta") if isinstance(followup_meta.get("params_delta"), dict) else {}
+                if params_delta:
+                    state["params"] = {**state.get("params", {}), **params_delta}
+                    LOGGER.info("User %d: params updated from followup: %s", uid, state["params"])
+                dialog_intent = {"intent": "new_search"}
+            else:
+                response = _prepare_response_text(_clarification_from_followup(followup_meta, state))
+                _remember_bot_response(state, response, offer_type="clarify", answer_kind="clarification")
+                _log_event({
+                    "kind": "user_message",
+                    "uid": uid,
+                    "user_text": text,
+                    "dialog_intent": "clarify",
+                    "search_model": state["search_model"],
+                    "chat_model": state["chat_model"],
+                    "mcp": state["mcp"],
+                    "params_before": params_before,
+                    "params_after": dict(state.get("params", {})),
+                    "params_delta": {},
+                    "response_text": response,
+                    "response_len": len(response),
+                    "buttons": [],
+                    "duration_ms": 0,
+                    "is_error": False,
+                    "error": None,
+                    "cost": {},
+                })
+                await update.message.reply_text(_to_html(response), parse_mode="HTML")
+                return
         if dialog_intent.get("intent") == "select_option":
             state["selected_option"] = dialog_intent["option"]
+            state["selected_option_card_shown_count"] = int(state.get("selected_option_card_shown_count") or 0) + 1
             response = _prepare_response_text(_format_option_response(dialog_intent["option"], state.get("params", {}).get("purpose")))
             response = await _maybe_style_text(
                 client,
@@ -1563,6 +1685,7 @@ def main() -> None:
                 "cost": {},
             })
             state["last_buttons"] = kb_rows
+            _remember_bot_response(state, response, offer_type="compare_selected", answer_kind="selected_option_card")
             await update.message.reply_text(_to_html(response), parse_mode="HTML")
             return
 
@@ -1594,6 +1717,7 @@ def main() -> None:
                 "buttons": _button_log_preview(kb_rows),
             })
             state["last_buttons"] = kb_rows
+            _remember_bot_response(state, response, offer_type="operator_for_selected", answer_kind="operator_handoff")
             await update.message.reply_text(_to_html(response), parse_mode="HTML")
             return
 
@@ -1632,6 +1756,7 @@ def main() -> None:
                 "cost": {},
             })
             state["last_buttons"] = kb_rows
+            _remember_bot_response(state, response, offer_type="choose_option", answer_kind="options_summary")
             await update.message.reply_text(_to_html(response), parse_mode="HTML")
             return
 
@@ -1667,6 +1792,7 @@ def main() -> None:
             })
             kb = {"inline_keyboard": kb_rows} if kb_rows else None
             state["last_buttons"] = kb_rows
+            _remember_bot_response(state, response, offer_type="choose_option", answer_kind="options_summary")
             await update.message.reply_text(_to_html(response), reply_markup=kb, parse_mode="HTML")
             return
 
@@ -1706,6 +1832,7 @@ def main() -> None:
             })
             kb = {"inline_keyboard": kb_rows} if kb_rows else None
             state["last_buttons"] = kb_rows
+            _remember_bot_response(state, response, offer_type="choose_option", answer_kind="options_summary")
             await update.message.reply_text(_to_html(response), reply_markup=kb, parse_mode="HTML")
             return
 
@@ -1789,6 +1916,10 @@ def main() -> None:
         kb_rows = _markup_from_chat_buttons(chat_meta, state, response, scenario)
         markup: dict | None = {"inline_keyboard": kb_rows} if kb_rows else None
         state["last_buttons"] = kb_rows
+        if state.get("visible_options"):
+            _remember_bot_response(state, response, offer_type="choose_option", answer_kind="options_summary")
+        else:
+            _remember_bot_response(state, response, offer_type="", answer_kind="main_search")
 
         # Experiment Loop: фиксируем вход + результат
         _log_event({

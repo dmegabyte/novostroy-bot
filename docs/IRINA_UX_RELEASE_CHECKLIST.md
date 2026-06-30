@@ -9,7 +9,7 @@
 Нельзя говорить “готово” после изменения клиентского ответа, промпта, выбора вариантов, форматирования, operator handoff или no-buttons UX, пока не пройден полный gate:
 
 ```bash
-python3 -m py_compile scripts/chat_cli.py scripts/chat_tester_bot.py scripts/nmbot_test_agent.py text_style_tool.py scene_classifier.py style_scenes.py tests/scene_router_test.py
+python3 -m py_compile scripts/chat_cli.py scripts/chat_tester_bot.py scripts/nmbot_test_agent.py text_style_tool.py scene_classifier.py followup_intent_classifier.py style_scenes.py tests/scene_router_test.py
 python3 tests/scene_router_test.py
 python3 scripts/nmbot_test_agent.py --suite h028
 python3 scripts/nmbot_test_agent.py --suite h029
@@ -34,6 +34,7 @@ python3 scripts/nmbot_test_agent.py --suite dialog
 5. Выбор текстом вроде `2. ЖК «...»` матчится по названию ЖК.
 6. Карточка выбранного ЖК не показывает сырые поля: `msk`, голые числа цены, JSON, MCP, внутренние ключи.
 7. `подробнее` после выбранного ЖК не повторяет ту же карточку, а ведёт к оператору, если новых подтверждённых фактов нет.
+8. Короткие ответы `да/нет/возможно` после вопроса Ирины не повторяют карточку, а уходят в follow-up classifier.
 
 ## Формула готовности
 
@@ -48,3 +49,4 @@ commit + push + deploy + service active + fresh live commit + deploy smoke + UX 
 - `docs/PRODUCT_TZ.md` — сначала польза, потом уточнение, затем оператор; MCP — единственный источник фактов.
 - `docs/IRINA_FIRST_REPLY_GUIDE.md` — no-buttons UX, абзацы, один следующий вопрос.
 - `scripts/nmbot_test_agent.py --suite ux_e2e` — регрессия полного пути после no-buttons.
+- `followup_intent_classifier.py` — безопасный классификатор коротких ответов клиента по контексту диалога.

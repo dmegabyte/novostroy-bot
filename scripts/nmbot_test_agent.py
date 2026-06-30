@@ -87,6 +87,8 @@ from chat_tester_bot import (  # noqa: E402
     _parse_budget_callback_value,
     _pick_quick_actions,
     _phone_captured_farewell,
+    _normalize_phone,
+    _phone_log_meta,
     _reset_dialog_state_preserve_settings,
     _resolve_dialog_intent,
     _safe_user_error_message,
@@ -1229,6 +1231,22 @@ def _run_h021_unit_tests() -> list[Result]:
         passed=pass_farewell,
         error="" if pass_farewell else f"bad farewell: {_phone_captured_farewell()}",
         response_text=_phone_captured_farewell(),
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    normalized_phone = _normalize_phone("+7 (900) 000-00-01")
+    phone_meta = _phone_log_meta(normalized_phone)
+    pass_phone_meta = (
+        normalized_phone == "+79000000001"
+        and phone_meta == {"phone_len": 11, "phone_last4": "0001"}
+        and "+79000000001" not in json.dumps(phone_meta, ensure_ascii=False)
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="phone_contact_normalized_and_log_is_safe",
+        passed=pass_phone_meta,
+        error="" if pass_phone_meta else f"phone={normalized_phone}, meta={phone_meta}",
+        response_text=f"meta={phone_meta}",
         duration_ms=int((time.time() - started) * 1000),
     ))
 

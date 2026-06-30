@@ -603,6 +603,16 @@ def _phone_captured_farewell() -> str:
     )
 
 
+def _normalize_phone(raw: Any) -> str:
+    """Оставляем только безопасную форму номера для валидации; в логи полный номер не пишем."""
+    return "".join(ch for ch in str(raw or "") if ch.isdigit() or ch == "+")
+
+
+def _phone_log_meta(phone: str) -> dict[str, Any]:
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    return {"phone_len": len(digits), "phone_last4": digits[-4:] if len(digits) >= 4 else ""}
+
+
 def _build_known_option_prompt(option: dict[str, Any], client_request: str) -> str:
     """Контекст для LLM: раскрыть выбранный ЖК по уже известным данным, без нового поиска и выдумок."""
     safe_option = {
@@ -1083,7 +1093,7 @@ def main() -> None:
         sys.exit(1)
 
     try:
-        from telegram import Update
+        from telegram import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, Update
         from telegram.ext import (
             Application,
             CallbackQueryHandler,
@@ -1107,6 +1117,14 @@ def main() -> None:
 
     client = OvermindClient()
     user_state: dict[int, dict] = {}
+
+    def contact_request_markup() -> ReplyKeyboardMarkup:
+        return ReplyKeyboardMarkup(
+            [[KeyboardButton("📱 Поделиться контактом", request_contact=True)]],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+            input_field_placeholder="Нажмите кнопку или напишите номер",
+        )
 
     async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         uid = update.effective_user.id if update.effective_user else 0
@@ -1288,7 +1306,11 @@ def main() -> None:
                         "state_before": state_before_callback,
                         "state_after": _dialog_state_preview(state)})
             state["last_buttons"] = []
-            await query.edit_message_text("Передаю оператору. Напишите номер телефона в ответ — передам запрос вместе с контекстом диалога.")
+            await query.edit_message_text("Передаю оператору. Нажмите кнопку «Поделиться контактом» или напишите номер — передам запрос вместе с контекстом диалога.")
+            await query.message.reply_text(
+                "Так оператор сможет быстрее связаться и проверить актуальные варианты.",
+                reply_markup=contact_request_markup(),
+            )
             return
         elif query.data == "toggle_mcp":
             state["mcp"] = not state["mcp"]
@@ -1339,10 +1361,10 @@ def main() -> None:
 
         # H009: если клиент только что нажал «Связаться с оператором», трактуем текст как номер телефона
         if state.pop("awaiting_phone", None):
-            phone = "".join(ch for ch in text if ch.isdigit() or ch == "+")
+            phone = _normalize_phone(text)
             if 10 <= len(phone) <= 15:
-                _log_event({"kind": "phone_captured", "uid": uid, "phone": phone})
-                await update.message.reply_text(_phone_captured_farewell())
+                _log_event({"kind": "phone_captured", "uid": uid, "source": "text", **_phone_log_meta(phone)})
+                await update.message.reply_text(_phone_captured_farewell(), reply_markup=ReplyKeyboardRemove())
                 return
             else:
                 await update.message.reply_text("Похоже, это не номер. Напишите телефон в формате +7XXXXXXXXXX или просто продиктуйте цифрами.")
@@ -1575,6 +1597,31 @@ def main() -> None:
             await indicator.edit_text(_to_html(response), parse_mode="HTML", reply_markup=markup)
             LOGGER.info("User %d: final response sent", uid)
 
+    async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.message or not update.message.contact:
+            return
+
+        uid = update.effective_user.id if update.effective_user else 0
+        state = user_state.setdefault(uid, _default_state())
+        phone = _normalize_phone(update.message.contact.phone_number)
+        if 10 <= len(phone) <= 15:
+            was_awaiting = bool(state.pop("awaiting_phone", None))
+            _log_event({
+                "kind": "phone_captured",
+                "uid": uid,
+                "source": "contact",
+                "was_awaiting_phone": was_awaiting,
+                "state_after": _dialog_state_preview(state),
+                **_phone_log_meta(phone),
+            })
+            await update.message.reply_text(_phone_captured_farewell(), reply_markup=ReplyKeyboardRemove())
+            return
+
+        await update.message.reply_text(
+            "Контакт пришёл без понятного номера. Напишите телефон текстом в формате +7XXXXXXXXXX.",
+            reply_markup=contact_request_markup(),
+        )
+
     builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     if TELEGRAM_API_BASE_URL:
         builder = builder.base_url(TELEGRAM_API_BASE_URL)
@@ -1585,6 +1632,7 @@ def main() -> None:
     app.add_handler(CommandHandler("mcp", mcp_command))
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("🤖 nmbot запущен. Нажми Ctrl+C для остановки.")

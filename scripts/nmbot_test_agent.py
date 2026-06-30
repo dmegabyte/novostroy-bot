@@ -80,6 +80,7 @@ from chat_tester_bot import (  # noqa: E402
     _callback_button_text,
     _build_known_option_prompt,
     _format_option_response,
+    _format_options_summary_response,
     _format_numbered_list_spacing,
     _format_operator_handoff_for_option,
     _markup_from_chat_buttons,
@@ -841,11 +842,13 @@ async def _main(suite: str, json_mode: bool, chat_max_tokens: int) -> int:
 
     # H021: unit-тесты для _pick_quick_actions — прямой вызов (без Overmind).
     # Гарантирует что кнопки бюджета опираются на min(price_min), а не на хардкод.
-    if suite in ("all", "h021", "h023", "h024", "h026", "h028", "h029"):
+    if suite in ("all", "h021", "h023", "h024", "h026", "h028", "h029", "ux_e2e"):
         if not json_mode:
-            print("  (H021/H023/H024/H026/H028/H029 unit-тесты — без Overmind)…")
+            print("  (H021/H023/H024/H026/H028/H029/UX_E2E unit-тесты — без Overmind)…")
         for r in _run_h021_unit_tests():
             if suite in ("h021", "h023", "h024", "h026", "h028", "h029") and r.suite != suite:
+                continue
+            if suite == "ux_e2e" and r.suite != "ux_e2e":
                 continue
             results.append(r)
             if not json_mode:
@@ -915,6 +918,16 @@ def _run_h021_unit_tests() -> list[Result]:
     """Юнит-тесты H021: _pick_quick_actions возвращает корректные budget-кнопки."""
     results: list[Result] = []
     started = time.time()
+
+    def add_result(suite_name: str, scenario: str, passed: bool, response_text: str = "", error: str = "") -> None:
+        results.append(Result(
+            suite=suite_name,
+            scenario=scenario,
+            passed=passed,
+            error="" if passed else error,
+            response_text=response_text,
+            duration_ms=int((time.time() - started) * 1000),
+        ))
 
     # Тест 1: A-found-some с min(price_min)=7.4 млн → кнопки [8, 10, 12], НЕ [5, ...]
     state_a = {
@@ -1191,6 +1204,56 @@ def _run_h021_unit_tests() -> list[Result]:
         response_text=card,
         duration_ms=int((time.time() - started) * 1000),
     ))
+
+    # UX_E2E: полный no-buttons путь без Overmind: список → выбор цифрой/текстом → карточка → подробнее → оператор.
+    e2e_raw_options = [
+        {"idx": 1, "name": "Амурский парк", "location": "msk", "price": "20000000", "price_min": 20_000_000},
+        {"idx": 2, "name": "ЖК «Южные Сады»", "location": "msk", "price": "16000000", "price_min": 16_000_000},
+        {"idx": 3, "name": "ЖК «Сиреневый парк»", "location": "msk", "price": "17720677", "price_min": 17_720_677},
+    ]
+    e2e_visible_response = _format_options_summary_response(
+        [e2e_raw_options[1], e2e_raw_options[2], e2e_raw_options[0]],
+        "Да, есть несколько вариантов, которые подходят для инвестиций",
+        "Какой вариант вам интереснее рассмотреть подробнее?",
+    )
+    e2e_visible_options = _visible_options_from_response(e2e_visible_response, e2e_raw_options)
+    e2e_state = {"last_options": e2e_raw_options, "visible_options": e2e_visible_options, "selected_option": None}
+    e2e_rows = _markup_from_chat_buttons({"_buttons": [{"text": "Подробнее", "action": "details"}]}, e2e_state, e2e_visible_response, "ux-e2e")
+    e2e_select_three = _resolve_dialog_intent("3", e2e_state)
+    e2e_select_two_text = _resolve_dialog_intent("2. ЖК «Сиреневый парк», цена от 17,7 млн", e2e_state)
+    e2e_option = e2e_select_three.get("option") or {}
+    e2e_card = _format_option_response(e2e_option)
+    e2e_card_low = e2e_card.lower()
+    e2e_selected_state = {"last_options": e2e_raw_options, "visible_options": e2e_visible_options, "selected_option": e2e_option}
+    e2e_more = _resolve_dialog_intent("подробнее", e2e_selected_state)
+    e2e_handoff = _format_operator_handoff_for_option(e2e_option)
+    e2e_handoff_low = e2e_handoff.lower()
+    e2e_pass = (
+        e2e_rows == []
+        and "\n\n1." in e2e_visible_response
+        and "\n\nКакой вариант" in e2e_visible_response
+        and [o.get("name") for o in e2e_visible_options] == ["ЖК «Южные Сады»", "ЖК «Сиреневый парк»", "Амурский парк"]
+        and e2e_select_three.get("option", {}).get("name") == "Амурский парк"
+        and e2e_select_two_text.get("option", {}).get("name") == "ЖК «Сиреневый парк»"
+        and "msk" not in e2e_card_low
+        and "17720677" not in e2e_card
+        and "москва" in e2e_card_low
+        and "млн рублей" in e2e_card_low
+        and e2e_more.get("intent") == "operator_for_selected"
+        and "оператор" in e2e_handoff_low
+        and "mcp" not in e2e_handoff_low
+        and "json" not in e2e_handoff_low
+    )
+    add_result(
+        "ux_e2e",
+        "no_buttons_visible_choice_card_details_operator",
+        e2e_pass,
+        response_text=f"visible={e2e_visible_response}\n--- card={e2e_card}\n--- handoff={e2e_handoff}",
+        error=(
+            f"rows={e2e_rows}; visible={[o.get('name') for o in e2e_visible_options]}; "
+            f"three={e2e_select_three}; two_text={e2e_select_two_text}; more={e2e_more}; card={e2e_card}; handoff={e2e_handoff}"
+        ),
+    )
 
     raw_opt = {
         "idx": 3,
@@ -1515,7 +1578,7 @@ def _run_required_deploy_gate() -> Result:
     return _run_deploy_smoke_test()
 def main() -> None:
     p = argparse.ArgumentParser(description="nmbot test agent — codex + H016 + golden")
-    p.add_argument("--suite", default="all", choices=["all", "codex", "h016", "golden", "h021", "h023", "h024", "h026", "h028", "h029", "deploy", "dialog"])
+    p.add_argument("--suite", default="all", choices=["all", "codex", "h016", "golden", "h021", "h023", "h024", "h026", "h028", "h029", "ux_e2e", "deploy", "dialog"])
     p.add_argument("--json", action="store_true", help="JSON-режим для CI")
     p.add_argument("--chat-max-tokens", type=int, default=10000)
     args = p.parse_args()

@@ -580,6 +580,59 @@ def _local_followup_intent(text: str, state: dict[str, Any]) -> str:
     return ""
 
 
+def _pure_option_choice_index(text: str) -> int | None:
+    """Возвращает номер варианта только для чистого выбора без другого смысла.
+
+    Важно: `15 млн`, `1 но дорого`, `2 если с отделкой` — не выбор варианта.
+    Такие фразы должен понимать LLM follow-up router по контексту вопроса.
+    """
+    t = text.lower().replace("ё", "е").strip()
+    t = re.sub(r"\s+", " ", t)
+    mapping = {
+        1: (r"1\.?", r"перв(ый|ого)?( вариант)?"),
+        2: (r"2\.?", r"втор(ой|ого)?( вариант)?"),
+        3: (r"3\.?", r"трет(ий|ьего)?( вариант)?"),
+    }
+    for idx, patterns in mapping.items():
+        if any(re.fullmatch(pattern, t) for pattern in patterns):
+            return idx
+    return None
+
+
+def _match_option_from_text(text: str, options: list[dict[str, Any]]) -> dict[str, Any] | None:
+    compact_t = _compact_option_text(text)
+    for option in options:
+        name = _compact_option_text(option.get("name"))
+        if name and name in compact_t:
+            return option
+        name_words = [w for w in name.split() if len(w) >= 4]
+        name_words = [w for w in name_words if w not in ("жилой", "квартал", "комплекс")]
+        if name_words and all(w in compact_t for w in name_words[:2]):
+            return option
+    return None
+
+
+def _normalize_followup_params_delta(delta: dict[str, Any]) -> dict[str, Any]:
+    """Приводит LLM params_delta к ключам, которые уже понимает поиск.
+
+    LLM может вернуть `budget: 15000000`, а текущий state/search ожидает
+    `max_price`. Нормализуем здесь, не заставляя classifier угадывать внутренний
+    нейминг идеально.
+    """
+    out = dict(delta or {})
+    budget = out.pop("budget", None) or out.pop("max_budget", None)
+    if budget is not None and not out.get("max_price"):
+        try:
+            if isinstance(budget, str):
+                parsed = _price_min(budget)
+                out["max_price"] = parsed if parsed else budget
+            else:
+                out["max_price"] = int(budget)
+        except Exception:
+            out["max_price"] = budget
+    return out
+
+
 def _operator_reason_response(state: dict[str, Any]) -> str:
     selected = state.get("selected_option") or {}
     name = selected.get("name") if isinstance(selected, dict) else "этот ЖК"
@@ -741,6 +794,10 @@ def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
     options = visible_options or memory_options
     selected = state.get("selected_option")
 
+    pure_idx = _pure_option_choice_index(text)
+    if pure_idx and options and 1 <= pure_idx <= len(options):
+        return {"intent": "select_option", "option": options[pure_idx - 1]}
+
     if selected and options and re.search(r"(похож|сравн|друг|еще|ещё|альтернатив)", t):
         selected_name = _compact_option_text(selected.get("name"))
         other_options = [
@@ -762,30 +819,12 @@ def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
     if not options:
         return {"intent": "new_search"}
 
-    # H026: follow-up по названию ЖК из памяти: «что по белой даче»,
-    # «расскажи про дюну» — отвечаем из last_options, без нового MCP.
-    compact_t = _compact_option_text(t)
-    # Если клиент прислал строку из списка с названием ЖК, выбираем по названию,
-    # а не по случайному порядку в raw MCP.
-    for option in [*options, *[o for o in memory_options if o not in options]]:
-        name = _compact_option_text(option.get("name"))
-        if name and name in compact_t:
-            return {"intent": "select_option", "option": option}
-        name_words = [w for w in name.split() if len(w) >= 4]
-        # Игнорируем общие слова, чтобы «жк» не матчило всё подряд.
-        name_words = [w for w in name_words if w not in ("жилой", "квартал", "комплекс")]
-        if name_words and all(w in compact_t for w in name_words[:2]):
-            return {"intent": "select_option", "option": option}
-
-    ordinal = {
-        "перв": 1, "1": 1, "один": 1,
-        "втор": 2, "2": 2, "два": 2,
-        "трет": 3, "3": 3, "три": 3,
-    }
-    for key, idx in ordinal.items():
-        if re.search(rf"(^|\s){re.escape(key)}", t):
-            if 1 <= idx <= len(options):
-                return {"intent": "select_option", "option": options[idx - 1]}
+    # Всё смешанное после списка — не «кнопка», а смысловая фраза.
+    # Например: «бюджет, у меня 15 млн», «1 но дорого», «второй если с отделкой».
+    # Такое отдаём LLM follow-up router'у, чтобы он выбрал update_search_params /
+    # choose_option / clarify по контексту последнего вопроса.
+    if options:
+        return {"intent": "followup_classifier"}
 
     if "дешев" in t or "подеш" in t:
         sorted_opts = sorted(options, key=lambda o: o.get("price_min") or 10**18)
@@ -1739,6 +1778,26 @@ def main() -> None:
                 }
             elif followup_intent == "operator_for_selected" and selected:
                 dialog_intent = {"intent": "operator_for_selected", "option": selected}
+            elif followup_intent == "choose_option":
+                target = str(followup_meta.get("target") or text)
+                options = state.get("visible_options") or state.get("last_options") or []
+                idx = _pure_option_choice_index(target)
+                matched = options[idx - 1] if idx and 1 <= idx <= len(options) else _match_option_from_text(target, options)
+                if matched:
+                    dialog_intent = {"intent": "select_option", "option": matched}
+                else:
+                    response = _prepare_response_text(_clarification_from_followup(followup_meta, state))
+                    _remember_bot_response(state, response, offer_type="clarify", answer_kind="clarification")
+                    _log_event({
+                        "kind": "user_message", "uid": uid, "user_text": text,
+                        "dialog_intent": "clarify", "search_model": state["search_model"],
+                        "chat_model": state["chat_model"], "mcp": state["mcp"],
+                        "params_before": params_before, "params_after": dict(state.get("params", {})),
+                        "params_delta": {}, "response_text": response, "response_len": len(response),
+                        "buttons": [], "duration_ms": 0, "is_error": False, "error": None, "cost": {},
+                    })
+                    await update.message.reply_text(_to_html(response), parse_mode="HTML")
+                    return
             elif followup_intent == "explain_operator_reason" and selected:
                 response = _prepare_response_text(_operator_reason_response(state))
                 _remember_bot_response(state, response, offer_type="operator_for_selected", answer_kind="operator_explanation")
@@ -1789,9 +1848,12 @@ def main() -> None:
                 return
             elif followup_intent == "update_search_params":
                 params_delta = followup_meta.get("params_delta") if isinstance(followup_meta.get("params_delta"), dict) else {}
+                params_delta = _normalize_followup_params_delta(params_delta)
                 if params_delta:
                     state["params"] = {**state.get("params", {}), **params_delta}
                     LOGGER.info("User %d: params updated from followup: %s", uid, state["params"])
+                dialog_intent = {"intent": "new_search"}
+            elif followup_intent == "new_search":
                 dialog_intent = {"intent": "new_search"}
             else:
                 response = _prepare_response_text(_clarification_from_followup(followup_meta, state))

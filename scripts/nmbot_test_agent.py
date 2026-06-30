@@ -95,6 +95,8 @@ from chat_tester_bot import (  # noqa: E402
     _phone_captured_farewell,
     _normalize_phone,
     _phone_log_meta,
+    _pure_option_choice_index,
+    _normalize_followup_params_delta,
     _reset_dialog_state_preserve_settings,
     _resolve_dialog_intent,
     _remember_bot_response,
@@ -1142,17 +1144,26 @@ def _run_h021_unit_tests() -> list[Result]:
     state_visible = {"last_options": raw_options, "visible_options": visible_options, "selected_option": None}
     intent_one = _resolve_dialog_intent("1", state_visible)
     intent_two_text = _resolve_dialog_intent("2. ЖК «Сиреневый парк», цена от 18.1 млн", state_visible)
+    intent_budget_mixed = _resolve_dialog_intent("бюджет, у меня только 15 млн на руках", state_visible)
+    intent_one_but_expensive = _resolve_dialog_intent("1 но дорого", state_visible)
+    normalized_delta = _normalize_followup_params_delta({"budget": 15_000_000, "priority": "budget"})
     pass_visible_select = (
         [o.get("name") for o in visible_options] == ["Южные Сады", "Сиреневый парк", "Амурский парк"]
         and intent_one.get("option", {}).get("name") == "Южные Сады"
-        and intent_two_text.get("option", {}).get("name") == "Сиреневый парк"
+        and intent_two_text.get("intent") == "followup_classifier"
+        and intent_budget_mixed.get("intent") == "followup_classifier"
+        and intent_one_but_expensive.get("intent") == "followup_classifier"
+        and _pure_option_choice_index("1") == 1
+        and _pure_option_choice_index("15 млн") is None
+        and normalized_delta.get("max_price") == 15_000_000
+        and "budget" not in normalized_delta
     )
     results.append(Result(
         suite="h028",
         scenario="text_choice_uses_visible_list_order_and_name",
         passed=pass_visible_select,
-        error="" if pass_visible_select else f"visible={visible_options}; one={intent_one}; two={intent_two_text}",
-        response_text=f"visible={[o.get('name') for o in visible_options]}; one={intent_one.get('option', {}).get('name')}; two={intent_two_text.get('option', {}).get('name')}",
+        error="" if pass_visible_select else f"visible={visible_options}; one={intent_one}; two={intent_two_text}; budget={intent_budget_mixed}; one_exp={intent_one_but_expensive}; delta={normalized_delta}",
+        response_text=f"visible={[o.get('name') for o in visible_options]}; one={intent_one.get('option', {}).get('name')}; two={intent_two_text.get('intent')}; budget={intent_budget_mixed.get('intent')}; one_exp={intent_one_but_expensive.get('intent')}; delta={normalized_delta}",
         duration_ms=int((time.time() - started) * 1000),
     ))
 
@@ -1162,7 +1173,7 @@ def _run_h021_unit_tests() -> list[Result]:
     ]
     state_finish = {"last_options": memory_options, "selected_option": None}
     intent_finish = _resolve_dialog_intent("с отделкой", state_finish)
-    pass_finish = intent_finish.get("intent") == "filter_finish" and intent_finish.get("options", [{}])[0].get("name") == "ЖК «Второй»"
+    pass_finish = intent_finish.get("intent") == "followup_classifier"
     results.append(Result(
         suite="h028",
         scenario="finish_refinement_uses_memory_not_new_search",
@@ -1241,7 +1252,7 @@ def _run_h021_unit_tests() -> list[Result]:
         and "\n\nКакой вариант" in e2e_visible_response
         and [o.get("name") for o in e2e_visible_options] == ["ЖК «Южные Сады»", "ЖК «Сиреневый парк»", "Амурский парк"]
         and e2e_select_three.get("option", {}).get("name") == "Амурский парк"
-        and e2e_select_two_text.get("option", {}).get("name") == "ЖК «Сиреневый парк»"
+        and e2e_select_two_text.get("intent") == "followup_classifier"
         and "msk" not in e2e_card_low
         and "17720677" not in e2e_card
         and "москва" in e2e_card_low

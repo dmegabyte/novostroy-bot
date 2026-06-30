@@ -45,6 +45,7 @@ from typing import Any, Callable
 
 REPO = Path(__file__).resolve().parent.parent
 REVIEW_LOG = REPO / "logs" / "dialog_reviews.md"
+sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(REPO / "scripts"))
 
 
@@ -77,7 +78,6 @@ from chat_tester_bot import (  # noqa: E402
     CHAT_SYSTEM_PROMPT,
     _button_log_preview,
     _callback_button_text,
-    _contract_buttons_to_rows,
     _build_known_option_prompt,
     _format_option_response,
     _format_numbered_list_spacing,
@@ -1072,19 +1072,19 @@ def _run_h021_unit_tests() -> list[Result]:
         duration_ms=int((time.time() - started) * 1000),
     ))
 
-    # H028: PRODUCT_TZ buttons[] — кнопки должны отвечать вопросу и не тащить раннего оператора.
+    # H028/H033: обычный клиентский UX больше не показывает inline-кнопки.
     opt = {"idx": 1, "name": "ЖК «Новые Котельники»", "price": "5.75-6.98 млн", "price_min": 5_750_000}
     state_buttons = {"last_options": [opt], "last_result": {"found": True}, "selected_option": None}
-    rows = _contract_buttons_to_rows([
+    rows = _markup_from_chat_buttons({"_buttons": [
         {"text": "Да, подробнее", "action": "details", "value": {"option_index": 1}},
         {"text": "MCP JSON", "action": "details", "value": {"option_index": 1}},
         {"text": "📞 Оператор", "action": "operator"},
-    ], state_buttons, "Хотите узнать подробнее про этот ЖК?")
-    expected_rows = [[{"text": "Да, подробнее", "callback_data": "action:details:1"}]]
+    ]}, state_buttons, "Хотите узнать подробнее про этот ЖК?", "selected-option")
+    expected_rows: list[list[dict[str, str]]] = []
     pass_buttons = rows == expected_rows
     results.append(Result(
         suite="h028",
-        scenario="contract_buttons_filter_tech_and_early_operator",
+        scenario="normal_dialog_does_not_show_inline_buttons",
         passed=pass_buttons,
         error="" if pass_buttons else f"rows {rows} != {expected_rows}",
         response_text=f"rows={rows}",
@@ -1093,14 +1093,15 @@ def _run_h021_unit_tests() -> list[Result]:
 
     state_selected = {"selected_option": opt, "last_options": [opt]}
     intent_yes = _resolve_dialog_intent("да", state_selected).get("intent")
+    intent_details = _resolve_dialog_intent("подробнее", state_selected).get("intent")
     intent_booking = _resolve_dialog_intent("можно забронировать?", state_selected).get("intent")
-    pass_memory = intent_yes == "select_option" and intent_booking == "operator_for_selected"
+    pass_memory = intent_yes == "select_option" and intent_details == "operator_for_selected" and intent_booking == "operator_for_selected"
     results.append(Result(
         suite="h028",
         scenario="selected_option_yes_and_booking_do_not_restart_questionnaire",
         passed=pass_memory,
-        error="" if pass_memory else f"intent_yes={intent_yes}; intent_booking={intent_booking}",
-        response_text=f"intent_yes={intent_yes}; intent_booking={intent_booking}",
+        error="" if pass_memory else f"intent_yes={intent_yes}; intent_details={intent_details}; intent_booking={intent_booking}",
+        response_text=f"intent_yes={intent_yes}; intent_details={intent_details}; intent_booking={intent_booking}",
         duration_ms=int((time.time() - started) * 1000),
     ))
 
@@ -1146,9 +1147,10 @@ def _run_h021_unit_tests() -> list[Result]:
     dry_markers = ["локация:", "цена:", "отделка:", "готовность/срок:"]
     pass_card = (
         not any(m in card_low for m in dry_markers)
-        and "хотите посмотреть этот вариант подробнее" in card_low
-        and "сравнить с похожими" in card_low
+        and "хотите сравнить этот вариант с похожими" in card_low
+        and "\n\n" in card
         and "по нему вижу" in card_low
+        and "баз" not in card_low
     )
     results.append(Result(
         suite="h029",
@@ -1205,12 +1207,12 @@ def _run_h021_unit_tests() -> list[Result]:
 
     fallback_rows = _markup_from_chat_buttons({"_buttons": []}, {"params": {}, "asked_questions": []}, "Что ищем?", "G-first-step")
     fallback_count = sum(len(row) for row in fallback_rows)
-    pass_limit = 0 < fallback_count <= 4
+    pass_limit = fallback_count == 0
     results.append(Result(
         suite="h029",
-        scenario="fallback_buttons_are_limited_to_four",
+        scenario="fallback_buttons_are_not_shown_in_normal_dialog",
         passed=pass_limit,
-        error="" if pass_limit else f"fallback rows exceed limit: {fallback_rows}",
+        error="" if pass_limit else f"fallback rows should be empty: {fallback_rows}",
         response_text=f"rows={fallback_rows}",
         duration_ms=int((time.time() - started) * 1000),
     ))
@@ -1274,30 +1276,13 @@ def _run_h021_unit_tests() -> list[Result]:
         card,
         "selected-option",
     )
-    # Фолбэк для выбранного варианта не должен давать хаотичные кнопки; live-ветка использует _selected_option_rows.
-    contract_rows = _contract_buttons_to_rows(
-        [
-            {"text": "Да, подробнее", "action": "details", "value": {"option_index": 1}},
-            {"text": "Сравнить с похожими", "action": "show_near", "value": {}},
-            {"text": "📞 Оператор", "action": "operator", "value": {}},
-        ],
-        {"last_options": [rich_opt], "selected_option": rich_opt, "last_result": {"found": True}},
-        "Хотите оставить контакт, чтобы оператор проверил актуальные квартиры?",
-    )
-    contract_callbacks = [btn["callback_data"] for row in contract_rows for btn in row]
-    pass_contract = (
-        "action:details:1" in contract_callbacks
-        and "action:show_near" in contract_callbacks
-        and "action:operator" in contract_callbacks
-        and len(contract_callbacks) <= 4
-        and selected_rows is not None
-    )
+    pass_contract = selected_rows == []
     results.append(Result(
         suite="h029",
-        scenario="details_buttons_allow_operator_after_selected_context",
+        scenario="selected_context_does_not_render_inline_buttons",
         passed=pass_contract,
-        error="" if pass_contract else f"bad contract callbacks: {contract_callbacks}; fallback={selected_rows}",
-        response_text=f"callbacks={contract_callbacks}",
+        error="" if pass_contract else f"selected rows should be empty: {selected_rows}",
+        response_text=f"rows={selected_rows}",
         duration_ms=int((time.time() - started) * 1000),
     ))
 

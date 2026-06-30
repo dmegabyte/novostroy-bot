@@ -418,17 +418,24 @@ def _to_html(text: str) -> str:
 
 
 def _format_numbered_list_spacing(text: str) -> str:
-    """Добавляет пустую строку между пунктами 1./2./3. для читаемости в Telegram."""
+    """Добавляет воздух вокруг списка и финального вопроса для читаемости в Telegram."""
     if not text:
         return text
     lines = text.splitlines()
     out: list[str] = []
+    seen_numbered_item = False
     for line in lines:
         is_item = bool(re.match(r"^\s*\d+\.\s+", line))
-        prev_is_item = bool(out and re.match(r"^\s*\d+\.\s+", out[-1]))
-        if is_item and prev_is_item:
+        is_question = bool(line.strip().endswith("?"))
+        # Перед первым пунктом списка тоже нужен отступ, а не только между 1/2/3.
+        if is_item and out and out[-1] != "":
+            out.append("")
+        # Финальный вопрос после списка читается лучше отдельным абзацем.
+        if is_question and seen_numbered_item and out and out[-1] != "":
             out.append("")
         out.append(line)
+        if is_item:
+            seen_numbered_item = True
     return "\n".join(out)
 
 
@@ -571,13 +578,15 @@ def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
         ]
         return {"intent": "compare_others", "options": other_options[:3]}
 
-    # PRODUCT_TZ: «да», «подробнее», «интересно» после выбора варианта — это подтверждение
-    # интереса к выбранному ЖК, а не повод заново спрашивать бюджет/комнаты.
-    if selected and re.search(r"(^|\s)(да|подробнее|интересно|подходит|расскажи|хочу|ок|ага)(\s|$)", t):
-        return {"intent": "select_option", "option": selected}
-
     if selected and _needs_operator_for_selected_option(t):
         return {"intent": "operator_for_selected", "option": selected}
+
+    # PRODUCT_TZ: «да», «интересно», «подходит» после выбора варианта — это подтверждение
+    # интереса к выбранному ЖК, а не повод заново спрашивать бюджет/комнаты.
+    # Но «подробнее»/«расскажи» после уже раскрытой карточки ведём к оператору выше:
+    # новых подтверждённых данных в памяти нет, повторять ту же карточку нельзя.
+    if selected and re.search(r"(^|\s)(да|интересно|подходит|хочу|ок|ага)(\s|$)", t):
+        return {"intent": "select_option", "option": selected}
 
     if not options:
         return {"intent": "new_search"}
@@ -632,6 +641,7 @@ def _needs_operator_for_selected_option(text_l: str) -> bool:
         "налич", "актуаль", "брон", "заброни", "показ", "посмотреть",
         "ипотек", "ставк", "скид", "торг", "этаж", "корпус", "квартир",
         "планиров", "платеж", "платёж", "первонач", "звон", "оператор", "менеджер",
+        "подробнее", "расскажи", "детал", "подробн",
     )
     return any(trig in text_l for trig in triggers)
 
@@ -647,10 +657,12 @@ def _format_operator_handoff_for_option(option: dict[str, Any]) -> str:
         known.append(f"по отделке: {option['finishing']}")
     if option.get("ready"):
         known.append(f"по готовности: {option['ready']}")
-    known_text = "; ".join(known) if known else "базовые данные по нему есть"
+    known_text = "; ".join(known) if known else "по нему есть только короткая карточка без дополнительных деталей"
     return (
-        f"По {name} {known_text}. Актуальное наличие, бронь, этаж, корпус, скидки и условия лучше проверить у оператора — "
-        "там уже нужна живая проверка. Хотите оставить номер для связи?"
+        f"По {name} {known_text}.\n\n"
+        "Больше подтверждённой информации прямо сейчас не добавлю, чтобы не выдумывать. "
+        "Актуальное наличие, бронь, этаж, корпус, скидки и условия лучше проверить у оператора.\n\n"
+        "Хотите оставить номер для связи?"
     )
 
 
@@ -824,13 +836,14 @@ def _format_option_response(option: dict[str, Any], purpose: Any = None) -> str:
     if facts:
         fact_text = "По нему вижу: " + "; ".join(facts[:3]) + "."
     else:
-        fact_text = "По нему есть базовая карточка в базе, но без лишних подтверждённых деталей."
+        fact_text = "По нему есть только короткая карточка без дополнительных подтверждённых деталей."
     benefit = _option_benefit(option)
     nuance = f" Важно: {option['why_close']}." if not _looks_missing(option.get("why_close")) else ""
     family_note = ""
     if str(purpose or "").lower() == "family":
         family_note = f" {_family_reason_from_facts(option).capitalize()}."
-    return f"{intro} {fact_text} Поэтому {benefit}.{family_note}{nuance} Хотите посмотреть этот вариант подробнее или сравнить с похожими?"
+    body = f"{fact_text}\n\nПоэтому {benefit}.{family_note}{nuance}"
+    return f"{intro}\n\n{body}\n\nХотите сравнить этот вариант с похожими?"
 
 
 def _format_cheaper_response(options: list[dict[str, Any]]) -> str:
@@ -845,12 +858,12 @@ def _format_cheaper_response(options: list[dict[str, Any]]) -> str:
 
 def _format_options_summary_response(options: list[dict[str, Any]], lead: str, question: str) -> str:
     chunks = []
-    for o in options[:3]:
+    for idx, o in enumerate(options[:3], start=1):
         price = f", {o['price']}" if o.get("price") else ""
         loc = f" ({o['location']})" if o.get("location") else ""
         finish = f", отделка: {o['finishing']}" if o.get("finishing") else ""
-        chunks.append(f"{o['name']}{loc}{price}{finish}")
-    return f"{lead}: " + "; ".join(chunks) + f". {question}"
+        chunks.append(f"{idx}. {o['name']}{loc}{price}{finish}")
+    return _format_numbered_list_spacing(f"{lead}:\n" + "\n".join(chunks) + f"\n{question}")
 
 
 def _option_select_rows(options: list[dict[str, Any]], max_count: int = 3) -> list[list[dict]]:

@@ -74,11 +74,16 @@ _load_dotenv_if_present()
 
 from chat_tester_bot import (  # noqa: E402
     OvermindClient,
+    CHAT_SYSTEM_PROMPT,
+    _button_log_preview,
+    _callback_button_text,
     _contract_buttons_to_rows,
     _build_known_option_prompt,
     _format_option_response,
+    _format_numbered_list_spacing,
     _format_operator_handoff_for_option,
     _markup_from_chat_buttons,
+    _prepare_response_text,
     _parse_budget_callback_value,
     _pick_quick_actions,
     _phone_captured_farewell,
@@ -1249,6 +1254,58 @@ def _run_h021_unit_tests() -> list[Result]:
         passed=pass_contract,
         error="" if pass_contract else f"bad contract callbacks: {contract_callbacks}; fallback={selected_rows}",
         response_text=f"callbacks={contract_callbacks}",
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    family_prompt = CHAT_SYSTEM_PROMPT.lower()
+    pass_family_prompt = (
+        "purpose" in family_prompt
+        and "family" in family_prompt
+        and "семь" in family_prompt
+        and "дет" in family_prompt
+        and "нельзя выдумывать" in family_prompt
+        and "закрытый двор" in family_prompt
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="family_personalization_is_in_chat_prompt",
+        passed=pass_family_prompt,
+        error="" if pass_family_prompt else "family/purpose constraints missing in chat prompt",
+        response_text="family prompt ok" if pass_family_prompt else CHAT_SYSTEM_PROMPT[:1000],
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    dense_list = "Нашла варианты:\n1. ЖК «А» — от 7 млн\n2. ЖК «Б» — от 8 млн\n3. ЖК «В» — от 9 млн\n\nКакой выбрать?"
+    spaced = _prepare_response_text(dense_list)
+    pass_spacing = "1. ЖК" in spaced and "\n\n2. ЖК" in spaced and "\n\n3. ЖК" in spaced
+    results.append(Result(
+        suite="h029",
+        scenario="numbered_list_has_blank_lines_between_items",
+        passed=pass_spacing,
+        error="" if pass_spacing else f"spacing failed: {spaced!r}",
+        response_text=spaced,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    sent_rows = [[
+        {"text": "Да, подробнее", "callback_data": "action:details:1"},
+        {"text": "Сравнить", "callback_data": "action:show_near"},
+    ]]
+    preview = _button_log_preview(sent_rows)
+    pressed_text = _callback_button_text(sent_rows, "action:details:1")
+    pass_button_log = (
+        preview == [[
+            {"text": "Да, подробнее", "callback_data": "action:details:1"},
+            {"text": "Сравнить", "callback_data": "action:show_near"},
+        ]]
+        and pressed_text == "Да, подробнее"
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="button_log_preview_and_pressed_text_are_complete",
+        passed=pass_button_log,
+        error="" if pass_button_log else f"preview={preview}, pressed={pressed_text!r}",
+        response_text=f"preview={preview}; pressed={pressed_text}",
         duration_ms=int((time.time() - started) * 1000),
     ))
 

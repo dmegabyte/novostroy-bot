@@ -381,6 +381,26 @@ def _to_html(text: str) -> str:
     return out
 
 
+def _format_numbered_list_spacing(text: str) -> str:
+    """Добавляет пустую строку между пунктами 1./2./3. для читаемости в Telegram."""
+    if not text:
+        return text
+    lines = text.splitlines()
+    out: list[str] = []
+    for line in lines:
+        is_item = bool(re.match(r"^\s*\d+\.\s+", line))
+        prev_is_item = bool(out and re.match(r"^\s*\d+\.\s+", out[-1]))
+        if is_item and prev_is_item:
+            out.append("")
+        out.append(line)
+    return "\n".join(out)
+
+
+def _prepare_response_text(text: str) -> str:
+    """Финальный лёгкий postprocess перед логом/Telegram: только форматирование, без изменения смысла."""
+    return _format_numbered_list_spacing(text)
+
+
 # H013: дефолтный state пользователя + динамические quick-actions
 def _default_state() -> dict[str, Any]:
     return {
@@ -394,6 +414,7 @@ def _default_state() -> dict[str, Any]:
         "turns_after_results": 0,
         "last_search_response": {},  # H026: полный структурированный MCP/search JSON для follow-up без нового MCP
         "asked_questions": [],  # список заданных уточнений (чтобы не повторять)
+        "last_buttons": [],  # последние реально отправленные inline-кнопки для полного dialog log
     }
 
 
@@ -601,6 +622,40 @@ def _build_known_option_prompt(option: dict[str, Any], client_request: str) -> s
         "Если клиент просит актуальное наличие, бронь, конкретную квартиру, этаж, корпус, ипотеку, скидку или показ — не подтверждай это сама, а объясни, что это проверит оператор. "
         "Верни валидный JSON с полями response, params, buttons. Кнопки должны отвечать последнему вопросу."
     )
+
+
+def _button_log_preview(rows: list[list[dict]] | None) -> list[list[dict[str, str]]]:
+    """Безопасный preview отправленных кнопок для dialogs-jsonl: только text/callback_data."""
+    preview: list[list[dict[str, str]]] = []
+    for row in rows or []:
+        safe_row: list[dict[str, str]] = []
+        for button in row:
+            safe_row.append({
+                "text": str(button.get("text") or "")[:80],
+                "callback_data": str(button.get("callback_data") or "")[:120],
+            })
+        if safe_row:
+            preview.append(safe_row)
+    return preview
+
+
+def _callback_button_text(rows: list[list[dict]] | None, callback_data: str) -> str:
+    for row in rows or []:
+        for button in row:
+            if str(button.get("callback_data") or "") == callback_data:
+                return str(button.get("text") or "")
+    return ""
+
+
+def _dialog_state_preview(state: dict[str, Any]) -> dict[str, Any]:
+    selected = state.get("selected_option") or {}
+    return {
+        "params": dict(state.get("params") or {}),
+        "last_options": [o.get("name") for o in (state.get("last_options") or [])[:4]],
+        "selected_option": selected.get("name") if isinstance(selected, dict) else None,
+        "turns_after_results": state.get("turns_after_results"),
+        "awaiting_phone": bool(state.get("awaiting_phone")),
+    }
 
 
 def _selected_option_rows(idx: int) -> list[list[dict]]:
@@ -1054,6 +1109,8 @@ def main() -> None:
     async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         uid = update.effective_user.id if update.effective_user else 0
         state = user_state.setdefault(uid, _default_state())
+        state_before_callback = _dialog_state_preview(state)
+        button_text = _callback_button_text(state.get("last_buttons"), query.data)
         _log_event({"kind": "command", "uid": uid, "command": "/status",
                     "search_model": state["search_model"], "chat_model": state["chat_model"], "mcp": state["mcp"]})
         await update.message.reply_text(
@@ -1096,7 +1153,7 @@ def main() -> None:
 
     async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
-        await query.answer()
+        await query.answer("Обрабатываю...")
         if not query.data:
             return
 
@@ -1111,24 +1168,31 @@ def main() -> None:
                 return
             option = _option_by_index(state, idx)
             if not option:
+                await query.edit_message_text("Этот вариант уже не вижу в текущем списке. Напишите запрос ещё раз — обновлю подборку.")
                 return
             state["selected_option"] = option
-            await query.answer("Раскрываю подробнее")
+            await query.edit_message_text("Раскрываю подробнее...")
             try:
                 response, chat_meta = await client.explain_known_option(
                     option=option,
                     client_request="Клиент нажал кнопку «Да, подробнее» по выбранному ЖК.",
                     chat_model=state["chat_model"],
                 )
+                response = _prepare_response_text(response)
                 kb_rows = _markup_from_chat_buttons(chat_meta, state, response, "selected-option-details")
                 markup = {"inline_keyboard": kb_rows} if kb_rows else None
             except Exception:
                 LOGGER.exception("details callback chat failed")
-                response = _format_option_response(option)
-                markup = {"inline_keyboard": _selected_option_rows(idx)}
+                response = _prepare_response_text(_format_option_response(option))
+                kb_rows = _selected_option_rows(idx)
+                markup = {"inline_keyboard": kb_rows}
             _log_event({"kind": "callback", "uid": uid, "callback": query.data,
+                        "button_text": button_text,
                         "dialog_intent": "details_known_option", "selected_option": option.get("name"),
-                        "response_text": response})
+                        "state_before": state_before_callback,
+                        "state_after": _dialog_state_preview(state),
+                        "response_text": response, "buttons": _button_log_preview(kb_rows)})
+            state["last_buttons"] = kb_rows
             await query.edit_message_text(_to_html(response), parse_mode="HTML", reply_markup=markup)
             return
 
@@ -1140,12 +1204,19 @@ def main() -> None:
                 return
             option = _option_by_index(state, idx)
             if not option:
+                await query.edit_message_text("Этот вариант уже не вижу в текущем списке. Напишите запрос ещё раз — обновлю подборку.")
                 return
             state["selected_option"] = option
-            response = _format_option_response(option)
+            response = _prepare_response_text(_format_option_response(option))
+            kb_rows = _selected_option_rows(idx)
             _log_event({"kind": "callback", "uid": uid, "callback": query.data,
-                        "dialog_intent": "select_option", "selected_option": option.get("name")})
-            kb = {"inline_keyboard": _selected_option_rows(idx)}
+                        "button_text": button_text,
+                        "dialog_intent": "select_option", "selected_option": option.get("name"),
+                        "state_before": state_before_callback,
+                        "state_after": _dialog_state_preview(state),
+                        "response_text": response, "buttons": _button_log_preview(kb_rows)})
+            kb = {"inline_keyboard": kb_rows}
+            state["last_buttons"] = kb_rows
             await query.edit_message_text(_to_html(response), parse_mode="HTML", reply_markup=kb)
             return
 
@@ -1170,18 +1241,25 @@ def main() -> None:
         elif query.data == "action:expand_district":
             state["params"]["district"] = None
         elif query.data in ("action:operator", "request_operator"):
-            _log_event({"kind": "operator_requested", "uid": uid, "trigger": "button"})
             state["awaiting_phone"] = True
-            await query.edit_message_text("Принято. Напишите номер телефона в ответ — передам оператору.")
+            _log_event({"kind": "operator_requested", "uid": uid, "trigger": "button",
+                        "callback": query.data, "button_text": button_text,
+                        "state_before": state_before_callback,
+                        "state_after": _dialog_state_preview(state)})
+            state["last_buttons"] = []
+            await query.edit_message_text("Передаю оператору. Напишите номер телефона в ответ — передам запрос вместе с контекстом диалога.")
             return
         elif query.data == "toggle_mcp":
             state["mcp"] = not state["mcp"]
         elif query.data.startswith("model:"):
             state["search_model"] = query.data[6:]
         else:
+            await query.edit_message_text("Эта кнопка уже неактуальна. Напишите запрос ещё раз — обновлю подборку.")
             return
 
         _log_event({"kind": "callback", "uid": uid, "callback": query.data,
+                    "button_text": button_text,
+                    "state_before": state_before_callback,
                     "params": state.get("params", {})})
 
         # H013: повторяем ask с обновлёнными params
@@ -1194,11 +1272,17 @@ def main() -> None:
             )
             if new_params:
                 state["params"] = {**state.get("params", {}), **new_params}
-            response = _strip_markdown(response)
+            response = _prepare_response_text(_strip_markdown(response))
             _refresh_search_state(state, search_meta)
             scenario = _infer_scenario(state, search_meta)
             kb_rows = _markup_from_chat_buttons(chat_meta, state, response, scenario)
             markup = {"inline_keyboard": kb_rows} if kb_rows else None
+            _log_event({"kind": "callback_response", "uid": uid, "callback": query.data,
+                        "button_text": button_text,
+                        "state_before": state_before_callback,
+                        "state_after": _dialog_state_preview(state),
+                        "response_text": response, "buttons": _button_log_preview(kb_rows)})
+            state["last_buttons"] = kb_rows
             await indicator.edit_text(_to_html(response), parse_mode="HTML", reply_markup=markup)
         except Exception as e:
             LOGGER.exception("button_handler ask failed")
@@ -1233,7 +1317,9 @@ def main() -> None:
         dialog_intent = _resolve_dialog_intent(text, state)
         if dialog_intent.get("intent") == "select_option":
             state["selected_option"] = dialog_intent["option"]
-            response = _format_option_response(dialog_intent["option"])
+            response = _prepare_response_text(_format_option_response(dialog_intent["option"]))
+            idx = int(dialog_intent["option"].get("idx") or 1)
+            kb_rows = _selected_option_rows(idx)
             _log_event({
                 "kind": "user_message",
                 "uid": uid,
@@ -1247,13 +1333,14 @@ def main() -> None:
                 "params_delta": {},
                 "response_text": response,
                 "response_len": len(response),
+                "buttons": _button_log_preview(kb_rows),
                 "duration_ms": 0,
                 "is_error": False,
                 "error": None,
                 "cost": {},
             })
-            idx = int(dialog_intent["option"].get("idx") or 1)
-            kb = {"inline_keyboard": _selected_option_rows(idx)}
+            kb = {"inline_keyboard": kb_rows}
+            state["last_buttons"] = kb_rows
             await update.message.reply_text(_to_html(response), reply_markup=kb, parse_mode="HTML")
             return
 
@@ -1266,7 +1353,8 @@ def main() -> None:
                 "client_question": text,
                 "reason": "selected_option_live_details",
             }
-            response = _format_operator_handoff_for_option(option)
+            response = _prepare_response_text(_format_operator_handoff_for_option(option))
+            kb_rows = [[{"text": "📞 Связаться с оператором", "callback_data": "action:operator"}]]
             _log_event({
                 "kind": "operator_handoff_ready",
                 "uid": uid,
@@ -1274,14 +1362,17 @@ def main() -> None:
                 "selected_option": option.get("name"),
                 "reason": "selected_option_live_details",
                 "response_text": response,
+                "buttons": _button_log_preview(kb_rows),
             })
-            kb = {"inline_keyboard": [[{"text": "📞 Связаться с оператором", "callback_data": "action:operator"}]]}
+            kb = {"inline_keyboard": kb_rows}
+            state["last_buttons"] = kb_rows
             await update.message.reply_text(_to_html(response), reply_markup=kb, parse_mode="HTML")
             return
 
         if dialog_intent.get("intent") == "sort_price_asc":
             options = dialog_intent.get("options", [])
-            response = _format_cheaper_response(options)
+            response = _prepare_response_text(_format_cheaper_response(options))
+            kb_rows = _option_select_rows(options)
             _log_event({
                 "kind": "user_message",
                 "uid": uid,
@@ -1295,23 +1386,25 @@ def main() -> None:
                 "params_delta": {},
                 "response_text": response,
                 "response_len": len(response),
+                "buttons": _button_log_preview(kb_rows),
                 "duration_ms": 0,
                 "is_error": False,
                 "error": None,
                 "cost": {},
             })
-            kb_rows = _option_select_rows(options)
             kb = {"inline_keyboard": kb_rows} if kb_rows else None
+            state["last_buttons"] = kb_rows
             await update.message.reply_text(_to_html(response), reply_markup=kb, parse_mode="HTML")
             return
 
         if dialog_intent.get("intent") == "filter_finish":
             options = dialog_intent.get("options", [])
-            response = _format_options_summary_response(
+            response = _prepare_response_text(_format_options_summary_response(
                 options,
                 "С отделкой по последнему списку вижу",
                 "Какой вариант раскрыть подробнее?",
-            )
+            ))
+            kb_rows = _option_select_rows(options)
             _log_event({
                 "kind": "user_message",
                 "uid": uid,
@@ -1325,13 +1418,14 @@ def main() -> None:
                 "params_delta": {},
                 "response_text": response,
                 "response_len": len(response),
+                "buttons": _button_log_preview(kb_rows),
                 "duration_ms": 0,
                 "is_error": False,
                 "error": None,
                 "cost": {},
             })
-            kb_rows = _option_select_rows(options)
             kb = {"inline_keyboard": kb_rows} if kb_rows else None
+            state["last_buttons"] = kb_rows
             await update.message.reply_text(_to_html(response), reply_markup=kb, parse_mode="HTML")
             return
 
@@ -1377,6 +1471,17 @@ def main() -> None:
         s_cost, s_in, s_out, s_used = _meta_cost(search_meta)
         c_cost, c_in, c_out, c_used = _meta_cost(chat_meta)
 
+        response = _prepare_response_text(_strip_markdown(response))
+
+        # H013/H028: заполним last_result/options, затем берём buttons[] из chat-контракта.
+        _refresh_search_state(state, search_meta)
+        if state.get("last_result", {}).get("found"):
+            state["turns_after_results"] = int(state.get("turns_after_results") or 0) + 1
+        scenario = _infer_scenario(state, search_meta)
+        kb_rows = _markup_from_chat_buttons(chat_meta, state, response, scenario)
+        markup: dict | None = {"inline_keyboard": kb_rows} if kb_rows else None
+        state["last_buttons"] = kb_rows
+
         # Experiment Loop: фиксируем вход + результат
         _log_event({
             "kind": "user_message",
@@ -1388,8 +1493,10 @@ def main() -> None:
             "params_before": params_before,
             "params_after": dict(state.get("params", {})),
             "params_delta": new_params,
-            "response_text": _strip_markdown(response),
+            "state_after": _dialog_state_preview(state),
+            "response_text": response,
             "response_len": len(response),
+            "buttons": _button_log_preview(kb_rows),
             "duration_ms": duration_ms,
             "is_error": response.startswith(("❌", "⏱️")),
             "error": error_text,
@@ -1402,14 +1509,6 @@ def main() -> None:
                 "total_tokens_used": (s_used + c_used) or None,
             },
         })
-
-        # H013/H028: заполним last_result/options, затем берём buttons[] из chat-контракта.
-        _refresh_search_state(state, search_meta)
-        if state.get("last_result", {}).get("found"):
-            state["turns_after_results"] = int(state.get("turns_after_results") or 0) + 1
-        scenario = _infer_scenario(state, search_meta)
-        kb_rows = _markup_from_chat_buttons(chat_meta, state, response, scenario)
-        markup: dict | None = {"inline_keyboard": kb_rows} if kb_rows else None
 
         # H009: операторская кнопка при полностью пустом ответе или явном запросе оператора
         wants_operator = (

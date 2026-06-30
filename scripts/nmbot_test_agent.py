@@ -83,6 +83,8 @@ from chat_tester_bot import (  # noqa: E402
     _format_options_summary_response,
     _format_numbered_list_spacing,
     _format_operator_handoff_for_option,
+    _operator_reason_response,
+    _continue_selection_response,
     _clarification_from_followup,
     _followup_state_payload,
     _markup_from_chat_buttons,
@@ -1295,6 +1297,41 @@ def _run_h021_unit_tests() -> list[Result]:
         e2e_followup_pass,
         response_text=f"yes={yes_intent}; no={no_intent}; maybe={maybe_intent}; payload={payload}; clarify={clarify_text}",
         error=f"yes={yes_intent}; no={no_intent}; maybe={maybe_intent}; payload={payload}; clarify={clarify_text}",
+    )
+
+    # UX_E2E: после вопроса про оператора «зачем» должно объяснять, а «продолжить/подбор» — продолжать подбор,
+    # а не крутить один и тот же clarify fallback.
+    operator_followup_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": e2e_option,
+        "params": {"purpose": "investment"},
+        "dialog_window": [],
+        "selected_option_card_shown_count": 1,
+    }
+    _remember_bot_response(
+        operator_followup_state,
+        "Что стоит проверить отдельно: актуальное наличие квартир, конкретные корпуса, этажи и условия покупки.\n\nХотите, передам оператору именно этот ЖК и ваш запрос?",
+        offer_type="operator_for_selected",
+        answer_kind="selected_option_card",
+    )
+    reason_text = _operator_reason_response(operator_followup_state).lower()
+    continue_text = _continue_selection_response(operator_followup_state).lower()
+    operator_loop_pass = (
+        normalize_intent("explain_operator_reason") == "explain_operator_reason"
+        and normalize_intent("continue_selection") == "continue_selection"
+        and "проверить" in reason_text
+        and "актуальные квартиры" in reason_text
+        and "продолжим подбор" in continue_text
+        and "уточните, пожалуйста: продолжить подбор или изменить условия" not in reason_text
+        and "уточните, пожалуйста: продолжить подбор или изменить условия" not in continue_text
+    )
+    add_result(
+        "ux_e2e",
+        "operator_offer_why_and_continue_do_not_loop_clarify",
+        operator_loop_pass,
+        response_text=f"reason={reason_text}\n--- continue={continue_text}",
+        error=f"reason={reason_text}\n--- continue={continue_text}",
     )
 
     raw_opt = {

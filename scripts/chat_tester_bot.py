@@ -553,6 +553,34 @@ def _clarification_from_followup(meta: dict[str, Any], state: dict[str, Any]) ->
     return "Уточните, пожалуйста, что сделать дальше: продолжить подбор или изменить условия?"
 
 
+def _operator_reason_response(state: dict[str, Any]) -> str:
+    selected = state.get("selected_option") or {}
+    name = selected.get("name") if isinstance(selected, dict) else "этот ЖК"
+    return (
+        f"Оператора предлагаю не вместо ответа, а чтобы проверить по {name} то, чего нет в подтверждённых фактах: "
+        "актуальные квартиры, корпуса, этажи, бронь, скидки и условия покупки.\n\n"
+        "Здесь я могу продолжить подбор и сравнить варианты, но не буду выдумывать наличие или условия.\n\n"
+        "Продолжим подбор здесь или передать этот ЖК оператору?"
+    )
+
+
+def _continue_selection_response(state: dict[str, Any]) -> str:
+    selected = state.get("selected_option") or {}
+    selected_name = _compact_option_text(selected.get("name")) if isinstance(selected, dict) else ""
+    options = state.get("visible_options") or state.get("last_options") or []
+    remaining = [
+        option for option in options
+        if _compact_option_text(option.get("name")) != selected_name
+    ][:3]
+    if remaining:
+        return _format_options_summary_response(
+            remaining,
+            "Хорошо, продолжим подбор. Из похожих вариантов ещё можно посмотреть",
+            "Какой из них разобрать дальше?",
+        )
+    return "Хорошо, продолжим подбор. Что поменять в условиях: бюджет, район, срок сдачи или количество комнат?"
+
+
 def _parse_budget_callback_value(value: str) -> int | None:
     """H023: parse budget callback values like '5m', '10m', '15m', or 'none'."""
     if value == "none":
@@ -1681,6 +1709,54 @@ def main() -> None:
                 }
             elif followup_intent == "operator_for_selected" and selected:
                 dialog_intent = {"intent": "operator_for_selected", "option": selected}
+            elif followup_intent == "explain_operator_reason" and selected:
+                response = _prepare_response_text(_operator_reason_response(state))
+                _remember_bot_response(state, response, offer_type="operator_for_selected", answer_kind="operator_explanation")
+                _log_event({
+                    "kind": "user_message",
+                    "uid": uid,
+                    "user_text": text,
+                    "dialog_intent": "explain_operator_reason",
+                    "search_model": state["search_model"],
+                    "chat_model": state["chat_model"],
+                    "mcp": state["mcp"],
+                    "params_before": params_before,
+                    "params_after": dict(state.get("params", {})),
+                    "params_delta": {},
+                    "response_text": response,
+                    "response_len": len(response),
+                    "buttons": [],
+                    "duration_ms": 0,
+                    "is_error": False,
+                    "error": None,
+                    "cost": {},
+                })
+                await update.message.reply_text(_to_html(response), parse_mode="HTML")
+                return
+            elif followup_intent == "continue_selection":
+                response = _prepare_response_text(_continue_selection_response(state))
+                _remember_bot_response(state, response, offer_type="choose_option", answer_kind="options_summary")
+                _log_event({
+                    "kind": "user_message",
+                    "uid": uid,
+                    "user_text": text,
+                    "dialog_intent": "continue_selection",
+                    "search_model": state["search_model"],
+                    "chat_model": state["chat_model"],
+                    "mcp": state["mcp"],
+                    "params_before": params_before,
+                    "params_after": dict(state.get("params", {})),
+                    "params_delta": {},
+                    "response_text": response,
+                    "response_len": len(response),
+                    "buttons": [],
+                    "duration_ms": 0,
+                    "is_error": False,
+                    "error": None,
+                    "cost": {},
+                })
+                await update.message.reply_text(_to_html(response), parse_mode="HTML")
+                return
             elif followup_intent == "update_search_params":
                 params_delta = followup_meta.get("params_delta") if isinstance(followup_meta.get("params_delta"), dict) else {}
                 if params_delta:

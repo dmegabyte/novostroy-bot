@@ -825,6 +825,38 @@ def _looks_missing(value: Any) -> bool:
     )
 
 
+def _format_location_value(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    normalized = text.lower().replace("ё", "е")
+    mapping = {
+        "msk": "Москва",
+        "мск": "Москва",
+        "moscow": "Москва",
+        "mo": "Московская область",
+        "мо": "Московская область",
+        "moscow oblast": "Московская область",
+    }
+    return mapping.get(normalized, text)
+
+
+def _format_price_value(value: Any, price_min: Any = None) -> str:
+    text = str(value or "").strip()
+    if not text and not price_min:
+        return ""
+    if text and not re.fullmatch(r"\d+(?:\.\d+)?", text.replace(" ", "")):
+        return text
+    parsed = _price_min(price_min or text)
+    if not parsed:
+        return text
+    mln = parsed / 1_000_000
+    pretty = f"{mln:.1f}".replace(".", ",")
+    if pretty.endswith(",0"):
+        pretty = pretty[:-2]
+    return f"от {pretty} млн рублей"
+
+
 def _option_benefit(option: dict[str, Any]) -> str:
     """Короткая польза для клиента только из известных полей, без выдумок."""
     ready = str(option.get("ready") or "").lower()
@@ -884,9 +916,9 @@ def _format_option_response(option: dict[str, Any], purpose: Any = None) -> str:
     intro = f"{_option_ordinal(option.get('idx'))} вариант — {name}."
     facts: list[str] = []
     if not _looks_missing(option.get("location")):
-        facts.append(f"локация — {option['location']}")
+        facts.append(f"локация — {_format_location_value(option['location'])}")
     if not _looks_missing(option.get("price")):
-        facts.append(f"цена — {option['price']}")
+        facts.append(f"цена — {_format_price_value(option['price'], option.get('price_min'))}")
     if not _looks_missing(option.get("area")):
         facts.append(f"площадь — {option['area']}")
     if not _looks_missing(option.get("finishing")):

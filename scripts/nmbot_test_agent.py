@@ -1192,6 +1192,25 @@ def _run_h021_unit_tests() -> list[Result]:
         duration_ms=int((time.time() - started) * 1000),
     ))
 
+    raw_opt = {
+        "idx": 3,
+        "name": "ЖК «Сиреневый парк»",
+        "location": "msk",
+        "price": "17720677",
+        "price_min": 17_720_677,
+    }
+    raw_card = _format_option_response(raw_opt)
+    raw_low = raw_card.lower()
+    pass_raw_format = "локация — москва" in raw_low and "от 17,7 млн рублей" in raw_low and "17720677" not in raw_card and "msk" not in raw_low
+    results.append(Result(
+        suite="h029",
+        scenario="selected_option_formats_raw_mcp_fields_for_client",
+        passed=pass_raw_format,
+        error="" if pass_raw_format else f"raw fields leaked to client: {raw_card}",
+        response_text=raw_card,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
     family_opt = {
         "idx": 2,
         "name": "Бусиновский парк",

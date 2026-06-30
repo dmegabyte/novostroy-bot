@@ -92,6 +92,7 @@ from chat_tester_bot import (  # noqa: E402
     _reset_dialog_state_preserve_settings,
     _resolve_dialog_intent,
     _safe_user_error_message,
+    _visible_options_from_response,
 )
 
 
@@ -1102,6 +1103,36 @@ def _run_h021_unit_tests() -> list[Result]:
         passed=pass_memory,
         error="" if pass_memory else f"intent_yes={intent_yes}; intent_details={intent_details}; intent_booking={intent_booking}",
         response_text=f"intent_yes={intent_yes}; intent_details={intent_details}; intent_booking={intent_booking}",
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    raw_options = [
+        {"idx": 1, "name": "Амурский парк", "location": "msk", "price": "от 20.0 млн"},
+        {"idx": 2, "name": "Южные Сады", "location": "msk", "price": "от 16.0 млн"},
+        {"idx": 3, "name": "Сиреневый парк", "location": "msk", "price": "от 18.1 млн"},
+    ]
+    visible_text = (
+        "Есть несколько вариантов:\n\n"
+        "1. ЖК «Южные Сады», цена от 16.0 млн\n\n"
+        "2. ЖК «Сиреневый парк», цена от 18.1 млн\n\n"
+        "3. ЖК «Амурский парк», цена от 20.0 млн\n\n"
+        "Какой ЖК хотите рассмотреть подробнее?"
+    )
+    visible_options = _visible_options_from_response(visible_text, raw_options)
+    state_visible = {"last_options": raw_options, "visible_options": visible_options, "selected_option": None}
+    intent_one = _resolve_dialog_intent("1", state_visible)
+    intent_two_text = _resolve_dialog_intent("2. ЖК «Сиреневый парк», цена от 18.1 млн", state_visible)
+    pass_visible_select = (
+        [o.get("name") for o in visible_options] == ["Южные Сады", "Сиреневый парк", "Амурский парк"]
+        and intent_one.get("option", {}).get("name") == "Южные Сады"
+        and intent_two_text.get("option", {}).get("name") == "Сиреневый парк"
+    )
+    results.append(Result(
+        suite="h028",
+        scenario="text_choice_uses_visible_list_order_and_name",
+        passed=pass_visible_select,
+        error="" if pass_visible_select else f"visible={visible_options}; one={intent_one}; two={intent_two_text}",
+        response_text=f"visible={[o.get('name') for o in visible_options]}; one={intent_one.get('option', {}).get('name')}; two={intent_two_text.get('option', {}).get('name')}",
         duration_ms=int((time.time() - started) * 1000),
     ))
 

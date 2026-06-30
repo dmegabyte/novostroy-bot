@@ -472,6 +472,7 @@ def _default_state() -> dict[str, Any]:
         "params": {},
         "last_result": {},  # {found, exact_count, near_count, scenario}
         "last_options": [],  # H016: последние варианты для «второй»/«подешевле»
+        "visible_options": [],  # порядок вариантов в последнем видимом клиенту списке
         "selected_option": None,  # PRODUCT_TZ: выбранный ЖК/вариант для follow-up и operator_context
         "turns_after_results": 0,
         "last_search_response": {},  # H026: полный структурированный MCP/search JSON для follow-up без нового MCP
@@ -533,6 +534,15 @@ def _price_min(value: Any) -> int | None:
     return int(n)
 
 
+def _compact_option_text(value: Any) -> str:
+    """Нормализует название ЖК/строку выбора для безопасного сопоставления."""
+    return re.sub(
+        r"[^а-яa-z0-9]+",
+        " ",
+        str(value or "").lower().replace("ё", "е"),
+    ).strip()
+
+
 def _extract_options(search_text: str) -> list[dict[str, Any]]:
     """H016: превращает facts+near в индексированный список вариантов для follow-up."""
     data = _json_from_text(search_text)
@@ -565,20 +575,63 @@ def _extract_options(search_text: str) -> list[dict[str, Any]]:
     return options[:8]
 
 
+def _visible_options_from_response(response_text: str, options: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Собирает порядок вариантов именно из видимого пользователю нумерованного списка.
+
+    После отказа от inline-кнопок клиент выбирает текстом: «1», «второй» или
+    присылает строку «1. ЖК ...». Поэтому индекс должен соответствовать не
+    сырому порядку MCP, а тому списку, который реально увидел клиент.
+    """
+    if not response_text or not options:
+        return []
+
+    by_name: list[tuple[str, dict[str, Any]]] = []
+    for option in options:
+        compact_name = _compact_option_text(option.get("name"))
+        if compact_name:
+            by_name.append((compact_name, option))
+
+    visible: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    numbered_lines = re.findall(r"(?m)^\s*(\d{1,2})\.\s*(.+)$", response_text)
+    for _idx_raw, line in numbered_lines:
+        compact_line = _compact_option_text(line)
+        matched: dict[str, Any] | None = None
+        # Сначала точное/почти точное попадание названия в строку.
+        for compact_name, option in by_name:
+            if compact_name and compact_name in compact_line:
+                matched = option
+                break
+        if matched is None:
+            # Потом пробуем по словам названия: «Южные Сады» может быть без «ЖК».
+            for compact_name, option in by_name:
+                words = [w for w in compact_name.split() if len(w) >= 4 and w not in ("жилой", "квартал", "комплекс")]
+                if words and all(w in compact_line for w in words[:2]):
+                    matched = option
+                    break
+        if matched is None:
+            continue
+        name_key = _compact_option_text(matched.get("name"))
+        if name_key in seen_names:
+            continue
+        visible.append({**matched, "visible_idx": len(visible) + 1})
+        seen_names.add(name_key)
+    return visible[:3]
+
+
 def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
     """H016: быстрый resolver follow-up сообщений, которые ссылаются на прошлый список."""
     t = text.lower().replace("ё", "е")
-    options = state.get("last_options") or []
+    memory_options = state.get("last_options") or []
+    visible_options = state.get("visible_options") or []
+    options = visible_options or memory_options
     selected = state.get("selected_option")
 
     if selected and options and re.search(r"(похож|сравн|друг|еще|ещё|альтернатив)", t):
-        def _compact_name(value: Any) -> str:
-            return re.sub(r"[^а-яa-z0-9]+", " ", str(value or "").lower().replace("ё", "е")).strip()
-
-        selected_name = _compact_name(selected.get("name"))
+        selected_name = _compact_option_text(selected.get("name"))
         other_options = [
             option for option in options
-            if _compact_name(option.get("name")) != selected_name
+            if _compact_option_text(option.get("name")) != selected_name
         ]
         return {"intent": "compare_others", "options": other_options[:3]}
 
@@ -597,13 +650,17 @@ def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
 
     # H026: follow-up по названию ЖК из памяти: «что по белой даче»,
     # «расскажи про дюну» — отвечаем из last_options, без нового MCP.
-    compact_t = re.sub(r"[^а-яa-z0-9]+", " ", t).strip()
-    for option in options:
-        name = str(option.get("name") or "").lower().replace("ё", "е")
-        name_words = [w for w in re.sub(r"[^а-яa-z0-9]+", " ", name).split() if len(w) >= 4]
+    compact_t = _compact_option_text(t)
+    # Если клиент прислал строку из списка с названием ЖК, выбираем по названию,
+    # а не по случайному порядку в raw MCP.
+    for option in [*options, *[o for o in memory_options if o not in options]]:
+        name = _compact_option_text(option.get("name"))
+        if name and name in compact_t:
+            return {"intent": "select_option", "option": option}
+        name_words = [w for w in name.split() if len(w) >= 4]
         # Игнорируем общие слова, чтобы «жк» не матчило всё подряд.
         name_words = [w for w in name_words if w not in ("жилой", "квартал", "комплекс")]
-        if name_words and any(w in compact_t for w in name_words):
+        if name_words and all(w in compact_t for w in name_words[:2]):
             return {"intent": "select_option", "option": option}
 
     ordinal = {
@@ -1693,6 +1750,7 @@ def main() -> None:
 
         # H013/H028: заполним last_result/options, затем берём buttons[] из chat-контракта.
         _refresh_search_state(state, search_meta)
+        state["visible_options"] = _visible_options_from_response(response, state.get("last_options") or [])
         if state.get("last_result", {}).get("found"):
             state["turns_after_results"] = int(state.get("turns_after_results") or 0) + 1
         scenario = _infer_scenario(state, search_meta)

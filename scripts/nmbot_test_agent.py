@@ -79,13 +79,17 @@ from chat_tester_bot import (  # noqa: E402
     _button_log_preview,
     _callback_button_text,
     _build_known_option_prompt,
+    _build_negation_response_prompt,
     _format_option_response,
     _format_options_summary_response,
     _format_numbered_list_spacing,
     _format_operator_handoff_for_option,
+    _fix_complex_name_artifacts,
     _operator_reason_response,
     _continue_selection_response,
     _clarification_from_followup,
+    _apply_dialog_plan_to_state,
+    _dialog_planner_state_payload,
     _followup_state_payload,
     _local_followup_intent,
     _markup_from_chat_buttons,
@@ -94,16 +98,36 @@ from chat_tester_bot import (  # noqa: E402
     _pick_quick_actions,
     _phone_captured_farewell,
     _normalize_phone,
+    _extract_phone_from_text,
+    _has_phone_capture_context,
+    _looks_like_phone_text,
+    _non_text_fallback_response,
+    _non_text_message_type,
+    _phone_needs_context_response,
     _phone_log_meta,
     _pure_option_choice_index,
+    _reject_operator_response,
+    _reject_selected_option_response,
     _normalize_followup_params_delta,
     _reset_dialog_state_preserve_settings,
     _resolve_dialog_intent,
     _remember_bot_response,
     _safe_user_error_message,
+    _strip_rejected_options_from_response,
+    _strip_unsupported_complex_claims,
+    _strip_unrequested_live_data_cta,
+    _soften_layout_overclaim,
+    _soften_generic_selected_question,
+    _operator_cta_for_selected_investment,
+    _visible_options_from_chat_meta,
+    _visible_options_from_chat_or_response,
     _visible_options_from_response,
 )
-from followup_intent_classifier import normalize_intent  # noqa: E402
+from followup_intent_classifier import (  # noqa: E402
+    DIALOG_STATE_PLANNER_PROMPT,
+    normalize_dialog_action,
+    normalize_intent,
+)
 
 
 # ── Типы ─────────────────────────────────────────────────────
@@ -864,6 +888,15 @@ async def _main(suite: str, json_mode: bool, chat_max_tokens: int) -> int:
                 mark = "✓" if r.passed else "✗"
                 print(f"  {mark} {r.suite}/{r.scenario} ({r.duration_ms}ms)")
 
+    if suite in ("all", "non_text"):
+        if not json_mode:
+            print("  (NON_TEXT unit-тесты — без Overmind)…")
+        for r in _run_non_text_unit_tests():
+            results.append(r)
+            if not json_mode:
+                mark = "✓" if r.passed else "✗"
+                print(f"  {mark} {r.suite}/{r.scenario} ({r.duration_ms}ms)")
+
     if suite == "deploy":
         r = _run_deploy_smoke_test()
         results.append(r)
@@ -1118,7 +1151,7 @@ def _run_h021_unit_tests() -> list[Result]:
     intent_yes = _resolve_dialog_intent("да", state_selected).get("intent")
     intent_details = _resolve_dialog_intent("подробнее", state_selected).get("intent")
     intent_booking = _resolve_dialog_intent("можно забронировать?", state_selected).get("intent")
-    pass_memory = intent_yes == "followup_classifier" and intent_details == "operator_for_selected" and intent_booking == "operator_for_selected"
+    pass_memory = intent_yes == "followup_classifier" and intent_details == "explain_selected_option" and intent_booking == "operator_for_selected"
     results.append(Result(
         suite="h028",
         scenario="selected_option_yes_and_booking_do_not_restart_questionnaire",
@@ -1184,7 +1217,14 @@ def _run_h021_unit_tests() -> list[Result]:
     ))
 
     handoff = _format_operator_handoff_for_option(opt).lower()
-    pass_handoff = "оператор" in handoff and "mcp" not in handoff and "json" not in handoff and "хотите оставить номер" in handoff
+    pass_handoff = (
+        "оператор" in handoff
+        and "mcp" not in handoff
+        and "json" not in handoff
+        and "хотите оставить номер" in handoff
+        and "по цене вижу" not in handoff
+        and "по площади вижу" not in handoff
+    )
     results.append(Result(
         suite="h028",
         scenario="operator_handoff_is_human_and_no_technical_leak",
@@ -1209,7 +1249,7 @@ def _run_h021_unit_tests() -> list[Result]:
     dry_markers = ["локация:", "цена:", "отделка:", "готовность/срок:"]
     pass_card = (
         not any(m in card_low for m in dry_markers)
-        and "хотите, передам оператору" in card_low
+        and "хотите, расскажу подробнее" in card_low
         and "\n\n" in card
         and "по цене вижу" in card_low
         and "баз" not in card_low
@@ -1223,7 +1263,7 @@ def _run_h021_unit_tests() -> list[Result]:
         duration_ms=int((time.time() - started) * 1000),
     ))
 
-    # UX_E2E: полный no-buttons путь без Overmind: список → выбор цифрой/текстом → карточка → подробнее → оператор.
+    # UX_E2E: полный no-buttons путь без Overmind: список → выбор цифрой/текстом → карточка → подробнее из памяти → оператор для актуальности.
     e2e_raw_options = [
         {"idx": 1, "name": "Амурский парк", "location": "msk", "price": "20000000", "price_min": 20_000_000},
         {"idx": 2, "name": "ЖК «Южные Сады»", "location": "msk", "price": "16000000", "price_min": 16_000_000},
@@ -1257,7 +1297,7 @@ def _run_h021_unit_tests() -> list[Result]:
         and "17720677" not in e2e_card
         and "москва" in e2e_card_low
         and "млн рублей" in e2e_card_low
-        and e2e_more.get("intent") == "operator_for_selected"
+        and e2e_more.get("intent") == "explain_selected_option"
         and "оператор" in e2e_handoff_low
         and "mcp" not in e2e_handoff_low
         and "json" not in e2e_handoff_low
@@ -1346,9 +1386,117 @@ def _run_h021_unit_tests() -> list[Result]:
         error=f"reason={reason_text}\n--- continue={continue_text}",
     )
 
+    # UX_E2E: если после подробностей бот спросил «оставите номер», короткое «да/хочу» — это согласие на контакт,
+    # а не повторная презентация ЖК.
+    contact_accept_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": e2e_option,
+        "params": {"purpose": "investment"},
+        "dialog_window": [],
+        "selected_option_card_shown_count": 1,
+    }
+    _remember_bot_response(
+        contact_accept_state,
+        "По ЖК картина такая: цена и срок понятны.\n\nОставите номер для связи?",
+        offer_type="selected_option_details",
+        answer_kind="selected_option_details",
+    )
+    contact_yes = _resolve_dialog_intent("да", contact_accept_state)
+    contact_want = _resolve_dialog_intent("хочу", contact_accept_state)
+    contact_local = _local_followup_intent("да", {**contact_accept_state, "last_offer_type": "operator_for_selected"})
+    contact_accept_pass = (
+        contact_yes.get("intent") == "operator_contact_accept"
+        and contact_want.get("intent") == "operator_contact_accept"
+        and contact_local == "operator_contact_accept"
+    )
+    add_result(
+        "ux_e2e",
+        "yes_after_contact_offer_requests_phone_not_repeat_details",
+        contact_accept_pass,
+        response_text=f"yes={contact_yes}; want={contact_want}; local={contact_local}",
+        error=f"yes={contact_yes}; want={contact_want}; local={contact_local}",
+    )
+
+    # UX_E2E: телефон — это code-level capture выше LLM/search, а не очередной запрос в подбор.
+    # Поддерживаем и текстовый номер, и будущий Telegram contact через общие pure helpers.
+    phone_context_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": e2e_option,
+        "params": {"purpose": "investment"},
+        "dialog_window": [],
+    }
+    _remember_bot_response(
+        phone_context_state,
+        "Оставите номер для связи?",
+        offer_type="operator_for_selected",
+        answer_kind="operator_handoff",
+    )
+    empty_phone_state = {"last_options": [], "visible_options": [], "selected_option": None, "dialog_window": []}
+    text_phone = _extract_phone_from_text("+7 999 123-45-67")
+    plain_phone = _extract_phone_from_text("89991234567")
+    invalid_budget = _extract_phone_from_text("до 200к")
+    phone_capture_pass = (
+        text_phone == "+79991234567"
+        and plain_phone == "89991234567"
+        and invalid_budget == ""
+        and _looks_like_phone_text("+7 999 123-45-67")
+        and not _looks_like_phone_text("до 200к")
+        and _has_phone_capture_context(phone_context_state)
+        and _has_phone_capture_context({"awaiting_phone": True})
+        and not _has_phone_capture_context(empty_phone_state)
+        and "не понимаю" in _phone_needs_context_response().lower()
+        and _phone_log_meta(text_phone).get("phone_len") == 11
+    )
+    add_result(
+        "ux_e2e",
+        "phone_capture_is_code_level_and_requires_context",
+        phone_capture_pass,
+        response_text=(
+            f"text_phone={text_phone}; plain={plain_phone}; budget={invalid_budget}; "
+            f"context={_has_phone_capture_context(phone_context_state)}; empty={_has_phone_capture_context(empty_phone_state)}"
+        ),
+        error=(
+            f"text_phone={text_phone}; plain={plain_phone}; budget={invalid_budget}; "
+            f"context={_has_phone_capture_context(phone_context_state)}; empty={_has_phone_capture_context(empty_phone_state)}; "
+            f"ctx_response={_phone_needs_context_response()}"
+        ),
+    )
+
+    selected_investment_text = (
+        "Для инвестиций это удобный вариант с понятным порогом входа и хорошим горизонтом планирования. "
+        "Хотите сравнить этот проект с другими или подробнее разобрать цены?"
+    )
+    investment_cta = _operator_cta_for_selected_investment(
+        selected_investment_text,
+        {"name": "ЖК «Южные Сады»"},
+        "investment",
+    ).lower()
+    non_investment_cta = _operator_cta_for_selected_investment(
+        selected_investment_text,
+        {"name": "ЖК «Южные Сады»"},
+        "self_use",
+    ).lower()
+    selected_investment_cta_pass = (
+        "оператор проверит" in investment_cta
+        and "оставить номер" in investment_cta
+        and "жк «южные сады»" in investment_cta
+        and "сравнить этот проект" not in investment_cta
+        and "сравнить этот проект" in non_investment_cta
+        and "\n\nхотите" in _prepare_response_text(selected_investment_text).lower()
+    )
+    add_result(
+        "ux_e2e",
+        "selected_investment_choice_leads_to_operator_cta",
+        selected_investment_cta_pass,
+        response_text=investment_cta,
+        error=f"investment={investment_cta}; non_investment={non_investment_cta}",
+    )
+
     # UX_E2E: расширенный набор коротких follow-up фраз вокруг выбранного ЖК.
     # Это не проверка всех словарных форм, а контракт маршрутизации: явное сравнение сравнивает,
-    # явная бронь/детали ведут к оператору, мягкие/неясные фразы уходят в classifier, а не повторяют карточку.
+    # явная бронь ведёт к оператору, запрос раскрытия выбранного ЖК идёт в explain, мягкие/неясные фразы уходят в classifier.
     phrase_state = {
         "last_options": e2e_raw_options,
         "visible_options": e2e_visible_options,
@@ -1374,7 +1522,8 @@ def _run_h021_unit_tests() -> list[Result]:
         "хочу еще варианты": "compare_others",
         "сравни": "compare_others",
         "не надо": "followup_classifier",
-        "что по нему известно": "followup_classifier",
+        "что по нему известно": "explain_selected_option",
+        "расскажи подробнее": "explain_selected_option",
         "бронь": "operator_for_selected",
         "этажи": "operator_for_selected",
     }
@@ -1388,12 +1537,56 @@ def _run_h021_unit_tests() -> list[Result]:
         error=json.dumps({"expected": phrase_expectations, "actual": phrase_results}, ensure_ascii=False),
     )
 
+    # UX_E2E: отрицания не должны слепо запускать оператора или новый MCP.
+    # Явный отказ от оператора ловит минимальный code guard, продуктовые отрицания уходят в LLM classifier.
+    negation_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": e2e_option,
+        "params": {"purpose": "investment"},
+        "dialog_window": [],
+        "selected_option_card_shown_count": 1,
+    }
+    _remember_bot_response(
+        negation_state,
+        "По ЖК картина такая. Хотите сравнить этот ЖК с другими или оставить номер для связи?",
+        offer_type="selected_option_details",
+        answer_kind="selected_option_details",
+    )
+    negation_results = {
+        "не хочу оператора": _resolve_dialog_intent("не хочу оператора", negation_state).get("intent"),
+        "не надо звонить": _resolve_dialog_intent("не надо звонить", negation_state).get("intent"),
+        "не надо бронь": _resolve_dialog_intent("не надо бронь", negation_state).get("intent"),
+        "не этот": _resolve_dialog_intent("не этот", negation_state).get("intent"),
+        "не подходит": _resolve_dialog_intent("не подходит", negation_state).get("intent"),
+        "1, не надо бронь": _resolve_dialog_intent("1, не надо бронь", negation_state).get("intent"),
+    }
+    reject_operator_text = _reject_operator_response(negation_state).lower()
+    reject_selected_text = _reject_selected_option_response(negation_state).lower()
+    negation_pass = (
+        negation_results["не хочу оператора"] == "reject_operator"
+        and negation_results["не надо звонить"] == "reject_operator"
+        and negation_results["не надо бронь"] == "followup_classifier"
+        and negation_results["не этот"] == "followup_classifier"
+        and negation_results["не подходит"] == "followup_classifier"
+        and negation_results["1, не надо бронь"] == "followup_classifier"
+        and "остаёмся здесь" in reject_operator_text
+        and "этот жк убираем" in reject_selected_text
+    )
+    add_result(
+        "ux_e2e",
+        "negation_routes_to_classifier_or_minimal_safety_not_operator",
+        negation_pass,
+        response_text=json.dumps(negation_results, ensure_ascii=False) + f"\nreject_operator={reject_operator_text}\nreject_selected={reject_selected_text}",
+        error=json.dumps(negation_results, ensure_ascii=False) + f"\nreject_operator={reject_operator_text}\nreject_selected={reject_selected_text}",
+    )
+
     local_fallback_results = {
         phrase: _local_followup_intent(phrase, phrase_state)
         for phrase in ["да", "нет", "зачем", "продолжить", "подбор"]
     }
     local_fallback_pass = local_fallback_results == {
-        "да": "operator_for_selected",
+        "да": "operator_contact_accept",
         "нет": "reject_offer",
         "зачем": "explain_operator_reason",
         "продолжить": "continue_selection",
@@ -1422,6 +1615,22 @@ def _run_h021_unit_tests() -> list[Result]:
         scenario="selected_option_formats_raw_mcp_fields_for_client",
         passed=pass_raw_format,
         error="" if pass_raw_format else f"raw fields leaked to client: {raw_card}",
+        response_text=raw_card,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    blocks = [block.strip() for block in raw_card.split("\n\n") if block.strip()]
+    max_block_len = max((len(block) for block in blocks), default=0)
+    pass_selected_card_spacing = (
+        len(blocks) >= 4
+        and max_block_len <= 260
+        and raw_card.rstrip().endswith("?")
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="selected_option_card_uses_short_paragraphs",
+        passed=pass_selected_card_spacing,
+        error="" if pass_selected_card_spacing else f"blocks={len(blocks)} max_block_len={max_block_len}; card={raw_card!r}",
         response_text=raw_card,
         duration_ms=int((time.time() - started) * 1000),
     ))
@@ -1463,7 +1672,7 @@ def _run_h021_unit_tests() -> list[Result]:
         and "московская область" in investment_low
         and "уже должен быть сдан" in investment_low
         and "не нужно закладывать долгий срок ожидания" in investment_low
-        and "оператор" in investment_low
+        and "актуальное наличие" in investment_low
         and "2025 года; это вариант с ожиданием" not in investment_low
     )
     results.append(Result(
@@ -1569,11 +1778,33 @@ def _run_h021_unit_tests() -> list[Result]:
     details_prompt = _build_known_option_prompt(rich_opt, "Клиент нажал «Да, подробнее»")
     details_prompt_low = details_prompt.lower()
     pass_details_prompt = (
-        "новый живой ответ" in details_prompt_low
+        "role:" in details_prompt_low
+        and "situation:" in details_prompt_low
+        and "user_action:" in details_prompt_low
+        and "safe_facts:" in details_prompt_low
+        and "client_intent:" in details_prompt_low
+        and "client_purpose:" in details_prompt_low
+        and "allowed_inferences:" in details_prompt_low
+        and "missing_or_live_only:" in details_prompt_low
+        and "forbidden_phrases_for_client:" in details_prompt_low
+        and "response_shape:" in details_prompt_low
+        and "output_json:" in details_prompt_low
+        and "новый живой ответ" in details_prompt_low
         and "новый широкий поиск не нужен" in details_prompt_low
         and "оставить контакт" in details_prompt_low
         and "актуальные квартиры" in details_prompt_low
         and "не придумывай" in details_prompt_low
+        and "запрещённые клиентские фразы" in details_prompt_low
+        and "не удалось подтвердить" in details_prompt_low
+        and "чтобы не выдумывать" in details_prompt_low
+        and "доходность и ликвидность" in details_prompt_low
+        and "по этому жк картина такая" in details_prompt_low
+        and "по конкретным квартирам и брони лучше" in details_prompt_low
+        and "комфорт-класс" in details_prompt_low
+        and "не уводи ответ в инвестиции" in details_prompt_low
+        and "какой аспект этого жк" in details_prompt_low
+        and "конкретные планировки" in details_prompt_low
+        and "для любого состава семьи" in details_prompt_low
     )
     results.append(Result(
         suite="h029",
@@ -1581,6 +1812,358 @@ def _run_h021_unit_tests() -> list[Result]:
         passed=pass_details_prompt,
         error="" if pass_details_prompt else f"bad details prompt: {details_prompt}",
         response_text=details_prompt,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    unsafe_class_text = (
+        "Да, расскажу подробнее про ЖК «Лучи». Это комфорт-класс в районе Солнцево. "
+        "Квартиры сдаются с отделкой, цена от 10.6 млн. Что разобрать подробнее?"
+    )
+    stripped_class = _strip_unsupported_complex_claims(unsafe_class_text, {"name": "ЖК «Лучи»", "location": "Солнцево"})
+    pass_strip_class = "комфорт-класс" not in stripped_class.lower() and "цена" in stripped_class.lower()
+    results.append(Result(
+        suite="h029",
+        scenario="unsupported_class_claim_is_removed_without_safe_fact",
+        passed=pass_strip_class,
+        error="" if pass_strip_class else f"unsupported class survived: {stripped_class}",
+        response_text=stripped_class,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    prompt_with_class_as_developer = _build_known_option_prompt(
+        {"name": "ЖК «Лучи»", "location": "Солнцево", "developer": "comfort", "price": "от 10.6 млн"},
+        "Клиент выбрал этот вариант для жизни",
+    ).lower()
+    safe_facts_block = prompt_with_class_as_developer.split("allowed_inferences:", 1)[0]
+    pass_developer_class_guard = '"developer"' not in safe_facts_block and "comfort" not in safe_facts_block
+    results.append(Result(
+        suite="h029",
+        scenario="class_value_is_not_passed_as_developer_to_llm",
+        passed=pass_developer_class_guard,
+        error="" if pass_developer_class_guard else f"class leaked as developer: {prompt_with_class_as_developer}",
+        response_text=prompt_with_class_as_developer,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    rejected_response = (
+        "Нашла несколько вариантов:\n\n"
+        "1. ЖК «Лучи» в Солнцево, от 10.6 млн рублей.\n\n"
+        "2. ЖК «Южные Сады» в Южном Бутово, от 11.4 млн рублей.\n\n"
+        "Какой ЖК хотите рассмотреть подробнее?"
+    )
+    stripped_rejected = _strip_rejected_options_from_response(rejected_response, {"rejected_option_names": ["ЖК «Лучи»"]})
+    pass_strip_rejected = "лучи" not in stripped_rejected.lower() and "1. жк «южные сады»" in stripped_rejected.lower()
+    results.append(Result(
+        suite="h029",
+        scenario="rejected_option_is_removed_from_next_visible_list",
+        passed=pass_strip_rejected,
+        error="" if pass_strip_rejected else f"rejected option survived: {stripped_rejected}",
+        response_text=stripped_rejected,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    fixed_name = _fix_complex_name_artifacts("1. ЖК «ГК «Варшавские ворота»» в Чертаново Южное")
+    handoff_name = _format_operator_handoff_for_option({"name": "Квартал Мит"}).lower()
+    pass_name_artifacts = (
+        "жк «гк" not in fixed_name.lower()
+        and "гк «варшавские ворота»" in fixed_name.lower()
+        and "по жк «квартал мит»" in handoff_name
+        and "лучше не гадать" in handoff_name
+        and "оператор посмотрит" in handoff_name
+        and "по живому наличию" not in handoff_name
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="complex_name_artifacts_are_normalized",
+        passed=pass_name_artifacts,
+        error="" if pass_name_artifacts else f"bad names: fixed={fixed_name}; handoff={handoff_name}",
+        response_text=f"fixed={fixed_name}; handoff={handoff_name}",
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    early_live_cta = (
+        "ЖК «Южные Сады» — с отделкой, от 11.4 млн. "
+        "Наличие конкретных планировок и актуальные цены лучше проверить по свежим данным. "
+        "Выбор планировок большой, можно подобрать подходящую планировку. "
+        "Хотите сравнить этот вариант с чем-то еще или разобрать подробнее планировки и цены? "
+        "Какой аспект этого ЖК вам было бы интересно разобрать подробнее?"
+    )
+    cleaned_early_live_cta = _soften_generic_selected_question(
+        _soften_layout_overclaim(
+            _strip_unrequested_live_data_cta(early_live_cta, "ищу двухкомнатную квартиру для семьи")
+        )
+    ).lower()
+    pass_cta_timing = (
+        "наличие конкретных планировок" not in cleaned_early_live_cta
+        and "актуальные цены" not in cleaned_early_live_cta
+        and "по свежим данным" not in cleaned_early_live_cta
+        and "какой аспект" not in cleaned_early_live_cta
+        and "выбор планировок" not in cleaned_early_live_cta
+        and "подходящую планировку" not in cleaned_early_live_cta
+        and "планировки и цены" not in cleaned_early_live_cta
+        and "диапазон площадей" in cleaned_early_live_cta
+        and "сравнить" in cleaned_early_live_cta
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="selected_presenter_removes_early_live_cta_and_generic_question",
+        passed=pass_cta_timing,
+        error="" if pass_cta_timing else f"bad selected cta: {cleaned_early_live_cta}",
+        response_text=cleaned_early_live_cta,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    chat_prompt_low = CHAT_SYSTEM_PROMPT.lower()
+    pass_first_answer_guard = (
+        "в первом ответе со списком вариантов не предлагай оператора" in chat_prompt_low
+        and "какой разобрать подробнее" in chat_prompt_low
+        and "комфорт-класс" in chat_prompt_low
+        and "не пиши клиенту, что «данных нет»" in chat_prompt_low
+        and "обязательно оформи их нумерованным списком" in chat_prompt_low
+        and "наличие конкретных планировок и актуальные цены" in chat_prompt_low
+        and "visible_options" in chat_prompt_low
+        and "строго в том же порядке 1/2/3" in chat_prompt_low
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="chat_prompt_no_early_operator_and_no_unsupported_class",
+        passed=pass_first_answer_guard,
+        error="" if pass_first_answer_guard else "chat prompt lacks first-answer/operator/class guard",
+        response_text=CHAT_SYSTEM_PROMPT,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    structured_visible_options = _visible_options_from_chat_meta(
+        {"_visible_options": [
+            # LLM иногда присылает 0-based idx. Имя должно быть главным ключом,
+            # иначе похожие ЖК/сдвинутые индексы ломают выбор «1/2/3».
+            {"idx": 0, "name": family_opt["name"]},
+            {"idx": 1, "name": rich_opt["name"]},
+            {"idx": 999, "name": "ЖК «Несуществующий»"},
+        ]},
+        [rich_opt, family_opt],
+    )
+    fallback_visible_options = _visible_options_from_chat_or_response(
+        {"_visible_options": []},
+        f"1. {family_opt['name']}\n2. {rich_opt['name']}",
+        [rich_opt, family_opt],
+    )
+    pass_structured_visible = (
+        [o.get("name") for o in structured_visible_options] == [family_opt["name"], rich_opt["name"]]
+        and [o.get("visible_idx") for o in structured_visible_options] == [1, 2]
+        and [o.get("name") for o in fallback_visible_options] == [family_opt["name"], rich_opt["name"]]
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="chat_json_visible_options_drive_visible_order_with_text_fallback",
+        passed=pass_structured_visible,
+        error="" if pass_structured_visible else f"structured={structured_visible_options}; fallback={fallback_visible_options}",
+        response_text=json.dumps({"structured": structured_visible_options, "fallback": fallback_visible_options}, ensure_ascii=False, default=str),
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    negation_prompt_state = {
+        "last_options": [rich_opt, family_opt, investment_2025_opt],
+        "visible_options": [rich_opt, family_opt, investment_2025_opt],
+        "selected_option": rich_opt,
+        "last_bot_question": "Хотите оставить номер для связи?",
+        "last_offer_type": "selected_option_details",
+        "rejected_option_names": [rich_opt["name"]],
+    }
+    negation_prompt = _build_negation_response_prompt(
+        intent="reject_selected_option",
+        user_text="не этот, хочу дешевле",
+        state=negation_prompt_state,
+        meta={"confidence": 0.9, "reason": "client rejected selected option"},
+    )
+    negation_prompt_low = negation_prompt.lower()
+    pass_negation_prompt = (
+        "role:" in negation_prompt_low
+        and "situation:" in negation_prompt_low
+        and "negation_context:" in negation_prompt_low
+        and "negation_intent" in negation_prompt_low
+        and "intent_specific_rule" in negation_prompt_low
+        and "reject_selected_option" in negation_prompt_low
+        and "не продавай его снова" in negation_prompt_low
+        and "last_options_except_selected" in negation_prompt_low
+        and "global_rules:" in negation_prompt_low
+        and "не проси номер" in negation_prompt_low
+        and "не повторяй презентацию" in negation_prompt_low
+        and "output_json:" in negation_prompt_low
+        and "buttons всегда []" in negation_prompt_low
+        and "mcp" in negation_prompt_low
+        and "json" in negation_prompt_low
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="negation_prompt_uses_llm_contract_with_code_fallback",
+        passed=pass_negation_prompt,
+        error="" if pass_negation_prompt else f"bad negation prompt: {negation_prompt}",
+        response_text=negation_prompt,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    planner_prompt_low = DIALOG_STATE_PLANNER_PROMPT.lower()
+    pass_dialog_planner_prompt = (
+        "dialog_action" in planner_prompt_low
+        and "selected_option_action" in planner_prompt_low
+        and "rejected_options_add" in planner_prompt_low
+        and "visible_options_policy" in planner_prompt_low
+        and "numeric_choice_policy" in planner_prompt_low
+        and "не подходит, хочу ближе к метро" in planner_prompt_low
+        and "selected_option_action=\"clear\"" in planner_prompt_low
+        and "numeric_choice_policy=\"reject\"" in planner_prompt_low
+        and "не придумывай max_price" in planner_prompt_low
+        and normalize_dialog_action("update_search") == "update_search"
+        and normalize_dialog_action("bad") == "continue_from_memory"
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="dialog_planner_prompt_has_state_contract",
+        passed=pass_dialog_planner_prompt,
+        error="" if pass_dialog_planner_prompt else "dialog planner prompt lacks state contract/examples",
+        response_text=DIALOG_STATE_PLANNER_PROMPT,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    planner_state = {
+        "params": {"rooms": "s", "max_price": 13_000_000},
+        "selected_option": rich_opt,
+        "visible_options": [rich_opt, family_opt],
+        "last_options": [rich_opt, family_opt],
+        "rejected_option_names": [],
+        "numeric_choice_policy": "accept",
+    }
+    applied = _apply_dialog_plan_to_state(
+        planner_state,
+        {
+            "dialog_action": "update_search",
+            "params_delta": {"near_metro": True},
+            "selected_option_action": "clear",
+            "selected_option_name": None,
+            "rejected_options_add": [rich_opt["name"], "ЖК «Несуществующий»"],
+            "visible_options_policy": "clear",
+            "numeric_choice_policy": "reject",
+        },
+        user_text="не подходит, хочу ближе к метро",
+    )
+    pass_apply_dialog_plan = (
+        planner_state.get("selected_option") is None
+        and rich_opt["name"] in planner_state.get("rejected_option_names", [])
+        and "ЖК «Несуществующий»" not in planner_state.get("rejected_option_names", [])
+        and planner_state.get("visible_options") == []
+        and planner_state.get("numeric_choice_policy") == "reject"
+        and planner_state.get("params", {}).get("near_metro") is True
+        and "selected_option_clear" in applied.get("applied", [])
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="dialog_plan_safely_clears_selected_and_rejects_known_option",
+        passed=pass_apply_dialog_plan,
+        error="" if pass_apply_dialog_plan else f"bad planner apply: state={planner_state}; applied={applied}",
+        response_text=json.dumps({"state": planner_state, "applied": applied}, ensure_ascii=False),
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    numeric_reject_state = {
+        "last_options": [rich_opt, family_opt],
+        "visible_options": [rich_opt, family_opt],
+        "numeric_choice_policy": "reject",
+    }
+    numeric_reject_intent = _resolve_dialog_intent("1", numeric_reject_state)
+    pass_numeric_policy = numeric_reject_intent.get("intent") == "followup_classifier"
+    results.append(Result(
+        suite="h029",
+        scenario="numeric_choice_policy_reject_blocks_stale_numeric_selection",
+        passed=pass_numeric_policy,
+        error="" if pass_numeric_policy else f"numeric policy ignored: {numeric_reject_intent}",
+        response_text=json.dumps(numeric_reject_intent, ensure_ascii=False, default=str),
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    numeric_plan_state = {
+        "last_options": [rich_opt, family_opt],
+        "visible_options": [rich_opt, family_opt],
+        "numeric_choice_policy": "reject",
+    }
+    numeric_plan_applied = _apply_dialog_plan_to_state(
+        numeric_plan_state,
+        {
+            "dialog_action": "select_option",
+            "selected_option_action": "set",
+            "selected_option_name": rich_opt["name"],
+            "numeric_choice_policy": "accept",
+        },
+        user_text="1",
+    )
+    pass_numeric_plan_guard = (
+        numeric_plan_state.get("selected_option") is None
+        and numeric_plan_state.get("numeric_choice_policy") == "reject"
+        and "selected_option_set_blocked_by_numeric_policy" in numeric_plan_applied.get("applied", [])
+        and "numeric_choice_accept_blocked_by_numeric_policy" in numeric_plan_applied.get("applied", [])
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="dialog_plan_cannot_override_rejected_numeric_choice_policy",
+        passed=pass_numeric_plan_guard,
+        error="" if pass_numeric_plan_guard else f"numeric plan guard failed: state={numeric_plan_state}; applied={numeric_plan_applied}",
+        response_text=json.dumps({"state": numeric_plan_state, "applied": numeric_plan_applied}, ensure_ascii=False, default=str),
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    valid_visible_numeric_state = {
+        "last_options": [rich_opt, family_opt],
+        "visible_options": [rich_opt, family_opt],
+        "numeric_choice_policy": "accept",
+    }
+    valid_visible_applied = _apply_dialog_plan_to_state(
+        valid_visible_numeric_state,
+        {
+            "dialog_action": "update_search",
+            "visible_options_policy": "rebuild",
+            "numeric_choice_policy": "reject",
+            "rejected_options_add": [rich_opt["name"], family_opt["name"]],
+        },
+        user_text="покажи другие",
+    )
+    pass_valid_visible_guard = (
+        valid_visible_numeric_state.get("numeric_choice_policy") == "accept"
+        and valid_visible_numeric_state.get("visible_options") == [rich_opt, family_opt]
+        and not valid_visible_numeric_state.get("rejected_option_names")
+        and "numeric_choice_reject_ignored_visible_list_still_valid" in valid_visible_applied.get("applied", [])
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="dialog_plan_does_not_break_valid_visible_numeric_choice",
+        passed=pass_valid_visible_guard,
+        error="" if pass_valid_visible_guard else f"valid visible guard failed: state={valid_visible_numeric_state}; applied={valid_visible_applied}",
+        response_text=json.dumps({"state": valid_visible_numeric_state, "applied": valid_visible_applied}, ensure_ascii=False, default=str),
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    planner_payload = _dialog_planner_state_payload({
+        "params": {"purpose": "investment"},
+        "selected_option": {**rich_opt, "developer": "comfort"},
+        "visible_options": [rich_opt],
+        "last_options": [rich_opt, family_opt],
+        "rejected_option_names": [family_opt["name"]],
+        "last_bot_question": "Какой ЖК?",
+        "last_offer_type": "choose_option",
+    })
+    payload_json = json.dumps(planner_payload, ensure_ascii=False).lower()
+    pass_planner_payload = (
+        "selected_option" in planner_payload
+        and "visible_options" in planner_payload
+        and "last_options" in planner_payload
+        and "rejected_option_names" in planner_payload
+        and "comfort" not in payload_json
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="dialog_planner_payload_is_safe_and_structured",
+        passed=pass_planner_payload,
+        error="" if pass_planner_payload else f"bad planner payload: {planner_payload}",
+        response_text=json.dumps(planner_payload, ensure_ascii=False, default=str),
         duration_ms=int((time.time() - started) * 1000),
     ))
 
@@ -1673,6 +2256,66 @@ def _run_deploy_smoke_test() -> Result:
         response_text=output,
         duration_ms=int((time.time() - started) * 1000),
     )
+
+
+def _run_non_text_unit_tests() -> list[Result]:
+    """Audit item 5: non-text input не должен превращаться в silent return."""
+    started = time.time()
+    results: list[Result] = []
+
+    class Msg:
+        def __init__(self, **kwargs: Any) -> None:
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    def add_result(scenario: str, passed: bool, response_text: str = "", error: str = "") -> None:
+        results.append(Result(
+            suite="non_text",
+            scenario=scenario,
+            passed=passed,
+            error="" if passed else error,
+            response_text=response_text,
+            duration_ms=int((time.time() - started) * 1000),
+        ))
+
+    fallback = _non_text_fallback_response("photo")
+    add_result(
+        "non_text_message_has_safe_fallback",
+        "пока я понимаю только текстовые запросы" in fallback.lower()
+        and "район" in fallback.lower()
+        and "бюджет" in fallback.lower()
+        and "жк" in fallback.lower(),
+        response_text=fallback,
+        error=f"bad fallback: {fallback}",
+    )
+
+    type_cases = {
+        "photo": Msg(photo=[object()]),
+        "voice": Msg(voice=object()),
+        "document": Msg(document=object()),
+        "sticker": Msg(sticker=object()),
+        "location": Msg(location=object()),
+        "unknown": Msg(),
+    }
+    detected = {expected: _non_text_message_type(message) for expected, message in type_cases.items()}
+    add_result(
+        "non_text_message_type_is_logged",
+        detected == {key: key for key in type_cases},
+        response_text=json.dumps(detected, ensure_ascii=False),
+        error=f"bad message type detection: {detected}",
+    )
+
+    contact_response = _non_text_fallback_response("contact")
+    add_result(
+        "contact_fallback_mentions_phone_format",
+        "контакт" in contact_response.lower()
+        and "+7" in contact_response
+        and "текст" in contact_response.lower(),
+        response_text=contact_response,
+        error=f"bad contact fallback: {contact_response}",
+    )
+
+    return results
 
 
 async def _run_control_dialog_test(
@@ -1779,7 +2422,7 @@ def _run_required_deploy_gate() -> Result:
     return _run_deploy_smoke_test()
 def main() -> None:
     p = argparse.ArgumentParser(description="nmbot test agent — codex + H016 + golden")
-    p.add_argument("--suite", default="all", choices=["all", "codex", "h016", "golden", "h021", "h023", "h024", "h026", "h028", "h029", "ux_e2e", "deploy", "dialog"])
+    p.add_argument("--suite", default="all", choices=["all", "codex", "h016", "golden", "h021", "h023", "h024", "h026", "h028", "h029", "ux_e2e", "non_text", "deploy", "dialog"])
     p.add_argument("--json", action="store_true", help="JSON-режим для CI")
     p.add_argument("--chat-max-tokens", type=int, default=10000)
     args = p.parse_args()

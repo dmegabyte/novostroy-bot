@@ -37,35 +37,68 @@ nmbot/
 ├── logs/
 │   ├── hypotheses.jsonl   # пары (h_id, описание, hypothesis_status)
 │   ├── prompts.jsonl      # версии промптов (P###, текст, дата)
-│   └── dialogs-YYYY-MM-DD.jsonl   # сырой лог: по одной записи на сообщение
+│   ├── dialogs-YYYY-MM-DD.jsonl   # сырой лог: по одной записи на сообщение
+│   └── dialogs-YYYY-MM-DD.md      # человекочитаемый дубль по диалогам
 └── scripts/
-    └── chat_tester_bot.py # пишет в dialogs.jsonl автоматически
+    └── chat_tester_bot.py # пишет в dialogs-*.jsonl и dialogs-*.md автоматически
 ```
 
 ---
 
 ## Схема записи в `dialogs-YYYY-MM-DD.jsonl`
 
-Один JSON-объект на строку. Пример для текстового сообщения пользователя:
+Один JSON-объект на строку. `dialogs-*.jsonl` остаётся машинным источником правды; для чтения человеком рядом пишется `dialogs-YYYY-MM-DD.md` с тем же порядком диалогов.
+
+Пример для текстового сообщения пользователя:
 
 ```json
 {
   "ts": "2026-06-25T13:35:00.123Z",
   "kind": "user_message",
   "dialog_id": "d-2026-06-25-001",
+  "turn_id": 1,
   "uid": 123456789,
   "h_id": "H001",
   "search_model": "google/gemini-3.1-flash-lite-preview",
   "chat_model": "google/gemini-2.5-flash",
   "mcp": true,
   "user_text": "Найди однушку до 8 млн в Москве",
+  "dialog_intent": "main_search",
+  "search_response": "...",
   "params_before": {"rooms": 1, "max_price": 8000000},
+  "state_after": {"params": {"rooms": 1, "max_price": 8000000}},
   "duration_ms": 5400,
   "tokens_in": 1240,
   "tokens_out": 380,
-  "cost_usd": 0.0089
+  "cost": {"total_usd": 0.0089}
 }
 ```
+
+Внутри `user_message` теперь есть достаточно структуры, чтобы видеть вход, внутренний ход и выход:
+
+- `dialog_id` / `turn_id` — связывают реплики в один диалог;
+- `dialog_intent` и `dialog_plan` — что решила логика;
+- `search_response` — сырой факт-вывод поиска;
+- `state_after` / `params_*` — что изменилось после ответа;
+- `response_text` / `buttons` / `cost` — что ушло пользователю.
+
+## Практический ритм работы с логами
+
+Если нужно быстро понять, что происходит в боте, пользуйся таким порядком:
+
+1. `logs/dialogs-YYYY-MM-DD.md` — глазами смотри вход → внутреннее → ответ.
+2. `python3 scripts/nmbot_quality.py --tail 20` — проверь последние ответы по codex-проверкам.
+3. `python3 scripts/nmbot_response_model_eval.py export --limit 50` + `run/score` — если надо сравнить chat-модели на реальных кейсах.
+
+Как читать сигнал:
+
+- если в `dialogs-*.md` вход нормальный, а внутри ерунда — чинить routing / `dialog_intent` / `dialog_plan`;
+- если внутри всё ок, а ответ кривой — чинить `chat_v1`, postprocess или формат ответа;
+- если `nmbot_quality.py` ругается на greetings / links / markdown / JSON — чинить выходной формат и prompt ответчика;
+- если `response_eval` показывает, что одна модель стабильно лучше — менять chat-модель, а не весь pipeline;
+- если `response_eval` показывает слабость у всех моделей, проблема, скорее всего, выше — в `search_response`, facts или входной схеме лога.
+
+Для одного кейса удобнее всего смотреть связку `dialog_id + turn_id`, а потом открывать ровно этот ход в JSONL и MD рядом.
 
 Для команд (`/start`, `/model` и т.д.):
 
@@ -102,6 +135,187 @@ nmbot/
    - пишет в `logs/hypotheses.jsonl` строку с `h_id, opened_at, status=open`,
    - при изменении промпта — пишет `P###` в `logs/prompts.jsonl` со старым и новым текстом.
 4. После 3+ диалогов на новой версии — фиксирует outcome в `EXPERIMENTS.md` (принято/откат/нужна доработка) и ставит `status=closed` в `hypotheses.jsonl`.
+
+---
+
+## Hypothesis Simulation Gate
+
+Перед изменением UX-логики Ирины ЧАТИ сначала проверяет гипотезу в read-only симуляции.
+
+## Prod Verification Gate
+
+Локальная проверка не считается финальной проверкой MINION.
+
+**Жёсткое правило:** если изменение влияет на клиентские ответы, промпты, Telegram handler, dialog state, MCP/search parsing, `visible_options`, operator handoff или follow-up routing, то результат считается незавершённым до проверки на VPS.
+
+Обязательный порядок:
+
+1. Локально: `py_compile`, `h029`, `ux_e2e`, `h028`, simulator/live probe.
+2. Backup текущих runtime-файлов на VPS.
+3. Deploy/sync runtime-файлов в `/home/neiro/novostroy-bot`.
+4. Remote `py_compile` на VPS.
+5. Restart `novostroy-bot.service`.
+6. Проверка feature markers/status/logs на VPS.
+7. Финальная проверка через prod/VPS MINION: Telegram/live logs или remote smoke, который импортирует именно `/home/neiro/novostroy-bot`.
+8. `python3 scripts/or_cost.py` после live/prod проверки.
+
+Если выполнены только локальные тесты, в отчёте обязательно писать: **«локально зелёное, prod ещё не проверен»**.
+
+Причина правила: 2026-07-01 пользователь написал в реальный MINION после локальных зелёных тестов, но VPS крутил старый runtime. Из-за этого повторился loop `жк южные сады → да → да`: prod не имел `operator_contact_accept`, новых prompt rules и `visible_options`.
+
+**Зачем:** не менять боевой код вслепую. Сначала надо увидеть, как будет выглядеть диалог: первый MCP-поиск, выбор ЖК, «расскажи подробнее», смешанные фразы вроде «1, можно бронь?», операторские темы. Так слабое место видно до правки `chat_tester_bot.py` или промптов.
+
+**Базовый инструмент:**
+
+```bash
+python3 scripts/nmbot_mcp_only_sim.py
+python3 scripts/nmbot_mcp_only_sim.py \
+  --turn "1, расскажи подробнее" \
+  --turn "1, можно бронь?"
+```
+
+**Правило:**
+
+1. Сформулировать гипотезу поведения.
+2. Прогнать её в симуляторе на MCP-данных.
+3. Найти проблемы в механике и тексте.
+4. Согласовать желаемое поведение.
+5. Только после этого менять `chat_tester_bot.py`, промпты или тесты.
+6. После правки закрепить сценарий в `scripts/nmbot_test_agent.py`.
+
+**Что проверять в симуляции:**
+
+- первый ответ использует только `facts[]/near[]/missing`;
+- выбранный ЖК берётся из `last_options`, без нового широкого поиска;
+- «расскажи подробнее» раскрывает сохранённые MCP-данные, а не зовёт оператора сразу;
+- «бронь», «наличие», «этаж», «корпус», «ипотека», «актуальная цена» не придумываются LLM, а идут в detail/availability endpoint или к оператору;
+- смешанные фразы вроде «1, расскажи подробнее» и «1, можно бронь?» не ломают выбор объекта.
+
+**Формат журнала симуляции для будущих итераций:**
+
+Каждый прогон в `logs/sim_journal-YYYY-MM-DD.md/jsonl` должен быть карточкой гипотезы, а не короткой пометкой. Минимальный состав:
+
+1. **Гипотеза** — какое поведение проверяем и почему. Например: «если в районе нет новостроек, Ирина не советует вторичку, а предлагает расширить поиск поблизости».
+2. **Источник проблемы** — ссылка на live/local лог, скрин или тест, где это всплыло: файл, строка, дата, `uid`/`h_id`, если есть.
+3. **Входные данные симуляции** — полный или сокращённый `search_response`: `facts`, `near`, `missing`, `params`; отдельно — стартовый `state`, если проверяется память (`last_options`, `selected_option`, `last_answer_kind`).
+4. **Команда запуска** — точная команда симулятора или fixture path: `python3 scripts/nmbot_mcp_only_sim.py ...`.
+5. **Turn пользователя** — фраза или цепочка фраз, которые прогоняли.
+6. **Фактический результат** — `routing`, `bot_response`, важные изменения `state`, запись `status=ok/watch/needs_patch`.
+7. **Ожидаемый результат** — пример желаемого текста или действия. Не абстрактно «ответить лучше», а конкретно: какой route, какой state, какой клиентский ответ.
+8. **Расхождение** — коротко, что именно не совпало: ушёл в classifier, потерял `last_options`, упомянул запрещённый факт, сделал пустой список, позвал оператора рано и т.д.
+9. **Где менять** — конкретный файл и слой: `prompts/chat_v1.txt`, `scripts/chat_tester_bot.py::_resolve_dialog_intent`, `dialog_plan executor`, formatter/postprocess, state contract.
+10. **Подсказка для патча** — минимальное изменение, которое должно закрыть сценарий.
+11. **Acceptance criteria** — что должно стать зелёным после патча: например, no `вторичка`, no empty options-summary, route=`compare_others`, `selected_option` заполнен, journal status=`ok`.
+12. **Prod gate** — если изменение влияет на ответы/routing/state, явно пометить: «локально зелёное, prod ещё не проверен» до VPS-проверки.
+
+**Канонический шаблон записи:**
+
+```md
+## <timestamp> — MCP-only simulator run
+
+Hypothesis: <что проверяем>
+Source: <VPS/local log / screen / test>
+Input:
+- search_response: <facts/near/missing/params>
+- state: <last_options/selected_option/last_answer_kind if relevant>
+- command: <точная команда или fixture>
+
+Turns:
+- <user turn> → <routing>
+- <user turn> → <routing>
+
+Expected:
+- <ожидаемый route / text / state>
+
+Actual:
+- <фактический route / text / state>
+
+Mismatch:
+- <что именно не совпало>
+
+Patch:
+- where: <file + function/branch>
+- hint: <минимальный фикс>
+
+Acceptance:
+- <критерий зелёного результата>
+```
+
+**Как вести журнал проблем перед правкой бота:**
+
+1. **Сначала зафиксировать проблему** в 1–2 фразах: что именно сломалось и в каком типе диалога.
+2. **Найти реальный диалог** в `logs/dialogs-YYYY-MM-DD.jsonl` или VPS log и выписать ссылку/строку/uid.
+3. **Проверить гипотезу в симуляции** через `scripts/nmbot_mcp_only_sim.py` или fixture, не правя код сразу.
+4. **Записать в журнал**: input, turns, expected, actual, mismatch, patch, acceptance.
+5. **Собрать patch map**: точный файл и функция/ветка, а не общий совет.
+6. **Только после этого менять код** и повторять ту же симуляцию до status=`ok`.
+7. **Если поведение влияет на ответы/routing/state** — держать пометку `локально зелёное, prod ещё не проверен` до VPS-проверки.
+
+**Правило для повторных проблем:** если один и тот же класс ошибки повторяется, в журнале он получает отдельный тег/название гипотезы, а не размазывается по общему `watch`.
+
+Пример короткой карточки:
+
+```md
+### SIM-HYP: no_results_area_expansion
+- Гипотеза: если `facts=[]`, `near=[]`, но указан район, Ирина предлагает близкие районы/варианты поблизости и не советует вторичку.
+- Источник: VPS `logs/dialogs-2026-07-01.jsonl:85`, Ясенево.
+- Вход: `facts=[]`, `near=[]`, `missing="В Ясенево не найдено актуальных новостроек"`, `params={"district":"Ясенево"}`.
+- Команда: `python3 scripts/nmbot_mcp_only_sim.py --search-json /tmp/... --turn "Подскажите, когда будет застройка в Ясенево?"`.
+- Факт: bot_response=`Нашла несколько вариантов... Какой ЖК хотите рассмотреть подробнее?`, status=`needs_patch`.
+- Ожидание: `По Ясенево сейчас не вижу актуальных новостроек от застройщика. Могу посмотреть близкие районы или варианты поблизости. Показать?`
+- Расхождение: пустой options-summary при `facts=[]/near=[]`; возможное упоминание вторички.
+- Где менять: `prompts/chat_v1.txt` no-results branch + first search formatting в симуляторе.
+- Patch hint: добавить сценарий `facts=[] + near=[] + район указан`; запретить «вторичный рынок».
+- Acceptance: нет слова `вторичк`, нет «нашла несколько вариантов», есть «поблизости/соседние районы», status=`ok`.
+```
+
+**Критерий перехода к коду:** симуляция показывает понятную механику и ожидаемый текст, а оставшиеся дефекты уже ясно мапятся на конкретные функции/промпты/тесты.
+
+---
+
+## 2026-07-01 — Scenario cards and deploy notes
+
+### Принцип: глобальные правила отдельно, сценарные карточки отдельно
+
+Чтобы не раздувать один общий prompt, поведение Ирины теперь проектируется в два слоя:
+
+1. **Global Policy** — всегда действует для всех ответов: роль Ирины, только MCP/search facts, живой короткий стиль, запрет технических утечек, запрет фактов вне `facts[]/near[]`, один следующий шаг.
+2. **Scenario Card** — только сценарное поведение без дубля глобальных правил: когда использовать, цель ответа, что обязательно сделать, чем закончить, хороший/плохой пример.
+
+Канонические scenario cards для симуляций:
+
+- `first_help_policy` — первый полезный подбор: до 3 вариантов и один вопрос выбора.
+- `selected_complex_policy` — клиент выбрал/назвал конкретный ЖК: короткая карточка из MCP-фактов.
+- `selected_complex_ready_to_handoff_policy` — выбран ЖК и клиент показывает интерес: вести к оператору, а не продолжать допрос.
+- `compare_policy` — сравнить текущие сохранённые варианты, не запускать новый широкий поиск.
+- `budget_refinement_policy` — бюджет после списка сначала применить к `last_options`.
+- `no_data_policy` — если `facts=[]` и `near=[]`, не делать пустой список и не советовать вторичку; предложить расширить географию.
+- `operator_handoff_policy` — просьба позвонить/связаться/обсудить детали ведёт к operator handoff.
+
+### Принятые симуляционные фиксы 2026-07-01
+
+- `compare_policy`: фразы `чем различаются`, `сравни`, `отличаются` до выбранного ЖК теперь дают route=`compare_others` по текущим `last_options`.
+- `budget_refinement_policy`: фразы `до 15 млн`, `бюджет 15 млн` после списка дают route=`sort_price_asc` с `budget_limit` и сортировкой/фильтрацией сохранённых вариантов.
+- `filter_finish`: `с отделкой` после списка обрабатывается до generic classifier и даёт route=`filter_finish`.
+- `selected_complex_ready_to_handoff_policy`: выбранный ЖК + показанная карточка + `интересно/что дальше/подходит` даёт route=`operator_for_selected`.
+- `no_data_policy`: no-results по району говорит честно, что актуальных новостроек от застройщика нет в переданных данных, и предлагает посмотреть поблизости.
+- `selected_complex_formatting_policy`: карточка одного ЖК и detail-ответ больше не пишутся одним плотным абзацем; факты разбиты на короткие блоки, финальный вопрос отдельным абзацем.
+- `non_text_silence`: non-text Telegram updates больше не должны уходить в тишину; handler отвечает безопасным fallback и пишет `kind="non_text_message"`.
+
+### Prod verification 2026-07-01
+
+Для formatting/routing batch выполнен prod gate:
+
+- backup на VPS: `backups/deploy-20260701-154110`;
+- sync runtime/docs/test files в `/home/neiro/novostroy-bot`;
+- remote `py_compile` — ok;
+- remote `python3 scripts/nmbot_test_agent.py --suite h029 --json` — `29/29 pass`;
+- remote `python3 scripts/nmbot_test_agent.py --suite ux_e2e --json` — `9/9 pass`;
+- `novostroy-bot.service` restart — service `active (running)`;
+- remote targeted sim: `ЖК Южные Сады → расскажи подробнее → интересно, что дальше` — карточка и detail в коротких абзацах, последний turn route=`operator_for_selected`;
+- OpenRouter после проверки: today `$1.96`, total `$32.39`.
+
+NotebookLM source note: `Session 2026-07-01 — selected complex formatting deployed`, note id `3ba8fa8be82e`.
 
 ---
 

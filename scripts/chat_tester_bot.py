@@ -23,6 +23,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Final
+from uuid import uuid4
 
 import aiohttp
 
@@ -234,6 +235,39 @@ class OvermindClient:
         )
         return response_text, chat_meta
 
+    async def explain_negation_followup(
+        self,
+        *,
+        intent: str,
+        user_text: str,
+        state: dict[str, Any],
+        meta: dict[str, Any] | None = None,
+        chat_model: str = CHAT_MODEL,
+        timeout: int = 600,
+    ) -> tuple[str, dict]:
+        """Chat-only presenter: живой ответ на отрицание/отказ без нового MCP-поиска."""
+        session = await self.ensure_session()
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OVERMIND_TOKEN}",
+        }
+        chat_query = _build_negation_response_prompt(intent=intent, user_text=user_text, state=state, meta=meta or {})
+        chat_request_data = {
+            "query": chat_query,
+            "service": "openrouter",
+            "model": chat_model,
+            "system_prompt": CHAT_SYSTEM_PROMPT,
+            "parameters": {
+                "temperature": 0.2,
+                "max_tokens": 1600,
+            },
+            "external_api_key": OPENROUTER_API_KEY,
+        }
+        response_text, _params, _retries, chat_meta = await self._chat_with_retry(
+            chat_request_data, headers, timeout, uid=0
+        )
+        return response_text, chat_meta
+
     async def _run_gateway_request(self, request_data: dict, headers: dict, timeout: int) -> tuple[str, dict]:
         """Возвращает (response_text, metadata). При ошибке возвращает (error_text, {})."""
         session = await self.ensure_session()
@@ -315,7 +349,7 @@ class OvermindClient:
         return {}
 
     @staticmethod
-    def _parse_chat_json(response_text: str) -> tuple[str, dict, list[dict]]:
+    def _parse_chat_json(response_text: str) -> tuple[str, dict, list[dict], list[dict]]:
         try:
             s = response_text.find("{")
             e = response_text.rfind("}") + 1
@@ -323,14 +357,16 @@ class OvermindClient:
                 data = json.loads(response_text[s:e])
                 resp_text = data.get("response", response_text)
                 params = data.get("params", {})
+                visible_options = data.get("visible_options", [])
                 return (
                     resp_text,
                     params if isinstance(params, dict) else {},
                     [],  # buttons намеренно игнорируем: Ирина отвечает живым текстом без inline-кнопок.
+                    visible_options if isinstance(visible_options, list) else [],
                 )
         except json.JSONDecodeError:
             pass
-        return response_text, {}, []
+        return response_text, {}, [], []
 
     async def _chat_with_retry(
         self,
@@ -345,8 +381,8 @@ class OvermindClient:
         # H007-A: strip markdown-обёртку ДО парсинга JSON, чтобы _parse_chat_json
         # работал с чистым текстом (без ```json ... ```).
         chat_result = _strip_markdown(chat_result)
-        response_text, chat_params, chat_buttons = self._parse_chat_json(chat_result)
-        chat_meta = {**chat_meta, "_buttons": chat_buttons}
+        response_text, chat_params, chat_buttons, chat_visible_options = self._parse_chat_json(chat_result)
+        chat_meta = {**chat_meta, "_buttons": chat_buttons, "_visible_options": chat_visible_options}
         retries = 0
         # Признак невалидного JSON: не нашли JSON response/buttons/params, и это не служебная ошибка.
         parsed_ok = response_text != chat_result or bool(chat_params) or bool(chat_buttons)
@@ -355,8 +391,8 @@ class OvermindClient:
             retries += 1
             chat_result, chat_meta = await self._run_gateway_request(chat_request_data, headers, timeout)
             chat_result = _strip_markdown(chat_result)  # H007-A
-            response_text_new, chat_params, chat_buttons = self._parse_chat_json(chat_result)
-            chat_meta = {**chat_meta, "_buttons": chat_buttons}
+            response_text_new, chat_params, chat_buttons, chat_visible_options = self._parse_chat_json(chat_result)
+            chat_meta = {**chat_meta, "_buttons": chat_buttons, "_visible_options": chat_visible_options}
             parsed_ok = response_text_new != chat_result or bool(chat_params) or bool(chat_buttons)
             _log_event({
                 "kind": "user_message_retry",
@@ -444,6 +480,19 @@ def _format_numbered_list_spacing(text: str) -> str:
     return "\n".join(out)
 
 
+def _format_paragraph_spacing(text: str) -> str:
+    """Добавляет базовые абзацы в одиночных LLM-презентациях, где нет списка."""
+    if not text:
+        return text
+    out = str(text or "").strip()
+    out = re.sub(r"\s+(Хотите\b)", r"\n\n\1", out)
+    out = re.sub(r"\s+(Оставите\b)", r"\n\n\1", out)
+    out = re.sub(r"\s+(Что\s+(?:для вас|вам|из этого)\b)", r"\n\n\1", out, flags=re.I)
+    out = re.sub(r"\s+(Какой\s+(?:вариант|ЖК)\b)", r"\n\n\1", out, flags=re.I)
+    out = re.sub(r"\s+(Для инвестиц[а-яё]*\b)", r"\n\n\1", out, flags=re.I)
+    return re.sub(r"\n{3,}", "\n\n", out)
+
+
 def _prepare_response_text(text: str) -> str:
     """Финальный postprocess перед логом/Telegram.
 
@@ -461,7 +510,214 @@ def _prepare_response_text(text: str) -> str:
                 raw = data["response"]
     except json.JSONDecodeError:
         pass
+    raw = _format_paragraph_spacing(_fix_complex_name_artifacts(raw))
     return _format_numbered_list_spacing(raw)
+
+
+def _fix_complex_name_artifacts(text: str) -> str:
+    """Чистит типовые артефакты склейки названий ЖК/ГК в LLM-ответах."""
+    cleaned = str(text or "")
+    cleaned = re.sub(r"ЖК\s+«(ЖК|ГК)\s+«([^»]+)»»", r"\1 «\2»", cleaned)
+    cleaned = re.sub(r"ЖК\s+«([^»]+)»»", r"ЖК «\1»", cleaned)
+    return cleaned
+
+
+def _display_complex_name(name: Any) -> str:
+    value = _fix_complex_name_artifacts(str(name or "").strip())
+    if not value:
+        return "этому варианту"
+    if re.match(r"^(жк|гк|мфк|премиум[-\s]?квартал)\b", value, re.I):
+        return value
+    return f"ЖК «{value}»"
+
+
+_UNSUPPORTED_CLASS_RE = re.compile(
+    r"\b(комфорт[-\s]?класс|бизнес[-\s]?класс|премиум[-\s]?класс|премиум|элитн\w*|массов\w+\s+сегмент\w*)\b",
+    re.I,
+)
+
+_CLASS_AS_VALUE_RE = re.compile(r"^(comfort|business|premium|elite|комфорт|бизнес|премиум|элитн\w*)$", re.I)
+
+
+def _strip_unsupported_complex_claims(text: str, option: dict[str, Any] | None = None) -> str:
+    """Post-check для LLM: убираем класс/сегмент ЖК, если его нет в safe facts.
+
+    Это не стилистическая заплатка под слово «комфорт-класс», а защитный слой
+    grounding: класс/сегмент относится к чувствительным фактам и не должен
+    появляться из общих знаний модели.
+    """
+    # Пока MCP-схема не даёт отдельного доверенного поля class/segment,
+    # любые упоминания класса/сегмента в клиентском тексте считаем неподтверждёнными.
+    paragraphs: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", str(text or "")):
+        lines: list[str] = []
+        for line in paragraph.splitlines() or [paragraph]:
+            if not _UNSUPPORTED_CLASS_RE.search(line):
+                lines.append(line)
+                continue
+            # Для пунктов списка не удаляем весь ЖК, а вырезаем только неподтверждённый класс/сегмент.
+            if re.match(r"\s*\d+\.\s+", line):
+                line = re.sub(r"\b(это\s+)?(комфорт[-\s]?класс|бизнес[-\s]?класс|премиум[-\s]?класс|премиум|элитн\w*|массов\w+\s+сегмент\w*)\b,?\s*", "", line, flags=re.I)
+                line = re.sub(r"\s{2,}", " ", line).strip()
+                if line:
+                    lines.append(line)
+                continue
+            kept_sentences = [
+                sentence
+                for sentence in re.split(r"(?<!\d)(?<=[.!?])\s+(?=[А-ЯA-ZЁ])", line)
+                if not _UNSUPPORTED_CLASS_RE.search(sentence)
+            ]
+            cleaned_line = " ".join(sentence.strip() for sentence in kept_sentences if sentence.strip())
+            if cleaned_line:
+                lines.append(cleaned_line)
+        block = "\n".join(line for line in lines if line.strip()).strip()
+        if block:
+            paragraphs.append(block)
+    return _format_numbered_list_spacing(re.sub(r"\n{3,}", "\n\n", "\n\n".join(paragraphs).strip()))
+
+
+_UNREQUESTED_LIVE_DATA_RE = re.compile(
+    r"(наличие\s+конкретн|актуальн\w*\s+цен|по\s+свежим\s+данн|конкретн\w*\s+планировк|проверить\s+по\s+актуальн)",
+    re.I,
+)
+
+_DIRECT_LIVE_DATA_REQUEST_RE = re.compile(
+    r"(налич|актуаль|брон|заброни|этаж|корпус|ипотек|ставк|скид|показ|посмотреть|торг|плат[её]ж|первонач)",
+    re.I,
+)
+
+_GENERIC_SELECTED_QUESTION_RE = re.compile(
+    r"(?:что\s+именно\s+в\s+этом\s+проекте\s+вам\s+(?:хотелось\s+бы\s+)?(?:обсудить|разобрать)\s+подробнее\?|какой\s+аспект\s+этого\s+жк\s+вам\s+(?:было\s+бы\s+)?интересно\s+разобрать\s+подробнее\?)",
+    re.I,
+)
+
+
+def _strip_unrequested_live_data_cta(text: str, request_text: str = "") -> str:
+    """CTA timing guard: не уводим в live-наличие, если клиент этого не просил."""
+    request_l = str(request_text or "").lower().replace("ё", "е")
+    # Не используем _needs_operator_for_selected_option: там есть широкий триггер
+    # «квартир», который срабатывает на обычное «ищу квартиру».
+    if _DIRECT_LIVE_DATA_REQUEST_RE.search(request_l):
+        return text
+    blocks: list[str] = []
+    for paragraph in re.split(r"\n\s*\n", str(text or "")):
+        lines: list[str] = []
+        for line in paragraph.splitlines() or [paragraph]:
+            if _UNREQUESTED_LIVE_DATA_RE.search(line):
+                kept = [
+                    sentence.strip()
+                    for sentence in re.split(r"(?<!\d)(?<=[.!?])\s+(?=[А-ЯA-ZЁ])", line)
+                    if sentence.strip() and not _UNREQUESTED_LIVE_DATA_RE.search(sentence)
+                ]
+                if kept:
+                    lines.append(" ".join(kept))
+                continue
+            lines.append(line)
+        block = "\n".join(line for line in lines if line.strip()).strip()
+        if block:
+            blocks.append(block)
+    return _format_numbered_list_spacing("\n\n".join(blocks).strip())
+
+
+def _soften_layout_overclaim(text: str) -> str:
+    """Не называем площади «планировками»: MCP обычно даёт area, а не планировочные решения."""
+    cleaned = str(text or "")
+    cleaned = re.sub(r"\bвыбор\s+планировок\s+большой\b", "диапазон площадей большой", cleaned, flags=re.I)
+    cleaned = re.sub(r"\bможно\s+подобрать\s+подходящ(?:ую|ее)\s+планировк\w*\b", "можно подобрать подходящую площадь", cleaned, flags=re.I)
+    cleaned = re.sub(r"\bразобрать\s+подробнее\s+планировк\w*\s+и\s+цен\w*\b", "коротко разобрать цену, срок и отделку", cleaned, flags=re.I)
+    cleaned = re.sub(r"\bпланировк\w*\s+и\s+цен\w*\b", "цену, срок и отделку", cleaned, flags=re.I)
+    return cleaned
+
+
+def _soften_generic_selected_question(text: str) -> str:
+    """Убирает роботический финальный вопрос у выбранного ЖК."""
+    replacement = "Хотите сравнить его с другими вариантами или коротко разобрать цену, срок и отделку?"
+    return _GENERIC_SELECTED_QUESTION_RE.sub(replacement, str(text or ""))
+
+
+_SELECTED_INVESTMENT_COMPARE_QUESTION_RE = re.compile(
+    r"Хотите\s+(?:сравнить[^?]+|(?:подробнее\s+)?разобрать\s+(?:цены|цену|стоимость)[^?]*|коротко\s+разобрать[^?]+)\?",
+    re.I,
+)
+
+
+def _operator_cta_for_selected_investment(text: str, option: dict[str, Any] | None = None, purpose: Any = None) -> str:
+    """После выбора инвестиционного ЖК интерес уже проявлен — следующий шаг оператор/live lots."""
+    purpose_l = str(purpose or "").lower()
+    if "инвест" not in purpose_l and purpose_l not in {"investment", "invest"}:
+        return text
+    if not text:
+        return text
+    name = _display_complex_name((option or {}).get("name") if isinstance(option, dict) else "")
+    cta = (
+        f"Хотите оставить номер — оператор проверит по {name} актуальные квартиры, цены входа и условия покупки?"
+        if name else
+        "Хотите оставить номер — оператор проверит актуальные квартиры, цены входа и условия покупки?"
+    )
+    if _SELECTED_INVESTMENT_COMPARE_QUESTION_RE.search(text):
+        return _SELECTED_INVESTMENT_COMPARE_QUESTION_RE.sub(cta, text)
+    if "оставить номер" in text.lower() or "оператор" in text.lower():
+        return text
+    return f"{text.rstrip()}\n\n{cta}"
+
+
+def _compact_name_key(value: Any) -> str:
+    return re.sub(r"[^a-zа-я0-9]+", " ", str(value or "").lower().replace("ё", "е")).strip()
+
+
+def _rejected_option_keys(state: dict[str, Any]) -> set[str]:
+    return {_compact_name_key(name) for name in (state.get("rejected_option_names") or []) if _compact_name_key(name)}
+
+
+def _is_rejected_option(option: dict[str, Any], state: dict[str, Any]) -> bool:
+    rejected = _rejected_option_keys(state)
+    if not rejected:
+        return False
+    name_key = _compact_name_key(option.get("name"))
+    return bool(name_key and name_key in rejected)
+
+
+def _looks_like_selected_option_rejection(text: str) -> bool:
+    t = str(text or "").lower().replace("ё", "е")
+    return bool(re.search(r"\b(не\s+подходит|не\s+этот|не\s+то|не\s+нравится|убери|уберите|убираем)\b", t))
+
+
+def _remember_rejected_selected_option(state: dict[str, Any]) -> None:
+    option = state.get("selected_option")
+    if not isinstance(option, dict) or not option.get("name"):
+        return
+    rejected = state.setdefault("rejected_option_names", [])
+    if option["name"] not in rejected:
+        rejected.append(option["name"])
+
+
+def _filter_rejected_options(options: list[dict[str, Any]], state: dict[str, Any]) -> list[dict[str, Any]]:
+    return [option for option in (options or []) if not _is_rejected_option(option, state)]
+
+
+def _strip_rejected_options_from_response(text: str, state: dict[str, Any]) -> str:
+    """Убирает из видимого списка ЖК, которые клиент уже отверг.
+
+    MCP/search может снова вернуть тот же проект после уточнения бюджета. Диалоговая
+    память клиента важнее: не показываем отвергнутый ЖК повторно в следующем списке.
+    """
+    rejected = _rejected_option_keys(state)
+    if not rejected:
+        return text
+    blocks = re.split(r"\n\s*\n", str(text or ""))
+    kept: list[str] = []
+    for block in blocks:
+        block_key = _compact_name_key(block)
+        if any(name and name in block_key for name in rejected):
+            continue
+        kept.append(block)
+    cleaned = "\n\n".join(kept).strip()
+    counter = 0
+    def repl(match: re.Match[str]) -> str:
+        nonlocal counter
+        counter += 1
+        return f"{match.group(1)}{counter}. "
+    return re.sub(r"(^|\n)\s*\d+\.\s+", repl, cleaned)
 
 
 # H013: дефолтный state пользователя + динамические quick-actions
@@ -539,6 +795,116 @@ def _followup_state_payload(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _last_bot_text(state: dict[str, Any]) -> str:
+    for turn in reversed(state.get("dialog_window") or []):
+        if isinstance(turn, dict) and turn.get("role") == "bot":
+            return str(turn.get("text") or "")
+    return ""
+
+
+def _dialog_planner_state_payload(state: dict[str, Any]) -> dict[str, Any]:
+    """Компактный state для LLM-orchestrator без сырых больших объектов."""
+    selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
+    return {
+        "params": dict(state.get("params") or {}),
+        "selected_option": _safe_option_payload(selected),
+        "visible_options": [_safe_option_payload(o) for o in (state.get("visible_options") or [])[:5] if isinstance(o, dict)],
+        "last_options": [_safe_option_payload(o) for o in (state.get("last_options") or [])[:5] if isinstance(o, dict)],
+        "rejected_option_names": [str(x) for x in (state.get("rejected_option_names") or []) if str(x).strip()],
+        "last_bot_question": state.get("last_bot_question") or "",
+        "last_offer_type": state.get("last_offer_type") or "",
+        "last_answer_kind": state.get("last_answer_kind") or "",
+        "numeric_choice_policy": state.get("numeric_choice_policy") or "accept",
+    }
+
+
+def _find_option_by_name(state: dict[str, Any], name: Any) -> dict[str, Any] | None:
+    compact_name = _compact_option_text(name)
+    if not compact_name:
+        return None
+    for option in (state.get("visible_options") or []) + (state.get("last_options") or []):
+        if _compact_option_text(option.get("name")) == compact_name:
+            return option
+    return None
+
+
+def _apply_dialog_plan_to_state(state: dict[str, Any], plan: dict[str, Any], *, user_text: str = "") -> dict[str, Any]:
+    """Применяет LLM dialog_plan как безопасный state-patch.
+
+    LLM предлагает план; код не принимает новые ЖК на веру и применяет только
+    разрешённые действия: clear/set выбранного объекта из памяти, rejected list,
+    visible/numeric policies и params_delta.
+    """
+    applied: dict[str, Any] = {"applied": []}
+    if not isinstance(plan, dict):
+        return applied
+
+    rejected = state.setdefault("rejected_option_names", [])
+    known_names = {
+        _compact_option_text(o.get("name")): str(o.get("name"))
+        for o in (state.get("visible_options") or []) + (state.get("last_options") or [])
+        if isinstance(o, dict) and o.get("name")
+    }
+    selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
+    selected_name = str(selected.get("name") or "")
+    selected_key = _compact_option_text(selected_name)
+    allow_rejected_update = _looks_like_negation(user_text) or _looks_like_selected_option_rejection(user_text)
+    unsafe_numeric_choice = bool(_pure_option_choice_index(user_text) and state.get("numeric_choice_policy") == "reject")
+    for raw_name in plan.get("rejected_options_add") or []:
+        if not allow_rejected_update:
+            continue
+        key = _compact_option_text(raw_name)
+        safe_name = known_names.get(key) or (selected_name if key and key == selected_key else "")
+        if safe_name and safe_name not in rejected:
+            rejected.append(safe_name)
+            applied["applied"].append("rejected_options_add")
+
+    if plan.get("selected_option_action") == "clear":
+        state["selected_option"] = None
+        state["last_offer_type"] = ""
+        applied["applied"].append("selected_option_clear")
+    elif plan.get("selected_option_action") == "set":
+        option = None if unsafe_numeric_choice else _find_option_by_name(state, plan.get("selected_option_name"))
+        if option:
+            state["selected_option"] = option
+            applied["applied"].append("selected_option_set")
+        elif unsafe_numeric_choice:
+            applied["applied"].append("selected_option_set_blocked_by_numeric_policy")
+
+    visible_policy = str(plan.get("visible_options_policy") or "")
+    if visible_policy == "clear":
+        state["visible_options"] = []
+        applied["applied"].append("visible_options_clear")
+
+    params_delta = plan.get("params_delta") if isinstance(plan.get("params_delta"), dict) else {}
+    params_delta = _normalize_followup_params_delta(params_delta)
+
+    numeric_policy = str(plan.get("numeric_choice_policy") or "")
+    if numeric_policy in {"accept", "reject"}:
+        if unsafe_numeric_choice and numeric_policy == "accept":
+            state["numeric_choice_policy"] = "reject"
+            applied["applied"].append("numeric_choice_accept_blocked_by_numeric_policy")
+        elif numeric_policy == "reject" and state.get("visible_options") and visible_policy != "clear" and not params_delta and not allow_rejected_update:
+            # Planner может предложить reject для «покажи другие»/общих follow-up,
+            # но если надёжный видимый список всё ещё на экране и мы реально не
+            # меняли поиск/не чистили список/не фиксировали отказ, не ломаем выбор 1/2/3.
+            applied["applied"].append("numeric_choice_reject_ignored_visible_list_still_valid")
+        else:
+            state["numeric_choice_policy"] = numeric_policy
+            applied["applied"].append(f"numeric_choice_{numeric_policy}")
+
+    if params_delta:
+        state["params"] = {**state.get("params", {}), **params_delta}
+        applied["params_delta"] = params_delta
+        applied["applied"].append("params_delta")
+
+    if _looks_like_selected_option_rejection(user_text) and selected_name and selected_name not in rejected:
+        rejected.append(selected_name)
+        applied["applied"].append("rejected_selected_by_text_safety")
+
+    return applied
+
+
 def _clarification_from_followup(meta: dict[str, Any], state: dict[str, Any]) -> str:
     question = str(meta.get("clarification_question") or "").strip()
     if question:
@@ -565,7 +931,7 @@ def _local_followup_intent(text: str, state: dict[str, Any]) -> str:
     no = bool(re.fullmatch(r"(нет|неа|не надо|не нужно)", t))
     if offer == "operator_for_selected":
         if yes:
-            return "operator_for_selected"
+            return "operator_contact_accept"
         if no:
             return "reject_offer"
         if re.search(r"(зачем|почему|для чего)", t):
@@ -577,7 +943,160 @@ def _local_followup_intent(text: str, state: dict[str, Any]) -> str:
             return "compare_selected"
         if no:
             return "reject_offer"
+    if _is_operator_phone_refusal(t):
+        return "reject_operator"
     return ""
+
+
+def _looks_like_negation(text: str) -> bool:
+    t = text.lower().replace("ё", "е").strip()
+    return bool(re.search(r"\b(не|нет|неа|без)\b|не\s+надо|не\s+нужно|не\s+хочу|не\s+подходит|не\s+этот|убер(и|ите|ем)", t))
+
+
+def _is_operator_phone_refusal(text: str) -> bool:
+    """Минимальный code safety: явный отказ от оператора/звонка/номера.
+
+    Остальные отрицания специально отдаём LLM follow-up classifier'у.
+    """
+    t = text.lower().replace("ё", "е").strip()
+    return bool(re.search(
+        r"(не\s+хочу|не\s+надо|не\s+нужно|без).{0,25}(оператор|менеджер|звон|звонк|телефон|номер|контакт)|"
+        r"(оператор|менеджер|звон|звонк)\s+не\s+(нужен|нужна|надо)|"
+        r"номер\s+не\s+(дам|оставлю)|не\s+оставлю\s+(номер|телефон|контакт)",
+        t,
+    ))
+
+
+def _reject_operator_response(state: dict[str, Any]) -> str:
+    selected = state.get("selected_option") or {}
+    name = selected.get("name") if isinstance(selected, dict) else "этот ЖК"
+    options = state.get("visible_options") or state.get("last_options") or []
+    other_count = max(0, len(options) - 1) if selected else len(options)
+    tail = "Могу сравнить его с другими вариантами или продолжить подбор здесь."
+    if other_count:
+        tail = "Можем сравнить его с другими вариантами из подборки или поменять условия поиска."
+    return f"Хорошо, тогда остаёмся здесь. По {name} можем спокойно продолжить без звонка.\n\n{tail}\n\nЧто удобнее: сравнить варианты или изменить условия?"
+
+
+def _reject_selected_option_response(state: dict[str, Any]) -> str:
+    selected = state.get("selected_option") or {}
+    selected_name = _compact_option_text(selected.get("name")) if isinstance(selected, dict) else ""
+    options = state.get("visible_options") or state.get("last_options") or []
+    remaining = [
+        option for option in options
+        if _compact_option_text(option.get("name")) != selected_name
+    ][:3]
+    if remaining:
+        return _format_options_summary_response(
+            remaining,
+            "Поняла, этот ЖК убираем. Из оставшихся можно посмотреть",
+            "Что именно не подошло в прошлом варианте — цена, район, срок или формат проекта?",
+        )
+    return "Поняла, этот ЖК убираем. Что именно не подошло — цена, район, срок сдачи или сам формат проекта?"
+
+
+def _reject_similar_options_response(state: dict[str, Any]) -> str:
+    return "Хорошо, похожие варианты не показываю. Можем либо подробнее разобрать выбранный ЖК, либо поменять условия поиска — бюджет, район, срок или отделку. Что важнее изменить?"
+
+
+def _negation_clarification_response(meta: dict[str, Any], state: dict[str, Any]) -> str:
+    question = str(meta.get("clarification_question") or "").strip()
+    if question:
+        return question
+    selected = state.get("selected_option") or {}
+    if isinstance(selected, dict) and selected.get("name"):
+        return "Поняла. Что именно не подошло в этом варианте — цена, район, срок сдачи, отделка или сам формат ЖК?"
+    return "Поняла. Что меняем в подборе — район, бюджет, отделку, срок сдачи или формат квартиры?"
+
+
+def _is_short_yes_to_contact_offer(text: str, state: dict[str, Any]) -> bool:
+    """Понимает «да/хочу» именно как согласие оставить контакт, а не как новый запрос про ЖК."""
+    t = text.lower().replace("ё", "е").strip()
+    if not re.fullmatch(r"(да|ага|угу|ок|хорошо|давай|хочу|можно|готов|готова)", t):
+        return False
+    offer = str(state.get("last_offer_type") or "")
+    if offer not in {"selected_option_details", "operator_for_selected"}:
+        return False
+    question = str(state.get("last_bot_question") or "").lower().replace("ё", "е")
+    return bool(re.search(r"(остав|напиш|дать|передать).{0,30}(номер|телефон|контакт)|номер.{0,30}(связ|остав)|контакт", question))
+
+
+def _operator_contact_request_text() -> str:
+    return "Отлично, напишите номер для связи текстом — передам оператору этот ЖК и ваш запрос вместе с контекстом диалога."
+
+
+def _safe_option_payload(option: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(option, dict):
+        return {}
+    allowed = {"idx", "name", "location", "price", "area", "finishing", "ready", "developer", "metro", "why_close"}
+    safe: dict[str, Any] = {}
+    for key, value in option.items():
+        if key not in allowed or _looks_missing(value):
+            continue
+        # MCP иногда отдаёт класс проекта в поле developer (`comfort`/`business`).
+        # Не передаём это LLM как застройщика: класс/сегмент — чувствительный факт.
+        if key == "developer" and _CLASS_AS_VALUE_RE.search(str(value).strip()):
+            continue
+        safe[key] = value
+    return safe
+
+
+def _build_negation_response_prompt(
+    *,
+    intent: str,
+    user_text: str,
+    state: dict[str, Any],
+    meta: dict[str, Any] | None = None,
+) -> str:
+    """Структурированный контракт для LLM-ответа на отрицание: код выбирает intent, LLM пишет текст."""
+    selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
+    selected_name = _compact_option_text(selected.get("name")) if isinstance(selected, dict) else ""
+    options = state.get("visible_options") or state.get("last_options") or []
+    rejected_names = [str(name) for name in (state.get("rejected_option_names") or [])]
+    last_options = [
+        _safe_option_payload(option)
+        for option in options[:5]
+        if isinstance(option, dict) and _compact_option_text(option.get("name")) != selected_name
+    ]
+    intent_rules = {
+        "reject_operator": "Клиент отказался от оператора/звонка. Не проси номер и не объясняй оператора. Не продавай выбранный ЖК заново. Коротко прими отказ и скажи, что продолжим здесь. Финальный вопрос: сравнить варианты или изменить условия.",
+        "reject_phone": "Клиент отказался оставить номер/контакт. Не проси номер повторно. Скажи, что продолжим здесь. Финальный вопрос: что сделать дальше в подборе.",
+        "reject_selected_option": "Клиент отверг выбранный ЖК. Не продавай его снова. Скажи, что убираем этот ЖК из фокуса. Если в USER_TEXT есть новое условие, отрази его и спроси один уточняющий вопрос перед новым поиском. Можно коротко предложить 1-2 оставшихся варианта из LAST_OPTIONS, кроме SELECTED_OPTION, только если это уместно.",
+        "reject_similar_options": "Клиент не хочет похожие/другие варианты. Не показывай похожие варианты. Спроси, что лучше сделать вместо этого: изменить условия или подробнее разобрать текущий ЖК.",
+        "clarify_negation": "Клиент что-то отрицает, но смысл неясен. Не предлагай другие ЖК сам. Не делай вид, что он отверг выбранный ЖК. Задай один короткий вопрос, что именно убрать или не учитывать. Если в тексте есть бронь, прими, что бронь не нужна, и предложи продолжить без неё.",
+    }
+    payload = {
+        "user_text": user_text,
+        "negation_intent": intent,
+        "intent_specific_rule": intent_rules.get(intent, intent_rules["clarify_negation"]),
+        "selected_option": _safe_option_payload(selected),
+        "last_options_except_selected": [option for option in last_options if option],
+        "rejected_option_names": rejected_names,
+        "classifier_meta": meta or {},
+        "last_bot_question": state.get("last_bot_question"),
+        "last_offer_type": state.get("last_offer_type"),
+    }
+    return (
+        "ROLE:\n"
+        "Ты Ирина, живой консультант по новостройкам. Отвечай тепло, коротко и по-человечески.\n\n"
+        "SITUATION:\n"
+        "Клиент уже видел подборку или выбранный ЖК. Сейчас он написал отрицание, отказ или изменение условия. "
+        "Новый MCP-поиск не делай и не говори, что уже ищешь.\n\n"
+        "NEGATION_CONTEXT:\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2)}\n\n"
+        "GLOBAL_RULES:\n"
+        "- Код уже выбрал NEGATION_INTENT; не меняй действие сам.\n"
+        "- Не повторяй презентацию выбранного ЖК, если клиент его отверг.\n"
+        "- Если клиент отказался от оператора или номера — не проси номер и не предлагай звонок в этом ответе.\n"
+        "- Если клиент отказался от похожих вариантов — не перечисляй похожие варианты.\n"
+        "- Если смысл отрицания неясен — задай один короткий уточняющий вопрос.\n"
+        "- Не добавляй факты о ЖК, которых нет в SELECTED_OPTION или LAST_OPTIONS.\n"
+        "- Запрещённые клиентские фразы: MCP, JSON, база, подтверждённые данные, не удалось подтвердить, чтобы не выдумывать, в режиме реального времени.\n"
+        "- Не обещай звонок, бронь, скидку, наличие, этажи, корпуса или ипотеку.\n"
+        "- Ответ 1-3 коротких абзаца, в конце ровно один вопрос.\n\n"
+        "OUTPUT_JSON:\n"
+        "Верни валидный JSON только с полями response, params, buttons. buttons всегда []."
+    )
 
 
 def _pure_option_choice_index(text: str) -> int | None:
@@ -610,6 +1129,49 @@ def _match_option_from_text(text: str, options: list[dict[str, Any]]) -> dict[st
         if name_words and all(w in compact_t for w in name_words[:2]):
             return option
     return None
+
+
+def _is_selected_option_explain_request(text_l: str) -> bool:
+    """Запрос описания выбранного ЖК из уже сохранённых MCP-данных."""
+    return bool(re.search(r"подробнее|расскажи|детал|подробн|что по|чем хорош|почему подходит", text_l))
+
+
+def _split_choice_and_action(text: str, options: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str]:
+    """Выделяет объект и остаток фразы из смешанных сообщений.
+
+    Примеры:
+    - «1» → (option_1, "")
+    - «1, можно бронь?» → (option_1, "можно бронь?")
+    - «ЖК Лучи, расскажи подробнее» → (option_luchi, "расскажи подробнее")
+
+    Остаток не интерпретируем здесь целиком: опасные темы идут в operator,
+    понятное «расскажи» — в explain, остальное остаётся followup_classifier.
+    """
+    stripped = text.strip()
+    if not stripped or not options:
+        return None, stripped
+
+    m = re.match(r"^\s*(\d{1,2})\s*[,.:;\-–—]?\s*(.*)$", stripped)
+    if m:
+        idx = int(m.group(1))
+        if 1 <= idx <= len(options):
+            return options[idx - 1], m.group(2).strip()
+
+    compact_text = _compact_option_text(stripped)
+    for option in options:
+        name = str(option.get("name") or "")
+        compact_name = _compact_option_text(name)
+        short_name = _compact_option_text(
+            name.replace("ЖК", "").replace("жилой квартал", "").replace("жилой комплекс", "")
+        )
+        if not compact_name:
+            continue
+        if compact_text == compact_name or (short_name and compact_text == short_name):
+            return option, ""
+        if compact_name in compact_text or (short_name and short_name in compact_text):
+            remaining = re.sub(re.escape(name), "", stripped, flags=re.I).strip(" ,.;:-—–")
+            return option, remaining or stripped
+    return None, stripped
 
 
 def _normalize_followup_params_delta(delta: dict[str, Any]) -> dict[str, Any]:
@@ -701,6 +1263,24 @@ def _price_min(value: Any) -> int | None:
     return int(n)
 
 
+def _budget_limit_from_text(text: str) -> int | None:
+    """Понимает уточнения бюджета вроде «до 15 млн» после уже показанного списка."""
+    t = str(text or "").lower().replace(",", ".").replace("ё", "е")
+    if not re.search(r"\b(до|бюджет|лимит|млн|миллион|тыс|к)\b", t):
+        return None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*(млн|миллион|миллиона|миллионов|тыс|тысяч|к)?", t)
+    if not m:
+        return None
+    value = float(m.group(1))
+    unit = m.group(2) or ""
+    if unit in {"тыс", "тысяч", "к"}:
+        return int(value * 1_000)
+    # В клиентских бюджетах голое «15» почти всегда означает миллионы.
+    if unit or value < 1000:
+        return int(value * 1_000_000)
+    return int(value)
+
+
 def _compact_option_text(value: Any) -> str:
     """Нормализует название ЖК/строку выбора для безопасного сопоставления."""
     return re.sub(
@@ -786,6 +1366,87 @@ def _visible_options_from_response(response_text: str, options: list[dict[str, A
     return visible[:3]
 
 
+def _visible_options_from_chat_meta(chat_meta: dict[str, Any], options: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Берёт порядок вариантов из структурного поля chat JSON: visible_options[].
+
+    Это основной путь: LLM явно сообщает, какие варианты она показала клиенту.
+    Код только сопоставляет эти имена с уже известными MCP options и не принимает
+    придуманные ЖК. Старый парсинг текста остаётся fallback'ом.
+    """
+    raw_visible = (chat_meta or {}).get("_visible_options") or []
+    if not isinstance(raw_visible, list) or not options:
+        return []
+
+    visible: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw_visible[:3]:
+        if isinstance(item, dict):
+            raw_name = item.get("name") or item.get("option_name") or item.get("title") or item.get("complex")
+            raw_idx = item.get("idx")
+            if raw_idx is None:
+                raw_idx = item.get("source_idx")
+            if raw_idx is None:
+                raw_idx = item.get("option_idx")
+        else:
+            raw_name = str(item or "")
+            raw_idx = None
+
+        matched: dict[str, Any] | None = None
+        # Имя — главный ключ. Индекс у LLM может быть 0-based или 1-based,
+        # поэтому используем его только как fallback. Так не перепутаем похожие
+        # ЖК вроде «Ситимикс Новокосино» и «Ситимикс».
+        if raw_name:
+            matched = _match_option_from_text(str(raw_name), options)
+        try:
+            idx = int(raw_idx) if raw_idx is not None and str(raw_idx).strip() else 0
+        except (TypeError, ValueError):
+            idx = 0
+        if matched is None and idx:
+            for option in options:
+                try:
+                    opt_idx = int(option.get("idx") or 0)
+                except (TypeError, ValueError):
+                    opt_idx = 0
+                if opt_idx and idx == opt_idx:
+                    matched = option
+                    break
+        if matched is None and idx >= 0:
+            # Fallback for models that send 0-based indexes.
+            pos = idx if idx == 0 else idx - 1
+            if 0 <= pos < len(options):
+                matched = options[pos]
+        if matched is None:
+            continue
+
+        key = _compact_option_text(matched.get("name"))
+        if not key or key in seen:
+            continue
+        visible.append({**matched, "visible_idx": len(visible) + 1})
+        seen.add(key)
+    return visible
+
+
+def _visible_options_from_chat_or_response(chat_meta: dict[str, Any], response_text: str, options: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    structured = _visible_options_from_chat_meta(chat_meta, options)
+    return structured or _visible_options_from_response(response_text, options)
+
+
+def _numbered_option_count(response_text: str) -> int:
+    return len(re.findall(r"(?m)^\s*\d{1,2}\.\s+", str(response_text or "")))
+
+
+def _numeric_choice_policy_from_response(response_text: str, visible_options: list[dict[str, Any]]) -> str:
+    """Цифровой выбор безопасен только если видимый нумерованный список надёжно распарсен.
+
+    Если LLM показала 3 пункта, а мы смогли сопоставить только 2 — лучше переспросить,
+    чем выбрать неправильный ЖК. Это safety-veto над LLM/парсером.
+    """
+    numbered = _numbered_option_count(response_text)
+    if numbered >= 2:
+        return "accept" if len(visible_options or []) == numbered else "reject"
+    return "accept" if numbered == 1 and len(visible_options or []) == 1 else "reject"
+
+
 def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
     """H016: быстрый resolver follow-up сообщений, которые ссылаются на прошлый список."""
     t = text.lower().replace("ё", "е")
@@ -794,9 +1455,37 @@ def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
     options = visible_options or memory_options
     selected = state.get("selected_option")
 
+    if selected and _is_short_yes_to_contact_offer(text, state):
+        return {"intent": "operator_contact_accept", "option": selected}
+
+    if selected and _is_operator_phone_refusal(t):
+        return {"intent": "reject_operator", "option": selected}
+
     pure_idx = _pure_option_choice_index(text)
+    if pure_idx and state.get("numeric_choice_policy") == "reject":
+        return {"intent": "followup_classifier"}
     if pure_idx and options and 1 <= pure_idx <= len(options):
         return {"intent": "select_option", "option": options[pure_idx - 1]}
+
+    mixed_option, action_text = _split_choice_and_action(text, options)
+    if mixed_option:
+        action_l = action_text.lower().replace("ё", "е")
+        if not action_text:
+            return {"intent": "select_option", "option": mixed_option}
+        if _is_operator_phone_refusal(action_l):
+            return {"intent": "reject_operator", "option": mixed_option}
+        if _looks_like_negation(action_l):
+            return {"intent": "followup_classifier", "option": mixed_option}
+        if _needs_operator_for_selected_option(action_l):
+            return {"intent": "operator_for_selected", "option": mixed_option}
+        if _shows_handoff_readiness_for_selected(action_l, {**state, "selected_option": mixed_option}):
+            return {"intent": "operator_for_selected", "option": mixed_option}
+        if _is_selected_option_explain_request(action_l):
+            return {"intent": "explain_selected_option", "option": mixed_option}
+        return {"intent": "followup_classifier", "option": mixed_option}
+
+    if selected and _looks_like_negation(t):
+        return {"intent": "followup_classifier", "option": selected}
 
     if selected and options and re.search(r"(похож|сравн|друг|еще|ещё|альтернатив)", t):
         selected_name = _compact_option_text(selected.get("name"))
@@ -809,6 +1498,12 @@ def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
     if selected and _needs_operator_for_selected_option(t):
         return {"intent": "operator_for_selected", "option": selected}
 
+    if selected and _shows_handoff_readiness_for_selected(t, state):
+        return {"intent": "operator_for_selected", "option": selected}
+
+    if selected and _is_selected_option_explain_request(t):
+        return {"intent": "explain_selected_option", "option": selected}
+
     # Короткие смысловые ответы после вопроса Ирины («да», «нет», «хочу»,
     # «возможно», «наверное») нельзя понимать без контекста. Их отдаём
     # follow-up classifier'у: он видит last_bot_question/last_offer_type и
@@ -819,12 +1514,17 @@ def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
     if not options:
         return {"intent": "new_search"}
 
-    # Всё смешанное после списка — не «кнопка», а смысловая фраза.
-    # Например: «бюджет, у меня 15 млн», «1 но дорого», «второй если с отделкой».
-    # Такое отдаём LLM follow-up router'у, чтобы он выбрал update_search_params /
-    # choose_option / clarify по контексту последнего вопроса.
-    if options:
-        return {"intent": "followup_classifier"}
+    if re.search(r"(различ|сравн|отлич|чем\s+они|чем\s+вариант|разница)", t):
+        return {"intent": "compare_others", "options": options[:3]}
+
+    budget_limit = _budget_limit_from_text(t)
+    if budget_limit:
+        matched = [
+            option for option in options
+            if option.get("price_min") and int(option.get("price_min") or 0) <= budget_limit
+        ]
+        sorted_opts = sorted(matched or options, key=lambda o: o.get("price_min") or 10**18)
+        return {"intent": "sort_price_asc", "options": sorted_opts[:3], "budget_limit": budget_limit}
 
     if "дешев" in t or "подеш" in t:
         sorted_opts = sorted(options, key=lambda o: o.get("price_min") or 10**18)
@@ -846,6 +1546,13 @@ def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
         if with_finish:
             return {"intent": "filter_finish", "options": with_finish[:3]}
 
+    # Всё смешанное после списка — не «кнопка», а смысловая фраза.
+    # Например: «бюджет, у меня 15 млн», «1 но дорого», «второй если с отделкой».
+    # Такое отдаём LLM follow-up router'у, чтобы он выбрал update_search_params /
+    # choose_option / clarify по контексту последнего вопроса.
+    if options:
+        return {"intent": "followup_classifier"}
+
     return {"intent": "new_search"}
 
 
@@ -855,27 +1562,28 @@ def _needs_operator_for_selected_option(text_l: str) -> bool:
         "налич", "актуаль", "брон", "заброни", "показ", "посмотреть",
         "ипотек", "ставк", "скид", "торг", "этаж", "корпус", "квартир",
         "планиров", "платеж", "платёж", "первонач", "звон", "оператор", "менеджер",
-        "подробнее", "расскажи", "детал", "подробн",
     )
     return any(trig in text_l for trig in triggers)
 
 
+def _shows_handoff_readiness_for_selected(text_l: str, state: dict[str, Any]) -> bool:
+    """Клиент уже выбрал ЖК и показывает интерес — пора вести к оператору, а не уточнять бесконечно."""
+    if not state.get("selected_option"):
+        return False
+    has_seen_selected_card = bool(
+        int(state.get("selected_option_card_shown_count") or 0) > 0
+        or str(state.get("last_answer_kind") or "") in {"selected_option_card", "selected_option_details"}
+    )
+    if not has_seen_selected_card:
+        return False
+    return bool(re.search(r"интерес|подходит|что\s+дальше|дальше|готов|беру|устраивает", text_l))
+
+
 def _format_operator_handoff_for_option(option: dict[str, Any]) -> str:
-    name = option.get("name") or "этот вариант"
-    known: list[str] = []
-    if option.get("price"):
-        known.append(f"по цене вижу {option['price']}")
-    if option.get("area"):
-        known.append(f"по площади вижу {option['area']}")
-    if option.get("finishing"):
-        known.append(f"по отделке: {option['finishing']}")
-    if option.get("ready"):
-        known.append(f"по готовности: {option['ready']}")
-    known_text = "; ".join(known) if known else "по нему есть только короткая карточка без дополнительных деталей"
+    name = _display_complex_name(option.get("name") if isinstance(option, dict) else "")
     return (
-        f"По {name} {known_text}.\n\n"
-        "Больше подтверждённой информации прямо сейчас не добавлю, чтобы не выдумывать. "
-        "Актуальное наличие, бронь, этаж, корпус, скидки и условия лучше проверить у оператора.\n\n"
+        f"С этажами, бронью и конкретными квартирами по {name} лучше не гадать — это зависит от свободных вариантов прямо сейчас. "
+        "Оператор посмотрит, что реально доступно, и подскажет, можно ли это забронировать.\n\n"
         "Хотите оставить номер для связи?"
     )
 
@@ -896,28 +1604,163 @@ def _normalize_phone(raw: Any) -> str:
     return "".join(ch for ch in str(raw or "") if ch.isdigit() or ch == "+")
 
 
+def _phone_digits(phone: Any) -> str:
+    return "".join(ch for ch in str(phone or "") if ch.isdigit())
+
+
+def _extract_phone_from_text(raw: Any) -> str:
+    phone = _normalize_phone(raw)
+    digits = _phone_digits(phone)
+    if 10 <= len(digits) <= 15:
+        return phone
+    return ""
+
+
+def _looks_like_phone_text(raw: Any) -> bool:
+    """Похоже на попытку оставить телефон, но не обязательно валидно.
+
+    Важно не путать бюджетные фразы вроде «до 200к» с телефоном: там мало цифр.
+    """
+    text = str(raw or "")
+    digits = _phone_digits(text)
+    if len(digits) >= 10:
+        return True
+    phone_words = re.search(r"\b(?:телефон|номер|контакт|связ[ьи]|whatsapp|ватсап|вот мой)\b", text, re.I)
+    return bool(phone_words and len(digits) >= 7)
+
+
+def _has_phone_capture_context(state: dict[str, Any]) -> bool:
+    if state.get("awaiting_phone"):
+        return True
+    if state.get("operator_context"):
+        return True
+    if state.get("selected_option"):
+        return True
+    offer = str(state.get("last_offer_type") or "")
+    return offer in {"operator_for_selected", "selected_option_details", "awaiting_phone"}
+
+
+def _phone_needs_context_response() -> str:
+    return (
+        "Вижу номер, но не понимаю, по какому ЖК или запросу его передать. "
+        "Напишите, какой ЖК интересует, или сначала выберите вариант из подборки."
+    )
+
+
 def _phone_log_meta(phone: str) -> dict[str, Any]:
     digits = "".join(ch for ch in phone if ch.isdigit())
     return {"phone_len": len(digits), "phone_last4": digits[-4:] if len(digits) >= 4 else ""}
 
 
+def _non_text_message_type(message: Any) -> str:
+    """Короткий тип Telegram-сообщения без text, чтобы не молчать и нормально логировать."""
+    if getattr(message, "contact", None):
+        return "contact"
+    if getattr(message, "photo", None):
+        return "photo"
+    if getattr(message, "voice", None):
+        return "voice"
+    if getattr(message, "audio", None):
+        return "audio"
+    if getattr(message, "video", None):
+        return "video"
+    if getattr(message, "document", None):
+        return "document"
+    if getattr(message, "sticker", None):
+        return "sticker"
+    if getattr(message, "location", None):
+        return "location"
+    return "unknown"
+
+
+def _non_text_fallback_response(message_type: str) -> str:
+    if message_type == "contact":
+        return "Контакт получила, но номер не разобрала. Напишите телефон текстом в формате +7XXXXXXXXXX."
+    return "Пока я понимаю только текстовые запросы. Напишите, что ищете: район, бюджет, комнатность или ЖК."
+
+
 def _build_known_option_prompt(option: dict[str, Any], client_request: str) -> str:
     """Контекст для LLM: раскрыть выбранный ЖК по уже известным данным, без нового поиска и выдумок."""
-    safe_option = {
-        key: value
-        for key, value in option.items()
-        if key in {"idx", "name", "location", "price", "area", "finishing", "ready", "developer", "metro", "why_close"}
-        and not _looks_missing(value)
+    safe_option = _safe_option_payload(option)
+    request_l = str(client_request or "").lower().replace("ё", "е")
+    client_intent = "live_data_request" if _needs_operator_for_selected_option(request_l) else "selected_option_detail"
+    if "investment" in request_l or "инвест" in request_l:
+        client_purpose = "investment"
+    elif any(marker in request_l for marker in ("self_use", "для жизни", "для себя", "жить", "переезд")):
+        client_purpose = "self_use"
+    elif any(marker in request_l for marker in ("family", "сем", "ребен", "ребён")):
+        client_purpose = "family"
+    else:
+        client_purpose = "unknown"
+    allowed_inferences = {
+        "price": "можно говорить про понятный бюджет входа и ценовой ориентир",
+        "finishing": "если есть отделка — меньше ремонта на старте; НЕ добавляй аренду, перепродажу или доходность, если таких фактов нет в SAFE_FACTS",
+        "ready": "можно объяснить горизонт ожидания или близость сдачи, но не обещать ключи без факта",
+        "location": "можно назвать район/локацию и объяснить, где находится проект",
+        "area": "можно назвать диапазон площадей, но не обещать конкретную квартиру",
+        "developer": "можно назвать застройщика только если он есть в SAFE_FACTS",
+        "metro": "можно назвать метро только если оно есть в SAFE_FACTS",
     }
     return (
-        "Клиент уже выбрал вариант из предыдущего списка. Новый широкий поиск не нужен.\n"
-        f"Запрос/действие клиента: {client_request}\n\n"
-        "Доступные подтверждённые данные по выбранному варианту:\n"
+        "ROLE:\n"
+        "Ты Ирина, живой консультант по новостройкам. Пишешь тепло, просто и по делу.\n\n"
+        "SITUATION:\n"
+        "Клиент уже выбрал вариант из предыдущего списка. Новый широкий поиск не нужен. "
+        "Нужно раскрыть выбранный ЖК по безопасным фактам ниже, без выдумок и без технических объяснений.\n\n"
+        "USER_ACTION:\n"
+        f"{client_request}\n\n"
+        "CLIENT_INTENT:\n"
+        f"{client_intent}\n\n"
+        "CLIENT_PURPOSE:\n"
+        f"{client_purpose}\n\n"
+        "SAFE_FACTS:\n"
         f"{json.dumps(safe_option, ensure_ascii=False, indent=2)}\n\n"
-        "Сформулируй новый живой ответ Ирины по этим данным: расскажи максимум полезного, что подтверждено в карточке. "
-        "Не повторяй дословно предыдущую карточку. Не придумывай метро, инфраструктуру, скидки, ипотеку, наличие, бронь, этажи или корпуса. "
-        "Так как клиент уже выбрал конкретный ЖК и попросил подробнее, в конце мягко предложи оставить контакт, чтобы оператор проверил актуальные квартиры, наличие и условия. "
-        "Если клиент просит актуальное наличие, бронь, конкретную квартиру, этаж, корпус, ипотеку, скидку или показ — не подтверждай это сама, а объясни, что это проверит оператор. "
+        "ALLOWED_INFERENCES:\n"
+        f"{json.dumps(allowed_inferences, ensure_ascii=False, indent=2)}\n\n"
+        "MISSING_OR_LIVE_ONLY:\n"
+        "Актуальное наличие, актуальные квартиры, бронь, конкретные квартиры, этажи, корпуса, скидки, ипотека, показ и условия покупки "
+        "нельзя подтверждать самой. Если клиент просит это — скажи по-человечески, что оператор посмотрит актуальные варианты. "
+        "Не формулируй как ошибку данных и не говори «этого нет в MCP». "
+        "Если CLIENT_INTENT = selected_option_detail и клиент не просил live-детали, не предлагай оператора, контакт, бронь или проверку актуального наличия в этом ответе.\n\n"
+        "FORBIDDEN_FACTS:\n"
+        "Не придумывай метро, инфраструктуру, скидки, ипотеку, наличие, бронь, этажи, корпуса, планировки, школы, парки, сроки, класс или сегмент ЖК. "
+        "Не придумывай инвестиционные выводы: аренду, перепродажу, доходность, ликвидность, рост цены или перспективность района, если этого нет в SAFE_FACTS. "
+        "Не называй ЖК «комфорт-класс», «бизнес-класс», «премиум», если этого нет в SAFE_FACTS. "
+        "Не оценивай район как «отличный», «удобный», «перспективный» без такого факта. "
+        "Не обещай универсальную пригодность: не пиши «для любого состава семьи», «подойдёт всем», «идеально для всех» без прямого факта. "
+        "Если отделки нет, не обещай «любой дизайн-проект» — говори спокойнее: ремонт можно планировать под себя, но это отдельные вложения.\n\n"
+        "FORBIDDEN_PHRASES_FOR_CLIENT:\n"
+        "Запрещённые клиентские фразы: MCP; JSON; «подтверждённые данные»; «в MCP-данных»; «не удалось подтвердить»; "
+        "«чтобы не выдумывать»; «в режиме реального времени»; «доходность и ликвидность нужно проверять отдельно»; "
+        "«Больше подтверждённой информации прямо сейчас не добавлю».\n\n"
+        "RESPONSE_SHAPE:\n"
+        "Сформулируй новый живой ответ Ирины по этим данным: расскажи максимум полезного, что подтверждено в карточке, "
+        "но человеческим языком, как консультант, а не как выгрузка из системы. Не повторяй дословно предыдущую карточку.\n"
+        "- не пиши одним плотным абзацем. Используй 2-4 коротких абзаца: что за ЖК/где; цена/срок/отделка; польза; следующий шаг. Финальный вопрос всегда отдельным абзацем;\n"
+        "- начинай тепло и просто: «По этому ЖК картина такая...» / «Да, расскажу подробнее...» / «Если смотреть его как вариант для покупки...»;\n"
+        "- объясняй пользу из фактов: цена → понятен бюджет входа; отделка → меньше ремонта на старте; "
+        "готовность/срок → понятнее горизонт ожидания; локация → понятно, где находится проект;\n"
+        "- если в USER_ACTION есть инвестиционный мотив, не уводи ответ в переезд/жизнь. Говори только про факты карточки: бюджет входа, отделку, срок, площадь; не добавляй аренду/перепродажу/доходность без SAFE_FACTS;\n"
+        "- если CLIENT_PURPOSE = self_use, не уводи ответ в инвестиции, аренду или перепродажу. Говори про жизнь, переезд, ремонт и понятный срок;\n"
+        "- если CLIENT_PURPOSE = family, не выдумывай школы/парки/дворы. Используй только реальные факты: площадь, отделка, готовность, бюджет;\n"
+        "- для инвестиционного мотива не пиши сухо «доходность и ликвидность нужно проверить». Лучше: "
+        "«как инвестиционный вариант его можно рассматривать от понятного бюджета, а дальше уже выбирать конкретную планировку и цену входа»;\n"
+        "- если данных о наличии/этажах/корпусах/броне нет, не перечисляй это как провал данных. Скажи мягко: "
+        "«по конкретным квартирам и брони лучше отдельно посмотреть актуальные варианты»;\n"
+        "- если CLIENT_INTENT = selected_option_detail и CLIENT_PURPOSE = investment, интерес уже проявлен: не уводи в бесконечное сравнение, а мягко веди к оператору для проверки актуальных квартир, цены входа и условий;\n"
+        "- если CLIENT_INTENT = selected_option_detail и CLIENT_PURPOSE НЕ investment, это не запрос на бронь/наличие. Не зови оператора и не спрашивай про контакт;\n"
+        "- не заканчивай шаблонным вопросом «какой аспект этого ЖК разобрать подробнее» и не спрашивай про конкретные планировки, если клиент не просил live-детали;\n"
+        "- в конце задай один живой следующий вопрос. Для инвестиционного выбранного ЖК спрашивай про следующий шаг к оператору: оставить номер, чтобы проверить актуальные квартиры, цены входа и условия. "
+        "Для неинвестиционного первичного выбора можно спросить: сравнить с другими вариантами или коротко разобрать цену, срок и отделку. Если клиент просит live-детали — мягко предложи проверить актуальные квартиры/оставить контакт.\n\n"
+        "STYLE_EXAMPLES:\n"
+        "Плохо: «В MCP-данных вижу ЖК Лучи. Не удалось подтвердить наличие студий».\n"
+        "Хорошо: «По ЖК «Лучи» уже виден понятный ориентир: Солнцево, квартиры с отделкой и цена от 10.6 млн. "
+        "Для инвестиции это удобно как понятный бюджет входа: отделка снижает объём ремонта на старте. "
+        "А конкретные студии и бронь лучше проверить по актуальному наличию».\n"
+        "Плохо: «Больше подтверждённой информации не добавлю, чтобы не выдумывать».\n"
+        "Хорошо: «По покупке важны уже живые детали — какие квартиры сейчас свободны, какие этажи есть и можно ли поставить бронь. "
+        "Это лучше быстро проверить у оператора».\n\n"
+        "OUTPUT_JSON:\n"
         "Верни валидный JSON только с полями response и params. Inline-кнопки не формируй. Следующий шаг предложи живым текстом."
     )
 
@@ -1072,8 +1915,8 @@ def _investment_note_from_facts(option: dict[str, Any]) -> str:
     if why_close:
         return f"Для инвестиционного сценария это стоит учитывать: {why_close}."
     if option.get("price_min"):
-        return "Для инвестиции здесь понятен бюджет входа, но доходность и ликвидность нужно проверять отдельно."
-    return "Для инвестиции по нему нужно отдельно проверить спрос, ликвидность и актуальное наличие квартир."
+        return "Для инвестиции здесь понятен бюджет входа: дальше уже важно выбрать конкретную планировку и цену, с которой комфортно заходить в сделку."
+    return "Для инвестиции этот ЖК можно рассмотреть как стартовый вариант, а конкретную квартиру и цену входа лучше выбирать отдельно."
 
 
 def _option_benefit(option: dict[str, Any]) -> str:
@@ -1133,7 +1976,12 @@ def _family_reason_from_facts(option: dict[str, Any]) -> str:
 def _format_option_response(option: dict[str, Any], purpose: Any = None) -> str:
     name = option.get("name") or "этот вариант"
     intro = f"{_option_ordinal(option.get('idx'))} вариант — {name}."
-    fact_text = " ".join(_selected_option_fact_sentences(option)[:5])
+    facts = _selected_option_fact_sentences(option)[:5]
+    # Для Telegram карточка выбранного ЖК должна читаться как несколько коротких
+    # абзацев, а не как плотная простыня. Первые 2-3 факта — основной блок,
+    # остальные факты — отдельный короткий блок ниже.
+    fact_text = " ".join(facts[:3])
+    extra_fact_text = " ".join(facts[3:])
     purpose_low = str(purpose or "").lower()
 
     if purpose_low == "family":
@@ -1148,11 +1996,16 @@ def _format_option_response(option: dict[str, Any], purpose: Any = None) -> str:
         nuance = f"\n\nВажно: {option['why_close']}."
 
     check_next = (
-        "Что стоит проверить отдельно: актуальное наличие квартир, конкретные корпуса, "
-        "этажи и условия покупки."
+        "Если нужно перейти к покупке, отдельно проверим актуальное наличие квартир, "
+        "конкретные корпуса, этажи и условия."
     )
-    question = "Хотите, передам оператору именно этот ЖК и ваш запрос?"
-    return f"{intro}\n\n{fact_text}\n\n{scenario_note}{nuance}\n\n{check_next}\n\n{question}"
+    question = "Хотите, расскажу подробнее по этому ЖК или сравним его с другими вариантами?"
+    blocks = [intro, fact_text]
+    if extra_fact_text:
+        blocks.append(extra_fact_text)
+    blocks.append(f"{scenario_note}{nuance}".strip())
+    blocks.extend([check_next, question])
+    return "\n\n".join(block for block in blocks if block)
 
 
 def _format_cheaper_response(options: list[dict[str, Any]]) -> str:
@@ -1396,7 +2249,7 @@ def _refresh_search_state(state: dict, search_meta: dict) -> None:
     search_text = search_meta.get("_response_text") or ""
     search_resp = _json_from_text(search_text)
     state["last_search_response"] = search_resp if isinstance(search_resp, dict) else {}
-    state["last_options"] = _extract_options(search_text)
+    state["last_options"] = _filter_rejected_options(_extract_options(search_text), state)
     facts = search_resp.get("facts", []) if isinstance(search_resp, dict) else []
     near = search_resp.get("near", []) if isinstance(search_resp, dict) else []
     state["last_result"] = {
@@ -1410,6 +2263,90 @@ def _refresh_search_state(state: dict, search_meta: dict) -> None:
 # ── Experiment Loop logging ─────────────────────────────────
 
 
+_DIALOG_SESSIONS: dict[int, dict[str, Any]] = {}
+
+
+def _new_dialog_session(uid: int) -> dict[str, Any]:
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    return {"dialog_id": f"d-{stamp}-{uid}-{uuid4().hex[:6]}", "turn_id": 0}
+
+
+def _dialog_session(uid: int, *, reset: bool = False) -> dict[str, Any]:
+    if reset or uid not in _DIALOG_SESSIONS:
+        _DIALOG_SESSIONS[uid] = _new_dialog_session(uid)
+    return _DIALOG_SESSIONS[uid]
+
+
+def _compact_trace_value(value: Any, limit: int = 1400) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, ensure_ascii=False, default=str, indent=2)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _build_dialog_trace(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "input": {
+            "user_text": event.get("user_text", ""),
+            "params_before": event.get("params_before", {}),
+        },
+        "internal": {
+            "dialog_intent": event.get("dialog_intent"),
+            "dialog_plan": event.get("dialog_plan"),
+            "search_response": _compact_trace_value(event.get("search_response", "")),
+            "state_after": event.get("state_after"),
+        },
+        "output": {
+            "response_text": event.get("response_text", ""),
+            "buttons": event.get("buttons", []),
+            "cost": event.get("cost", {}),
+        },
+    }
+
+
+def _append_dialog_markdown(event: dict[str, Any]) -> None:
+    dialog_id = event.get("dialog_id") or "-"
+    turn_id = event.get("turn_id") or "-"
+    ts = event.get("ts") or ""
+    date_stamp = str(ts)[:10] if ts else datetime.now(timezone.utc).date().isoformat()
+    path = LOGS_DIR / f"dialogs-{date_stamp}.md"
+    trace = event.get("trace") or _build_dialog_trace(event)
+    lines = [
+        f"## {ts} · {dialog_id} · turn {turn_id}",
+        "",
+        "### Вход",
+        f"- user: {event.get('user_text', '')}",
+        f"- params_before: `{_compact_trace_value(event.get('params_before', {}), 800)}`",
+        "",
+        "### Внутри",
+        f"- dialog_intent: `{event.get('dialog_intent', '')}`",
+        f"- dialog_plan: `{_compact_trace_value(trace.get('internal', {}).get('dialog_plan'), 900)}`",
+        "- search_response:",
+        "```json",
+        _compact_trace_value(trace.get('internal', {}).get('search_response'), 1200),
+        "```",
+        f"- state_after: `{_compact_trace_value(event.get('state_after'), 900)}`",
+        "",
+        "### Ответ",
+        event.get("response_text", ""),
+        "",
+        f"- buttons: `{_compact_trace_value(event.get('buttons', []), 800)}`",
+        f"- cost: `{_compact_trace_value(event.get('cost', {}), 800)}`",
+        "",
+    ]
+    try:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except Exception as e:  # pragma: no cover - best effort companion log
+        LOGGER.warning("Failed to write dialog markdown log: %s", e)
+
+
 def _log_event(event: dict[str, Any]) -> None:
     """Append one JSONL line to logs/dialogs-YYYY-MM-DD.jsonl.
 
@@ -1419,10 +2356,23 @@ def _log_event(event: dict[str, Any]) -> None:
     try:
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         path = LOGS_DIR / f"dialogs-{datetime.now(timezone.utc).date().isoformat()}.jsonl"
+        uid = int(event.get("uid") or 0)
+        kind = event.get("kind")
+        if kind == "command" and event.get("command") in {"/start", "/reset"}:
+            session = _dialog_session(uid, reset=True)
+        else:
+            session = _dialog_session(uid)
+        if kind == "user_message":
+            session["turn_id"] = int(session.get("turn_id") or 0) + 1
+            event.setdefault("dialog_id", session["dialog_id"])
+            event.setdefault("turn_id", session["turn_id"])
+            event.setdefault("trace", _build_dialog_trace(event))
         event.setdefault("ts", datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"))
         event.setdefault("h_id", ACTIVE_H_ID)
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        if kind == "user_message":
+            _append_dialog_markdown(event)
     except Exception as e:  # pragma: no cover - logging must never break the bot
         LOGGER.warning("Failed to write dialog log: %s", e)
 
@@ -1590,6 +2540,7 @@ def main() -> None:
                     chat_model=state["chat_model"],
                 )
                 response = _prepare_response_text(response)
+                response = _strip_unsupported_complex_claims(response, option)
                 response = await _maybe_style_text(
                     client,
                     response,
@@ -1706,6 +2657,8 @@ def main() -> None:
                 context=json.dumps(state.get("params", {}), ensure_ascii=False),
             )
             _refresh_search_state(state, search_meta)
+            state["visible_options"] = _visible_options_from_chat_or_response(chat_meta, response, state.get("last_options") or [])
+            state["numeric_choice_policy"] = _numeric_choice_policy_from_response(response, state.get("visible_options") or [])
             scenario = _infer_scenario(state, search_meta)
             kb_rows = _markup_from_chat_buttons(chat_meta, state, response, scenario)
             markup = {"inline_keyboard": kb_rows} if kb_rows else None
@@ -1721,29 +2674,60 @@ def main() -> None:
             await indicator.edit_text(f"❌ Ошибка: {e}")
 
     async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not update.message or not update.message.text:
+        if not update.message:
             return
 
         uid = update.effective_user.id if update.effective_user else 0
         state = user_state.setdefault(uid, _default_state())
+        if not update.message.text:
+            message_type = _non_text_message_type(update.message)
+            response = _non_text_fallback_response(message_type)
+            _log_event({
+                "kind": "non_text_message",
+                "uid": uid,
+                "message_type": message_type,
+                "response_text": response,
+                "state_after": _dialog_state_preview(state),
+            })
+            await update.message.reply_text(response, reply_markup=ReplyKeyboardRemove())
+            return
+
         text = update.message.text.strip()
 
-        # H009: если клиент только что нажал «Связаться с оператором», трактуем текст как номер телефона
-        if state.pop("awaiting_phone", None):
-            phone = _normalize_phone(text)
-            if 10 <= len(phone) <= 15:
-                _log_event({"kind": "phone_captured", "uid": uid, "source": "text", **_phone_log_meta(phone)})
+        # Phone capture lives above LLM/search: если клиент прислал телефон после операторского CTA
+        # или выбранного ЖК, это согласие на контакт, а не новый поисковый запрос.
+        phone = _extract_phone_from_text(text)
+        if phone:
+            was_awaiting = bool(state.pop("awaiting_phone", None))
+            if was_awaiting or _has_phone_capture_context(state):
+                _log_event({
+                    "kind": "phone_captured",
+                    "uid": uid,
+                    "source": "text",
+                    "was_awaiting_phone": was_awaiting,
+                    "state_after": _dialog_state_preview(state),
+                    **_phone_log_meta(phone),
+                })
                 await update.message.reply_text(_phone_captured_farewell(), reply_markup=ReplyKeyboardRemove())
                 return
-            else:
-                await update.message.reply_text("Похоже, это не номер. Напишите телефон в формате +7XXXXXXXXXX или просто продиктуйте цифрами.")
+            _log_event({"kind": "phone_without_context", "uid": uid, "source": "text", **_phone_log_meta(phone)})
+            await update.message.reply_text(_phone_needs_context_response(), reply_markup=ReplyKeyboardRemove())
+            return
+
+        if state.get("awaiting_phone"):
+            if _looks_like_phone_text(text):
+                await update.message.reply_text("Похоже, номер неполный. Напишите телефон в формате +7XXXXXXXXXX или просто цифрами.")
                 return
+            state.pop("awaiting_phone", None)
+            await update.message.reply_text("Похоже, это не номер. Напишите телефон в формате +7XXXXXXXXXX или просто продиктуйте цифрами.")
+            return
 
         if not text:
             return
 
         params_before = dict(state.get("params", {}))
         _append_dialog_turn(state, "user", text)
+        await update.message.chat.send_action(action="typing")
 
         # H016: короткие follow-up сообщения («второй», «подешевле») решаем из памяти,
         # без нового общего поиска через Overmind.
@@ -1762,10 +2746,42 @@ def main() -> None:
                 "meta": followup_meta,
                 "state": _followup_state_payload(state),
             })
+            dialog_plan = await followup_intent_classifier.plan_dialog_state(
+                await client.ensure_session(),
+                user_text=text,
+                state=_dialog_planner_state_payload(state),
+                last_response_text=_last_bot_text(state),
+                search_response_text=json.dumps(state.get("last_search_response") or {}, ensure_ascii=False),
+            )
+            applied_plan = _apply_dialog_plan_to_state(state, dialog_plan, user_text=text)
+            _log_event({
+                "kind": "dialog_plan",
+                "uid": uid,
+                "user_text": text,
+                "plan": dialog_plan,
+                "applied": applied_plan,
+                "state": _dialog_planner_state_payload(state),
+            })
+            if dialog_plan.get("clarification_question") and not followup_meta.get("clarification_question"):
+                followup_meta["clarification_question"] = dialog_plan.get("clarification_question")
             followup_intent = followup_meta.get("intent")
             if followup_meta.get("fallback_used"):
                 followup_intent = _local_followup_intent(text, state) or followup_intent
             selected = state.get("selected_option")
+            if dialog_plan.get("dialog_action") == "ask_clarification" and dialog_plan.get("clarification_question"):
+                response = _prepare_response_text(str(dialog_plan.get("clarification_question") or ""))
+                _remember_bot_response(state, response, offer_type="clarify", answer_kind="dialog_plan_clarification")
+                _log_event({
+                    "kind": "user_message", "uid": uid, "user_text": text,
+                    "dialog_intent": "dialog_plan_clarification", "search_model": state["search_model"],
+                    "chat_model": state["chat_model"], "mcp": state["mcp"],
+                    "params_before": params_before, "params_after": dict(state.get("params", {})),
+                    "params_delta": {}, "response_text": response, "response_len": len(response),
+                    "buttons": [], "duration_ms": 0, "is_error": False, "error": None, "cost": {},
+                    "dialog_plan": dialog_plan,
+                })
+                await update.message.reply_text(_to_html(response), parse_mode="HTML")
+                return
             if followup_intent == "compare_selected" and selected:
                 selected_name = _compact_option_text(selected.get("name"))
                 options = state.get("visible_options") or state.get("last_options") or []
@@ -1778,10 +2794,39 @@ def main() -> None:
                 }
             elif followup_intent == "operator_for_selected" and selected:
                 dialog_intent = {"intent": "operator_for_selected", "option": selected}
+            elif followup_intent == "operator_contact_accept" and selected:
+                dialog_intent = {"intent": "operator_contact_accept", "option": selected}
+            elif followup_intent in {"reject_operator", "reject_phone"}:
+                dialog_intent = {"intent": "reject_operator", "option": selected}
+            elif followup_intent == "reject_selected_option" and selected:
+                dialog_intent = {"intent": "reject_selected_option", "option": selected}
+            elif followup_intent == "reject_similar_options":
+                dialog_intent = {"intent": "reject_similar_options", "option": selected}
+            elif followup_intent == "clarify_negation":
+                dialog_intent = {"intent": "clarify_negation", "meta": followup_meta, "option": selected}
+            elif followup_intent == "reject_offer" and _looks_like_negation(text):
+                # LLM classifier can label phrases like «не надо бронь» as generic reject_offer.
+                # For negated live-data topics this is not a plain no; answer via negation presenter
+                # and clarify what to do next instead of falling into generic clarify/fallback.
+                dialog_intent = {"intent": "clarify_negation", "meta": followup_meta, "option": selected}
             elif followup_intent == "choose_option":
                 target = str(followup_meta.get("target") or text)
                 options = state.get("visible_options") or state.get("last_options") or []
                 idx = _pure_option_choice_index(target)
+                if idx and state.get("numeric_choice_policy") == "reject":
+                    response = _prepare_response_text("Я сейчас не вижу надёжного списка с номерами. Напишите название ЖК или попросите показать варианты ещё раз.")
+                    _remember_bot_response(state, response, offer_type="clarify", answer_kind="numeric_choice_rejected")
+                    _log_event({
+                        "kind": "user_message", "uid": uid, "user_text": text,
+                        "dialog_intent": "numeric_choice_rejected", "search_model": state["search_model"],
+                        "chat_model": state["chat_model"], "mcp": state["mcp"],
+                        "params_before": params_before, "params_after": dict(state.get("params", {})),
+                        "params_delta": {}, "response_text": response, "response_len": len(response),
+                        "buttons": [], "duration_ms": 0, "is_error": False, "error": None, "cost": {},
+                        "dialog_plan": dialog_plan,
+                    })
+                    await update.message.reply_text(_to_html(response), parse_mode="HTML")
+                    return
                 matched = options[idx - 1] if idx and 1 <= idx <= len(options) else _match_option_from_text(target, options)
                 if matched:
                     dialog_intent = {"intent": "select_option", "option": matched}
@@ -1852,8 +2897,10 @@ def main() -> None:
                 if params_delta:
                     state["params"] = {**state.get("params", {}), **params_delta}
                     LOGGER.info("User %d: params updated from followup: %s", uid, state["params"])
+                state["numeric_choice_policy"] = "reject"
                 dialog_intent = {"intent": "new_search"}
             elif followup_intent == "new_search":
+                state["numeric_choice_policy"] = "reject"
                 dialog_intent = {"intent": "new_search"}
             else:
                 response = _prepare_response_text(_clarification_from_followup(followup_meta, state))
@@ -1879,24 +2926,274 @@ def main() -> None:
                 })
                 await update.message.reply_text(_to_html(response), parse_mode="HTML")
                 return
+        if dialog_intent.get("intent") == "operator_contact_accept":
+            option = dialog_intent.get("option") or state.get("selected_option") or {}
+            if isinstance(option, dict) and option:
+                state["selected_option"] = option
+                state["operator_context"] = {
+                    "selected_option": option.get("name"),
+                    "known_facts": option,
+                    "client_question": text,
+                    "reason": "selected_option_contact_accept",
+                }
+            state["awaiting_phone"] = True
+            response = _prepare_response_text(_operator_contact_request_text())
+            _log_event({
+                "kind": "operator_contact_requested",
+                "uid": uid,
+                "user_text": text,
+                "selected_option": option.get("name") if isinstance(option, dict) else None,
+                "reason": "contact_offer_accept",
+                "response_text": response,
+            })
+            _remember_bot_response(state, response, offer_type="awaiting_phone", answer_kind="operator_contact_request")
+            await update.message.reply_text(_to_html(response), parse_mode="HTML")
+            return
+
+        if dialog_intent.get("intent") in {"reject_operator", "reject_phone"}:
+            try:
+                response, chat_meta = await client.explain_negation_followup(
+                    intent=dialog_intent.get("intent") or "reject_operator",
+                    user_text=text,
+                    state=state,
+                    chat_model=state["chat_model"],
+                )
+                response = _prepare_response_text(response)
+                response = await _maybe_style_text(
+                    client,
+                    response,
+                    intent="negation_reject_operator",
+                    scene="followup_negation",
+                    context=str((state.get("selected_option") or {}).get("name") or ""),
+                )
+            except Exception:
+                LOGGER.exception("negation reject_operator chat failed")
+                chat_meta = {}
+                response = _prepare_response_text(_reject_operator_response(state))
+            _log_event({
+                "kind": "user_message",
+                "uid": uid,
+                "user_text": text,
+                "dialog_intent": "reject_operator",
+                "search_model": state["search_model"],
+                "chat_model": state["chat_model"],
+                "mcp": state["mcp"],
+                "params_before": params_before,
+                "params_after": dict(state.get("params", {})),
+                "params_delta": {},
+                "response_text": response,
+                "response_len": len(response),
+                "buttons": [],
+                "duration_ms": 0,
+                "is_error": False,
+                "error": None,
+                "cost": {},
+                "chat_meta": chat_meta,
+            })
+            _remember_bot_response(state, response, offer_type="continue_selection", answer_kind="reject_operator")
+            await update.message.reply_text(_to_html(response), parse_mode="HTML")
+            return
+
+        if dialog_intent.get("intent") == "reject_selected_option":
+            option = dialog_intent.get("option") or state.get("selected_option") or {}
+            if isinstance(option, dict) and option.get("name"):
+                rejected = state.setdefault("rejected_option_names", [])
+                name = option.get("name")
+                if name not in rejected:
+                    rejected.append(name)
+            try:
+                response, chat_meta = await client.explain_negation_followup(
+                    intent="reject_selected_option",
+                    user_text=text,
+                    state=state,
+                    chat_model=state["chat_model"],
+                )
+                response = _prepare_response_text(response)
+                response = await _maybe_style_text(
+                    client,
+                    response,
+                    intent="negation_reject_selected_option",
+                    scene="followup_negation",
+                    context=str(option.get("name") if isinstance(option, dict) else ""),
+                )
+            except Exception:
+                LOGGER.exception("negation reject_selected_option chat failed")
+                chat_meta = {}
+                response = _prepare_response_text(_reject_selected_option_response(state))
+            state["selected_option"] = None
+            _log_event({
+                "kind": "user_message",
+                "uid": uid,
+                "user_text": text,
+                "dialog_intent": "reject_selected_option",
+                "search_model": state["search_model"],
+                "chat_model": state["chat_model"],
+                "mcp": state["mcp"],
+                "params_before": params_before,
+                "params_after": dict(state.get("params", {})),
+                "params_delta": {},
+                "response_text": response,
+                "response_len": len(response),
+                "buttons": [],
+                "duration_ms": 0,
+                "is_error": False,
+                "error": None,
+                "cost": {},
+                "chat_meta": chat_meta,
+            })
+            _remember_bot_response(state, response, offer_type="choose_option", answer_kind="reject_selected_option")
+            await update.message.reply_text(_to_html(response), parse_mode="HTML")
+            return
+
+        if dialog_intent.get("intent") == "reject_similar_options":
+            try:
+                response, chat_meta = await client.explain_negation_followup(
+                    intent="reject_similar_options",
+                    user_text=text,
+                    state=state,
+                    chat_model=state["chat_model"],
+                )
+                response = _prepare_response_text(response)
+                response = await _maybe_style_text(
+                    client,
+                    response,
+                    intent="negation_reject_similar_options",
+                    scene="followup_negation",
+                    context=str((state.get("selected_option") or {}).get("name") or ""),
+                )
+            except Exception:
+                LOGGER.exception("negation reject_similar_options chat failed")
+                chat_meta = {}
+                response = _prepare_response_text(_reject_similar_options_response(state))
+            _log_event({
+                "kind": "user_message",
+                "uid": uid,
+                "user_text": text,
+                "dialog_intent": "reject_similar_options",
+                "search_model": state["search_model"],
+                "chat_model": state["chat_model"],
+                "mcp": state["mcp"],
+                "params_before": params_before,
+                "params_after": dict(state.get("params", {})),
+                "params_delta": {},
+                "response_text": response,
+                "response_len": len(response),
+                "buttons": [],
+                "duration_ms": 0,
+                "is_error": False,
+                "error": None,
+                "cost": {},
+                "chat_meta": chat_meta,
+            })
+            _remember_bot_response(state, response, offer_type="clarify", answer_kind="reject_similar_options")
+            await update.message.reply_text(_to_html(response), parse_mode="HTML")
+            return
+
+        if dialog_intent.get("intent") == "clarify_negation":
+            negation_meta = dialog_intent.get("meta") or {}
+            if _looks_like_selected_option_rejection(text):
+                _remember_rejected_selected_option(state)
+            try:
+                response, chat_meta = await client.explain_negation_followup(
+                    intent="clarify_negation",
+                    user_text=text,
+                    state=state,
+                    meta=negation_meta,
+                    chat_model=state["chat_model"],
+                )
+                response = _prepare_response_text(response)
+                response = await _maybe_style_text(
+                    client,
+                    response,
+                    intent="negation_clarify",
+                    scene="followup_negation",
+                    context=str((state.get("selected_option") or {}).get("name") or ""),
+                )
+            except Exception:
+                LOGGER.exception("negation clarify chat failed")
+                chat_meta = {}
+                response = _prepare_response_text(_negation_clarification_response(negation_meta, state))
+            _log_event({
+                "kind": "user_message",
+                "uid": uid,
+                "user_text": text,
+                "dialog_intent": "clarify_negation",
+                "search_model": state["search_model"],
+                "chat_model": state["chat_model"],
+                "mcp": state["mcp"],
+                "params_before": params_before,
+                "params_after": dict(state.get("params", {})),
+                "params_delta": {},
+                "response_text": response,
+                "response_len": len(response),
+                "buttons": [],
+                "duration_ms": 0,
+                "is_error": False,
+                "error": None,
+                "cost": {},
+                "chat_meta": chat_meta,
+            })
+            _remember_bot_response(state, response, offer_type="clarify", answer_kind="clarify_negation")
+            await update.message.reply_text(_to_html(response), parse_mode="HTML")
+            return
+
         if dialog_intent.get("intent") == "select_option":
-            state["selected_option"] = dialog_intent["option"]
+            option = dialog_intent["option"]
+            state["selected_option"] = option
             state["selected_option_card_shown_count"] = int(state.get("selected_option_card_shown_count") or 0) + 1
-            response = _prepare_response_text(_format_option_response(dialog_intent["option"], state.get("params", {}).get("purpose")))
-            response = await _maybe_style_text(
-                client,
-                response,
-                intent="select_option",
-                scene="followup_selected_option",
-                context=str(dialog_intent["option"].get("name") or ""),
+            client_request = (
+                "Клиент выбрал этот вариант из списка. "
+                f"Контекст клиента: {state.get('params', {}).get('purpose') or 'не указан'}. "
+                "Дай первичную живую презентацию выбранного ЖК без нового поиска."
             )
-            idx = int(dialog_intent["option"].get("idx") or 1)
+            try:
+                response, chat_meta = await client.explain_known_option(
+                    option=option,
+                    client_request=client_request,
+                    chat_model=state["chat_model"],
+                )
+                response = _prepare_response_text(response)
+                response = await _maybe_style_text(
+                    client,
+                    response,
+                    intent="select_option_presenter",
+                    scene="followup_selected_option",
+                    context=str(option.get("name") or ""),
+                )
+                response = _strip_unsupported_complex_claims(response, option)
+                response = _strip_unrequested_live_data_cta(response, client_request)
+                response = _soften_layout_overclaim(response)
+                response = _soften_generic_selected_question(response)
+                response = _operator_cta_for_selected_investment(response, option, state.get("params", {}).get("purpose"))
+            except Exception:
+                LOGGER.exception("selected option initial LLM presenter failed")
+                chat_meta = {}
+                response = _prepare_response_text(_format_option_response(option, state.get("params", {}).get("purpose")))
+                response = _strip_unsupported_complex_claims(response, option)
+                response = _strip_unrequested_live_data_cta(response)
+                response = _soften_layout_overclaim(response)
+                response = _soften_generic_selected_question(response)
+                response = _operator_cta_for_selected_investment(response, option, state.get("params", {}).get("purpose"))
+                response = _operator_cta_for_selected_investment(response, option, state.get("params", {}).get("purpose"))
+                response = await _maybe_style_text(
+                    client,
+                    response,
+                    intent="select_option_fallback",
+                    scene="followup_selected_option",
+                    context=str(option.get("name") or ""),
+                )
+                response = _strip_unsupported_complex_claims(response, option)
+                response = _strip_unrequested_live_data_cta(response)
+                response = _soften_layout_overclaim(response)
+                response = _soften_generic_selected_question(response)
+            idx = int(option.get("idx") or 1)
             kb_rows = _selected_option_rows(idx)
             _log_event({
                 "kind": "user_message",
                 "uid": uid,
                 "user_text": text,
                 "dialog_intent": "select_option",
+                "selected_option": option.get("name"),
                 "search_model": state["search_model"],
                 "chat_model": state["chat_model"],
                 "mcp": state["mcp"],
@@ -1910,9 +3207,72 @@ def main() -> None:
                 "is_error": False,
                 "error": None,
                 "cost": {},
+                "chat_meta": chat_meta,
             })
             state["last_buttons"] = kb_rows
-            _remember_bot_response(state, response, offer_type="operator_for_selected", answer_kind="selected_option_card")
+            _remember_bot_response(state, response, offer_type="selected_option", answer_kind="selected_option_card")
+            await update.message.reply_text(_to_html(response), parse_mode="HTML")
+            return
+
+        if dialog_intent.get("intent") == "explain_selected_option":
+            option = dialog_intent["option"]
+            state["selected_option"] = option
+            try:
+                response, chat_meta = await client.explain_known_option(
+                    option=option,
+                    client_request=(
+                        f"{text}\n"
+                        f"Контекст клиента: {state.get('params', {}).get('purpose') or 'не указан'}."
+                    ),
+                    chat_model=state["chat_model"],
+                )
+                response = _prepare_response_text(response)
+                response = _strip_unsupported_complex_claims(response, option)
+                response = _strip_unrequested_live_data_cta(response, text)
+                response = _soften_layout_overclaim(response)
+                response = await _maybe_style_text(
+                    client,
+                    response,
+                    intent="details_known_option",
+                    scene="followup_selected_option_details",
+                    context=str(option.get("name") or ""),
+                )
+                response = _strip_unsupported_complex_claims(response, option)
+                response = _strip_unrequested_live_data_cta(response, text)
+                response = _soften_layout_overclaim(response)
+                response = _soften_generic_selected_question(response)
+                kb_rows = _markup_from_chat_buttons(chat_meta, state, response, "selected-option-details")
+            except Exception:
+                LOGGER.exception("selected option explain chat failed")
+                response = _prepare_response_text(_format_option_response(option, state.get("params", {}).get("purpose")))
+                response = _strip_unsupported_complex_claims(response, option)
+                response = _strip_unrequested_live_data_cta(response, text)
+                response = _soften_layout_overclaim(response)
+                response = _soften_generic_selected_question(response)
+                kb_rows = []
+            _log_event({
+                "kind": "user_message",
+                "uid": uid,
+                "user_text": text,
+                "dialog_intent": "explain_selected_option",
+                "selected_option": option.get("name"),
+                "search_model": state["search_model"],
+                "chat_model": state["chat_model"],
+                "mcp": state["mcp"],
+                "params_before": params_before,
+                "params_after": dict(state.get("params", {})),
+                "params_delta": {},
+                "response_text": response,
+                "response_len": len(response),
+                "buttons": _button_log_preview(kb_rows),
+                "duration_ms": 0,
+                "is_error": False,
+                "error": None,
+                "cost": {},
+                "chat_meta": chat_meta,
+            })
+            state["last_buttons"] = kb_rows
+            _remember_bot_response(state, response, offer_type="selected_option_details", answer_kind="selected_option_details")
             await update.message.reply_text(_to_html(response), parse_mode="HTML")
             return
 
@@ -2078,8 +3438,16 @@ def main() -> None:
         search_meta: dict = {}
         chat_meta: dict = {}
         try:
+            query_for_search = text
+            rejected_names = [str(name) for name in (state.get("rejected_option_names") or []) if str(name).strip()]
+            if rejected_names:
+                query_for_search = (
+                    f"{text}\n\n"
+                    "Внутреннее ограничение диалога: клиент уже отверг эти ЖК, не показывай их снова в подборке: "
+                    f"{', '.join(rejected_names)}."
+                )
             response, new_params, search_meta, chat_meta = await client.ask(
-                query=text, search_model=state["search_model"], chat_model=state["chat_model"], use_mcp=state["mcp"],
+                query=query_for_search, search_model=state["search_model"], chat_model=state["chat_model"], use_mcp=state["mcp"],
                 params=state.get("params", {})
             )
             # Обновляем параметры
@@ -2106,6 +3474,10 @@ def main() -> None:
         c_cost, c_in, c_out, c_used = _meta_cost(chat_meta)
 
         response = _prepare_response_text(_strip_markdown(response))
+        response = _strip_unsupported_complex_claims(response)
+        response = _strip_unrequested_live_data_cta(response, text)
+        response = _soften_layout_overclaim(response)
+        response = _strip_rejected_options_from_response(response, state)
         scene_meta = await scene_classifier.classify_scene(
             await client.ensure_session(),
             user_text=text,
@@ -2133,10 +3505,15 @@ def main() -> None:
                 ensure_ascii=False,
             ),
         )
+        response = _strip_unsupported_complex_claims(response)
+        response = _strip_unrequested_live_data_cta(response, text)
+        response = _soften_layout_overclaim(response)
+        response = _strip_rejected_options_from_response(response, state)
 
         # H013/H028: заполним last_result/options, затем берём buttons[] из chat-контракта.
         _refresh_search_state(state, search_meta)
-        state["visible_options"] = _visible_options_from_response(response, state.get("last_options") or [])
+        state["visible_options"] = _visible_options_from_chat_or_response(chat_meta, response, state.get("last_options") or [])
+        state["numeric_choice_policy"] = _numeric_choice_policy_from_response(response, state.get("visible_options") or [])
         if state.get("last_result", {}).get("found"):
             state["turns_after_results"] = int(state.get("turns_after_results") or 0) + 1
         scenario = _infer_scenario(state, search_meta)
@@ -2153,9 +3530,11 @@ def main() -> None:
             "kind": "user_message",
             "uid": uid,
             "user_text": text,
+            "dialog_intent": "main_search",
             "search_model": state["search_model"],
             "chat_model": state["chat_model"],
             "mcp": state["mcp"],
+            "search_response": search_meta.get("_response_text", ""),
             "params_before": params_before,
             "params_after": dict(state.get("params", {})),
             "params_delta": new_params,
@@ -2205,9 +3584,13 @@ def main() -> None:
 
         uid = update.effective_user.id if update.effective_user else 0
         state = user_state.setdefault(uid, _default_state())
-        phone = _normalize_phone(update.message.contact.phone_number)
-        if 10 <= len(phone) <= 15:
+        phone = _extract_phone_from_text(update.message.contact.phone_number)
+        if phone:
             was_awaiting = bool(state.pop("awaiting_phone", None))
+            if not (was_awaiting or _has_phone_capture_context(state)):
+                _log_event({"kind": "phone_without_context", "uid": uid, "source": "contact", **_phone_log_meta(phone)})
+                await update.message.reply_text(_phone_needs_context_response(), reply_markup=ReplyKeyboardRemove())
+                return
             _log_event({
                 "kind": "phone_captured",
                 "uid": uid,
@@ -2234,7 +3617,7 @@ def main() -> None:
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(~filters.COMMAND & ~filters.CONTACT, handle_message))
 
     print("🤖 nmbot запущен. Нажми Ctrl+C для остановки.")
     LOGGER.info("nmbot started")

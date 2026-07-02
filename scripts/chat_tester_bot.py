@@ -66,19 +66,39 @@ def _load_prompt(name: str) -> str:
 SEARCH_MODEL = "google/gemini-3.1-flash-lite-preview"
 CHAT_MODEL = "google/gemini-2.5-flash"
 
+# H001/model-lab: search model stays fixed by default; /model switches only answer model.
+ANSWER_MODELS: Final[list[str]] = [
+    "google/gemini-2.5-flash",
+    "google/gemini-3.5-flash",
+    "google/gemini-3.1-flash-lite-preview",
+    "openai/gpt-5.4-mini",
+    "openai/gpt-5.5",
+    "openai/gpt-4o",
+]
+
 SEARCH_SYSTEM_PROMPT = _load_prompt("search_v1")
 CHAT_SYSTEM_PROMPT = _load_prompt("chat_v1")
 
-AVAILABLE_MODELS = [
-    "google/gemini-3.1-flash-lite-preview",
-    "google/gemini-2.5-flash",
-    "deepseek/deepseek-v4-flash",
-    "anthropic/claude-3-haiku",
-    "openai/gpt-4o-mini",
-]
+AVAILABLE_MODELS = ANSWER_MODELS
+SHOW_MODEL_STATS: Final[bool] = os.getenv("NMBOT_SHOW_MODEL_STATS", "1") != "0"
+STAGE_PRESENTER_ENABLED: Final[bool] = os.getenv("NMBOT_STAGE_PRESENTER", "1") == "1"
 
 STYLE_TOOL_ENABLED: Final[bool] = os.getenv("NMBOT_TEXT_STYLE_TOOL", "1") != "0"
 STYLE_TOOL_MODEL: Final[str] = os.getenv("NMBOT_STYLE_MODEL", "google/gemini-3.1-flash-lite-preview")
+
+# H001/reason-layer MVP: guarded first-list explanation layer.
+# Superseded by the simpler stage presenter MVP; keep as opt-in lab layer only.
+REASON_LAYER_ENABLED: Final[bool] = os.getenv("NMBOT_REASON_LAYER", "0") == "1"
+REASON_LAYER_MODEL: Final[str] = os.getenv("NMBOT_REASON_MODEL", "google/gemini-3.5-flash")
+REASON_LAYER_FALLBACK_MODEL: Final[str] = os.getenv("NMBOT_REASON_FALLBACK_MODEL", "google/gemini-3.1-flash-lite-preview")
+try:
+    REASON_LAYER_TEMPERATURE: Final[float] = float(os.getenv("NMBOT_REASON_TEMPERATURE", "0.25"))
+except ValueError:
+    REASON_LAYER_TEMPERATURE = 0.25
+try:
+    REASON_LAYER_TIMEOUT: Final[int] = int(os.getenv("NMBOT_REASON_TIMEOUT", "90"))
+except ValueError:
+    REASON_LAYER_TIMEOUT = 90
 
 LOGGER: Final = logging.getLogger("chat_tester_bot")
 
@@ -267,6 +287,46 @@ class OvermindClient:
             chat_request_data, headers, timeout, uid=0
         )
         return response_text, chat_meta
+
+    async def comparative_reason_angles(
+        self,
+        payload: dict[str, Any],
+        *,
+        model: str = REASON_LAYER_MODEL,
+        timeout: int = REASON_LAYER_TIMEOUT,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """H001/reason-layer MVP: ask model for comparative angle+tone only.
+
+        The model must not write final client text. Code renders the final phrase.
+        """
+        await self.ensure_session()
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OVERMIND_TOKEN}",
+        }
+        system_prompt = (
+            "Ты помогаешь выбрать, чем отличаются 2-3 ЖК в одном ответе Ирины. "
+            "Используй только факты из INPUT: цена, метро, отделка, срок сдачи, площадь, локация. "
+            "Не пиши финальный текст клиенту. Не добавляй доходность, аренду, ликвидность, рост цены, "
+            "школы, парки, дворы, видовые квартиры, скидки, ипотеку или обещания выгоды. "
+            "Не используй рекламные слова: лучший, идеальный, выгодный, перспективный, "
+            "инвестиционно привлекательный, премиальный, статусный, максимально. "
+            "Для каждого варианта верни короткие поля angle и tone: 3-8 слов, без повторов. "
+            "Верни строго JSON без markdown: {\"items\":[{\"idx\":1,\"angle\":\"...\",\"tone\":\"...\"}]}"
+        )
+        request_data = {
+            "query": json.dumps(payload, ensure_ascii=False),
+            "service": "openrouter",
+            "model": model,
+            "system_prompt": system_prompt,
+            "parameters": {
+                "temperature": REASON_LAYER_TEMPERATURE,
+                "max_tokens": 1200,
+            },
+            "external_api_key": OPENROUTER_API_KEY,
+        }
+        raw_text, meta = await self._run_gateway_request(request_data, headers, timeout)
+        return _json_from_text(raw_text), {**meta, "_response_text": raw_text, "model": model}
 
     async def _run_gateway_request(self, request_data: dict, headers: dict, timeout: int) -> tuple[str, dict]:
         """Возвращает (response_text, metadata). При ошибке возвращает (error_text, {})."""
@@ -2028,6 +2088,609 @@ def _format_options_summary_response(options: list[dict[str, Any]], lead: str, q
     return _format_numbered_list_spacing(f"{lead}:\n" + "\n".join(chunks) + f"\n{question}")
 
 
+def _client_ready_fact(value: Any) -> str:
+    text = str(value or "").strip()
+    if _looks_missing(text):
+        return ""
+    low = text.lower().replace("ё", "е")
+    if "сдан" in low or "готов" in low:
+        return "дом уже сдан"
+    year = _extract_year(text)
+    if year:
+        return f"сдача запланирована на {year} год"
+    return f"срок: {text}"
+
+
+def _client_finishing_fact(value: Any) -> str:
+    text = str(value or "").strip()
+    if _looks_missing(text):
+        return ""
+    low = text.lower().replace("ё", "е")
+    if "без отдел" in low:
+        return "без отделки"
+    if "отдел" in low:
+        return "есть квартиры с отделкой"
+    return text
+
+
+def _client_price_fact(option: dict[str, Any]) -> str:
+    price = _format_price_value(option.get("price"), option.get("price_min")) if not _looks_missing(option.get("price")) else ""
+    if not price and option.get("price_min"):
+        price = _format_price_value("", option.get("price_min"))
+    if not price:
+        return ""
+    price = re.sub(r"(\d)\.(\d)", r"\1,\2", str(price)).replace(" - ", " до ")
+    return f"цены {price}" if str(price).startswith("от ") else f"цены {price}"
+
+
+def _stage_option_fact_parts(option: dict[str, Any]) -> list[str]:
+    parts: list[str] = []
+    if not _looks_missing(option.get("location")):
+        parts.append(_format_location_value(option.get("location")))
+    ready = _client_ready_fact(option.get("ready") or option.get("status") or option.get("delivered"))
+    if ready:
+        parts.append(ready)
+    finish = _client_finishing_fact(option.get("finishing"))
+    if finish:
+        parts.append(finish)
+    if not _looks_missing(option.get("area")):
+        parts.append(f"площади {option['area']}")
+    price = _client_price_fact(option)
+    if price:
+        parts.append(price)
+    if not _looks_missing(option.get("metro")):
+        parts.append(f"метро: {option['metro']}")
+    return parts
+
+
+def _stage_option_benefit(option: dict[str, Any], scenario: str, used: set[str]) -> str:
+    ready = _client_ready_fact(option.get("ready") or option.get("status") or option.get("delivered"))
+    finishing = _client_finishing_fact(option.get("finishing"))
+    area = "" if _looks_missing(option.get("area")) else str(option.get("area"))
+    price = _client_price_fact(option)
+    metro = "" if _looks_missing(option.get("metro")) else str(option.get("metro"))
+
+    candidates: list[tuple[str, str]] = []
+    if scenario == "family":
+        if ready == "дом уже сдан":
+            candidates.append(("ready_family", "Готовый дом проще планировать для переезда семьи."))
+        if finishing and "отдел" in finishing:
+            candidates.append(("finish_family", "С отделкой меньше ремонтных хлопот после покупки."))
+        if area:
+            candidates.append(("area_family", f"Диапазон площадей {area} помогает подобрать формат под семью."))
+        if price:
+            candidates.append(("price_family", "По цене сразу понятно, с какого бюджета смотреть этот вариант."))
+    elif scenario == "investment":
+        if price:
+            candidates.append(("price_invest", "По цене сразу понятно, с чем сравнивать этот вариант."))
+        if finishing and "отдел" in finishing:
+            candidates.append(("finish_invest", "Отделка уменьшает объём работ и вложений после покупки."))
+        if ready == "дом уже сдан":
+            candidates.append(("ready_invest", "Готовый дом проще оценивать без долгого ожидания сдачи."))
+    elif scenario == "metro_access":
+        if metro:
+            candidates.append(("metro", "Метро рядом — это удобно для ежедневных поездок."))
+        if price:
+            candidates.append(("price_metro", "Цена помогает сразу сравнить варианты рядом с метро."))
+    else:
+        if ready == "дом уже сдан":
+            candidates.append(("ready", "Готовый дом проще планировать для переезда."))
+        if finishing and "отдел" in finishing:
+            candidates.append(("finish", "С отделкой меньше ремонтных хлопот после покупки."))
+        if area:
+            candidates.append(("area", f"По площади есть ориентир {area}, проще выбрать подходящий формат."))
+        if price:
+            candidates.append(("price", "По цене сразу понятен стартовый бюджет."))
+        if metro:
+            candidates.append(("metro", "Метро рядом — удобно для ежедневных поездок."))
+
+    for key, phrase in candidates:
+        if key not in used:
+            used.add(key)
+            return phrase
+    return candidates[0][1] if candidates else "Можно выбрать этот вариант и дальше проверить конкретные квартиры."
+
+
+def _stage_lead_for_first_list(scenario: str, count: int) -> str:
+    word = "три" if count >= 3 else "несколько"
+    if scenario == "family":
+        return f"Подобрала {word} варианта для семьи."
+    if scenario == "investment":
+        return f"Подобрала {word} варианта под инвестицию."
+    if scenario == "metro_access":
+        return f"Нашла {word} варианта рядом с метро."
+    if scenario == "budget":
+        return f"Нашла {word} варианта по бюджету."
+    return f"Нашла {word} понятных варианта."
+
+
+def _render_stage_first_list(options: list[dict[str, Any]], scenario: str) -> str:
+    visible = options[:3]
+    used: set[str] = set()
+    blocks = [_stage_lead_for_first_list(scenario, len(visible))]
+    for idx, option in enumerate(visible, start=1):
+        facts = ", ".join(_stage_option_fact_parts(option)[:5])
+        benefit = _stage_option_benefit(option, scenario, used)
+        name = option.get("name") or f"вариант {idx}"
+        line = f"{idx}. {name}"
+        if facts:
+            line += f" — {facts}"
+        blocks.append(f"{_ensure_sentence_period(line)}\n   {benefit}")
+    blocks.append("Какой ЖК хотите рассмотреть подробнее?")
+    return _format_numbered_list_spacing("\n\n".join(blocks))
+
+
+def _render_stage_selected_object(option: dict[str, Any], scenario: str = "self_use") -> str:
+    name = option.get("name") or "этот ЖК"
+    facts = _stage_option_fact_parts(option)
+    main_facts = ", ".join(facts[:5])
+    ready = _client_ready_fact(option.get("ready") or option.get("status") or option.get("delivered"))
+    finishing = _client_finishing_fact(option.get("finishing"))
+    area = "" if _looks_missing(option.get("area")) else str(option.get("area"))
+    used: set[str] = set()
+    intro = f"{name}"
+    if main_facts:
+        intro += f" — {main_facts}"
+    intro = _ensure_sentence_period(intro)
+    if scenario == "family" and ready == "дом уже сдан" and finishing:
+        benefit = "Для семьи это удобно: готовый дом проще планировать для переезда, а отделка уменьшает ремонтные хлопоты."
+    elif scenario == "family" and area:
+        benefit = f"Для семьи это удобно: по площади есть ориентир {area}, проще выбрать подходящий формат."
+    else:
+        benefit = _stage_option_benefit(option, scenario, used)
+    question = f"Хотите, позвать оператора проверить актуальные квартиры по {name}?"
+    return "\n\n".join([intro, benefit.strip(), question])
+
+
+_REASON_LAYER_FORBIDDEN_RE = re.compile(
+    r"(?:доходност\w*|аренд\w*|ликвидност\w*|рост\s+цен\w*|окупаемост\w*|выгодн\w*|"
+    r"инвестиционно\s+привлекательн\w*|лучший|идеальн\w*|максимальн\w*|"
+    r"премиальн\w*|статусн\w*|статус\s+район\w*|садовое\s+кольцо|видов\w*|скидк\w*|ипотек\w*)",
+    re.IGNORECASE,
+)
+
+
+def _strip_sentence_punct(value: Any) -> str:
+    return str(value or "").strip().rstrip(".。!！?？")
+
+
+def _ensure_sentence_period(value: str) -> str:
+    text = str(value or "").strip()
+    return text if not text or text.endswith((".", "!", "?")) else f"{text}."
+
+
+def _model_response_time_sec(meta: dict[str, Any] | None, fallback_duration_ms: int | None = None) -> float | None:
+    meta = meta or {}
+    raw = meta.get("response_time") or meta.get("latency") or meta.get("duration_sec")
+    try:
+        if raw is not None:
+            return round(float(raw), 2)
+    except (TypeError, ValueError):
+        pass
+    if fallback_duration_ms is not None:
+        return round(float(fallback_duration_ms) / 1000.0, 2)
+    return None
+
+
+def _append_model_stats_footer(
+    response: str,
+    *,
+    state: dict[str, Any],
+    chat_meta: dict[str, Any] | None = None,
+    duration_ms: int | None = None,
+    reason_layer_meta: dict[str, Any] | None = None,
+) -> str:
+    """Test-lab footer: show which answer model produced the current reply."""
+    if not SHOW_MODEL_STATS:
+        return response
+    reason_layer_meta = reason_layer_meta or {}
+    if reason_layer_meta.get("applied"):
+        model = str(reason_layer_meta.get("model") or state.get("chat_model") or CHAT_MODEL)
+        meta = reason_layer_meta.get("meta") if isinstance(reason_layer_meta.get("meta"), dict) else {}
+    else:
+        meta = chat_meta or {}
+        model = str(meta.get("model") or state.get("chat_model") or CHAT_MODEL)
+    sec = _model_response_time_sec(meta, duration_ms)
+    speed = f"{sec:.2f}с" if sec is not None else "н/д"
+    return f"{response.rstrip()}\n\n🧪 Модель ответа: {model} · {speed}"
+
+
+def _ensure_final_next_question(response: str, *, selected: bool = False) -> str:
+    """Every useful bot answer must end with a next step question.
+
+    LLM presenters sometimes finish selected ЖК cards with a factual period. UX contract
+    requires the dialog to keep moving toward compare/check availability/operator.
+    """
+    text = str(response or "").strip()
+    if not text:
+        return text
+    tail = "\n".join(text.splitlines()[-3:])
+    if "?" in tail:
+        return text
+    question = (
+        "Хотите, сравню его с другими вариантами или позвать оператора проверить актуальные квартиры?"
+        if selected
+        else "Какой вариант хотите рассмотреть подробнее, или позвать оператора проверить актуальные квартиры?"
+    )
+    return f"{text}\n\n{question}"
+
+
+def _angle_mentions_higher_price(text: str) -> bool:
+    return bool(re.search(r"\b(?:дороже|дорогой|дорогая|дорогие|высок\w*|верх\w*)\b", text, re.IGNORECASE))
+
+
+def _angle_mentions_lower_price(text: str) -> bool:
+    return bool(re.search(r"\b(?:ниже|низк\w*|бюджетн\w*|миним\w*)\b", text, re.IGNORECASE))
+
+
+def _reason_layer_scenario(user_text: str, params: dict[str, Any] | None) -> str:
+    """H001/reason-layer MVP: map current query/params to a safe presentation scenario."""
+    p = params or {}
+    purpose = str(p.get("purpose") or "").lower()
+    text = str(user_text or "").lower().replace("ё", "е")
+    if purpose in {"investment", "invest", "инвестиции", "инвест", "инвестиций"} or "инвест" in text:
+        return "investment"
+    if purpose == "family" or any(w in text for w in ("семь", "ребен", "дет")):
+        return "family"
+    if "метро" in text or "пешком" in text:
+        return "metro_access"
+    if any(w in text for w in ("до ", "бюджет", "дешев", "подешев", "недорог")):
+        return "budget"
+    if any(w in text for w in ("сдан", "готов", "ключ", "переезд", "засел")):
+        return "fast_move"
+    return "self_use"
+
+
+def _reason_layer_lead_question(scenario: str) -> tuple[str, str]:
+    if scenario == "investment":
+        return "Подобрала три понятных варианта под инвестицию", "Какой ЖК посмотреть подробнее или позвать оператора проверить актуальные квартиры?"
+    if scenario == "metro_access":
+        return "Нашла несколько вариантов рядом с метро", "Какой ЖК посмотреть подробнее или позвать оператора проверить актуальные квартиры?"
+    if scenario == "budget":
+        return "Нашла несколько вариантов по бюджету", "Какой вариант посмотреть подробнее или позвать оператора проверить актуальные квартиры?"
+    if scenario == "fast_move":
+        return "Нашла варианты, где проще планировать переезд", "Какой ЖК посмотреть подробнее или позвать оператора проверить актуальные квартиры?"
+    if scenario == "family":
+        return "Подобрала несколько вариантов для семьи", "Какой ЖК посмотреть подробнее или позвать оператора проверить актуальные квартиры?"
+    return "Нашла несколько понятных вариантов", "Какой ЖК посмотреть подробнее или позвать оператора проверить актуальные квартиры?"
+
+
+def _reason_layer_fact_payload(option: dict[str, Any]) -> dict[str, Any]:
+    facts: dict[str, Any] = {}
+    for key in ("location", "price", "price_min", "finishing", "ready", "area", "metro", "why_close"):
+        value = option.get(key)
+        if not _looks_missing(value):
+            facts[key] = value
+    return facts
+
+
+def _ready_year(value: Any) -> int | None:
+    text = str(value or "")
+    m = re.search(r"\b(20\d{2})\b", text)
+    return int(m.group(1)) if m else None
+
+
+def _reason_layer_comparison_facts(options: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
+    """Compute simple across-options facts so model/renderer see the whole set."""
+    subset = options[:3]
+    out: dict[int, dict[str, Any]] = {i: {} for i in range(1, len(subset) + 1)}
+
+    price_pairs = [
+        (i, opt.get("price_min"))
+        for i, opt in enumerate(subset, start=1)
+        if isinstance(opt.get("price_min"), int) and opt.get("price_min") > 0
+    ]
+    if len(price_pairs) >= 2:
+        sorted_prices = sorted(price_pairs, key=lambda x: x[1])
+        out[sorted_prices[0][0]]["price_rank"] = "lowest"
+        out[sorted_prices[-1][0]]["price_rank"] = "highest"
+        for i, _price in sorted_prices[1:-1]:
+            out[i]["price_rank"] = "middle"
+
+    ready_pairs = [
+        (i, _ready_year(opt.get("ready")))
+        for i, opt in enumerate(subset, start=1)
+    ]
+    ready_pairs = [(i, year) for i, year in ready_pairs if year]
+    if len(ready_pairs) >= 2:
+        sorted_ready = sorted(ready_pairs, key=lambda x: x[1])
+        earliest = sorted_ready[0][1]
+        latest = sorted_ready[-1][1]
+        for i, year in sorted_ready:
+            if year == earliest:
+                out[i]["ready_rank"] = "earliest"
+            elif year == latest:
+                out[i]["ready_rank"] = "latest"
+            else:
+                out[i]["ready_rank"] = "middle"
+
+    metros = [not _looks_missing(opt.get("metro")) for opt in subset]
+    if len(subset) >= 2 and all(metros):
+        for i in out:
+            out[i]["metro_rank"] = "all_have_metro"
+    elif any(metros):
+        for i, has_metro in enumerate(metros, start=1):
+            out[i]["metro_rank"] = "has_metro" if has_metro else "no_metro_fact"
+
+    finishings = [
+        (i, str(opt.get("finishing") or "").lower())
+        for i, opt in enumerate(subset, start=1)
+    ]
+    for i, finishing in finishings:
+        if "отдел" in finishing and "без отдел" not in finishing:
+            out[i]["finishing_rank"] = "has_finishing"
+    return out
+
+
+def _build_reason_layer_payload(
+    *,
+    user_text: str,
+    scenario: str,
+    options: list[dict[str, Any]],
+) -> dict[str, Any]:
+    comparison = _reason_layer_comparison_facts(options)
+    return {
+        "scenario": scenario,
+        "user_query": user_text,
+        "task": "Return comparative angle + tone only; code will render final client text.",
+        "allowed_fact_types": ["price", "price_min", "price_range", "metro", "finishing", "ready", "status", "delivered", "area", "location", "why_close"],
+        "forbidden_claims": [
+            "доходность", "аренда", "ликвидность", "рост цены", "окупаемость",
+            "выгодная инвестиция", "инвестиционно привлекательный", "лучший", "идеальный",
+            "школы", "парки", "дворы", "видовые квартиры", "скидки", "ипотека",
+        ],
+        "options": [
+            {
+                "idx": i,
+                "name": o.get("name") or f"вариант {i}",
+                "facts": _reason_layer_fact_payload(o),
+                "comparison_facts": comparison.get(i, {}),
+            }
+            for i, o in enumerate(options[:3], start=1)
+        ],
+    }
+
+
+def _validate_reason_layer_items(data: dict[str, Any], options_count: int) -> list[dict[str, str]]:
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list) or len(items) != options_count:
+        return []
+    out: list[dict[str, str]] = []
+    seen_idx: set[int] = set()
+    seen_angles: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            return []
+        try:
+            idx = int(item.get("idx"))
+        except (TypeError, ValueError):
+            return []
+        if idx < 1 or idx > options_count or idx in seen_idx:
+            return []
+        angle = str(item.get("angle") or "").strip()
+        tone = str(item.get("tone") or "").strip()
+        if not angle or not tone:
+            return []
+        if len(angle) > 120 or len(tone) > 120:
+            return []
+        if _REASON_LAYER_FORBIDDEN_RE.search(f"{angle} {tone}"):
+            return []
+        angle_key = _compact_option_text(angle)
+        if angle_key in seen_angles:
+            return []
+        seen_idx.add(idx)
+        seen_angles.add(angle_key)
+        out.append({"idx": str(idx), "angle": angle, "tone": tone})
+    return sorted(out, key=lambda x: int(x["idx"]))
+
+
+def _format_option_line_for_reason_layer(idx: int, option: dict[str, Any]) -> str:
+    parts: list[str] = []
+    price = _format_price_value(option.get("price"), option.get("price_min")) if not _looks_missing(option.get("price")) else ""
+    if price:
+        parts.append(str(price).strip())
+    if not _looks_missing(option.get("finishing")):
+        finish = str(option.get("finishing"))
+        parts.append(str("с отделкой" if "отдел" in finish.lower() and not finish.lower().startswith("с ") else finish).strip())
+    if not _looks_missing(option.get("ready")):
+        ready_fact = _client_ready_fact(option.get("ready"))
+        if ready_fact:
+            parts.append(ready_fact)
+    suffix = f" — {', '.join(parts)}" if parts else ""
+    return _ensure_sentence_period(f"{idx}. {option.get('name') or 'вариант'}{suffix}")
+
+
+def _render_reason_from_angle(
+    option: dict[str, Any],
+    angle: str,
+    tone: str,
+    comparison: dict[str, Any] | None = None,
+    used_reason_keys: set[str] | None = None,
+) -> str:
+    """Render final client phrase from short model angle+tone using only option facts."""
+    comparison = comparison or {}
+    used_reason_keys = used_reason_keys if used_reason_keys is not None else set()
+    a = f"{angle} {tone}".lower().replace("ё", "е")
+    metro = "" if _looks_missing(option.get("metro")) else str(option.get("metro"))
+    location = "" if _looks_missing(option.get("location")) else _format_location_value(str(option.get("location")))
+    ready = "" if _looks_missing(option.get("ready")) else str(option.get("ready"))
+    finishing = "" if _looks_missing(option.get("finishing")) else str(option.get("finishing"))
+    price = _format_price_value(option.get("price"), option.get("price_min")) if not _looks_missing(option.get("price")) else ""
+    area = "" if _looks_missing(option.get("area")) else str(option.get("area"))
+
+    def use(key: str, phrase: str) -> str | None:
+        if key in used_reason_keys:
+            return None
+        used_reason_keys.add(key)
+        return phrase
+
+    price_rank = str(comparison.get("price_rank") or "")
+    ready_rank = str(comparison.get("ready_rank") or "")
+    metro_rank = str(comparison.get("metro_rank") or "")
+    finishing_rank = str(comparison.get("finishing_rank") or "")
+
+    # First priority: objective comparison across all visible options. This avoids
+    # three identical "metro nearby" / "with finishing" reasons in one answer.
+    if metro and metro_rank in {"all_have_metro", "has_metro"}:
+        if ready and ready_rank == "earliest":
+            phrase = use("metro_ready_earliest", "Метро рядом, и по сроку сдачи это самый близкий вариант в подборке.")
+            if phrase:
+                return phrase
+        if price and price_rank == "highest":
+            phrase = use("metro_price_highest", "Метро тоже рядом, но бюджет здесь выше — это другой ценовой уровень.")
+            if phrase:
+                return phrase
+        if price and price_rank == "lowest":
+            phrase = use("metro_price_lowest", "Метро рядом, а старт по цене самый низкий среди этих вариантов.")
+            if phrase:
+                return phrase
+        if price and price_rank == "middle":
+            phrase = use("metro_price_middle", "Метро рядом, а по цене это середина между соседними вариантами.")
+            if phrase:
+                return phrase
+
+    # If model picked a non-price angle (family/self-use often does), respect it
+    # before generic price ranking so every ЖК gets a meaningful, not just numeric,
+    # description.
+    if ready and any(w in a for w in ("срок", "сдач", "готов", "ключ")):
+        if ready_rank == "earliest":
+            phrase = use("ready_earliest", "По сроку сдачи это самый близкий вариант.")
+            if phrase:
+                return phrase
+        if ready_rank != "latest":
+            phrase = use("ready", f"По сроку видно {_strip_sentence_punct(ready)}, поэтому вариант проще сравнить по ожиданию.")
+            if phrase:
+                return phrase
+    if area and any(w in a for w in ("площад", "простор", "диапазон")):
+        phrase = use("area", f"По площади есть ориентир {area}, поэтому формат проще сравнить с другими вариантами.")
+        if phrase:
+            return phrase
+    if location and any(w in a for w in ("локац", "район", "располож", "место")):
+        phrase = use("location", f"Локация — {location}, это удобно сразу учитывать при семейном выборе.")
+        if phrase:
+            return phrase
+    if finishing and any(w in a for w in ("отдел", "ремонт")):
+        phrase = use("finishing", "С отделкой меньше ремонтных хлопот после покупки.")
+        if phrase:
+            return phrase
+
+    if price and price_rank == "lowest":
+        phrase = use("price_lowest", "Это самый доступный старт по цене среди этих вариантов.")
+        if phrase:
+            return phrase
+    if price and price_rank == "highest":
+        phrase = use("price_highest", "Бюджет здесь выше, поэтому этот вариант стоит сравнивать уже как более дорогой.")
+        if phrase:
+            return phrase
+    if price and price_rank == "middle":
+        phrase = use("price_middle", "По цене он между соседними вариантами — удобно держать для сравнения.")
+        if phrase:
+            return phrase
+
+    if ready and ready_rank == "earliest":
+        phrase = use("ready_earliest", "По сроку сдачи это самый близкий вариант.")
+        if phrase:
+            return phrase
+    if finishing and finishing_rank == "has_finishing":
+        phrase = use("finishing", "С отделкой меньше ремонтных хлопот после покупки.")
+        if phrase:
+            return phrase
+
+    if any(w in a for w in ("метро", "станци", "пешком")) and metro:
+        metro_clean = _strip_sentence_punct(metro)
+        price_clean = str(price or "").strip()
+        ready_clean = _strip_sentence_punct(ready)
+        if _angle_mentions_higher_price(a) and price_clean:
+            return _ensure_sentence_period(f"До метро около минуты, но бюджет здесь выше: {price_clean}")
+        if _angle_mentions_lower_price(a) and price_clean:
+            return _ensure_sentence_period(f"Метро рядом, при этом старт по цене ниже: {price_clean}")
+        if any(w in a for w in ("сред", "между", "серед")) and price_clean:
+            return _ensure_sentence_period(f"Метро рядом, а по бюджету это промежуточный вариант: {price_clean}")
+        if "срок" in a and ready_clean:
+            return f"Метро рядом: {metro_clean}, а по сроку видно {ready_clean}."
+        if "срок" in a and ready:
+            return f"Метро рядом: {metro_clean}, а по сроку видно {ready_clean}."
+        return f"Метро рядом: {metro_clean} — удобно для ежедневных поездок."
+    if any(w in a for w in ("срок", "сдач", "готов", "ключ")) and ready:
+        return f"По сроку видно {_strip_sentence_punct(ready)}, поэтому вариант проще сравнить по ожиданию."
+    if any(w in a for w in ("отдел", "ремонт")) and finishing:
+        return "С отделкой меньше ремонтных хлопот после покупки."
+    if any(w in a for w in ("низк", "доступ", "цен", "бюджет", "вход", "дорог", "сегмент")) and price:
+        price_clean = str(price or "").strip()
+        if _angle_mentions_higher_price(a):
+            return _ensure_sentence_period(f"Бюджет здесь выше: {price_clean}, это более дорогой вариант для сравнения")
+        if any(w in a for w in ("сред", "между", "серед")):
+            return _ensure_sentence_period(f"По цене это промежуточный вариант: {price_clean}")
+        return _ensure_sentence_period(f"Здесь понятный старт по цене: {price_clean}, удобно сравнить с другими ЖК")
+    if area:
+        return f"По площади есть ориентир {area}, поэтому формат проще сравнить с другими вариантами."
+    return "Этот вариант удобно держать в сравнении с остальными по найденным фактам."
+
+
+def _format_options_summary_with_reasons(
+    options: list[dict[str, Any]],
+    lead: str,
+    question: str,
+    reason_items: list[dict[str, str]],
+) -> str:
+    reasons_by_idx = {int(item["idx"]): item for item in reason_items}
+    comparison = _reason_layer_comparison_facts(options)
+    used_reason_keys: set[str] = set()
+    chunks: list[str] = []
+    for idx, option in enumerate(options[:3], start=1):
+        line = _format_option_line_for_reason_layer(idx, option)
+        item = reasons_by_idx.get(idx)
+        reason = _render_reason_from_angle(
+            option,
+            item.get("angle", "") if item else "",
+            item.get("tone", "") if item else "",
+            comparison=comparison.get(idx, {}),
+            used_reason_keys=used_reason_keys,
+        )
+        chunks.append(f"{line}\n   {reason}")
+    return _format_numbered_list_spacing(f"{lead}.\n" + "\n\n".join(chunks) + f"\n\n{question}")
+
+
+async def _maybe_apply_reason_layer(
+    client: OvermindClient,
+    *,
+    user_text: str,
+    state: dict[str, Any],
+    fallback_response: str,
+) -> tuple[str, dict[str, Any]]:
+    """Guarded first-list rewrite. Fallbacks silently to current response on any issue."""
+    if not REASON_LAYER_ENABLED:
+        return fallback_response, {"enabled": False}
+    if state.get("selected_option"):
+        return fallback_response, {"enabled": True, "skipped": "selected_option"}
+    options = list(state.get("last_options") or [])[:3]
+    if len(options) < 2:
+        return fallback_response, {"enabled": True, "skipped": "not_enough_options"}
+    scenario = _reason_layer_scenario(user_text, state.get("params") or {})
+    payload = _build_reason_layer_payload(user_text=user_text, scenario=scenario, options=options)
+    try:
+        model_chain = [m for m in (REASON_LAYER_MODEL, REASON_LAYER_FALLBACK_MODEL) if m]
+        seen_models: set[str] = set()
+        last_meta: dict[str, Any] = {}
+        for model in model_chain:
+            if model in seen_models:
+                continue
+            seen_models.add(model)
+            data, meta = await client.comparative_reason_angles(payload, model=model)
+            items = _validate_reason_layer_items(data, len(options))
+            if not items:
+                LOGGER.warning("reason layer invalid output: model=%s data=%s meta=%s", model, _safe_json_preview(data), _safe_json_preview(meta))
+                last_meta = meta
+                continue
+            lead, question = _reason_layer_lead_question(scenario)
+            response = _format_options_summary_with_reasons(options, lead, question, items)
+            return response, {"enabled": True, "applied": True, "scenario": scenario, "model": model, "items": items, "meta": meta}
+        return fallback_response, {"enabled": True, "skipped": "invalid_model_output", "meta": last_meta}
+    except Exception:
+        LOGGER.exception("reason layer failed")
+        return fallback_response, {"enabled": True, "skipped": "exception"}
+
+
 def _option_select_rows(options: list[dict[str, Any]], max_count: int = 3) -> list[list[dict]]:
     return []
 
@@ -2385,7 +3048,7 @@ def build_menu_markup(models: list[str], current: str, mcp_on: bool) -> list[lis
     for m in models:
         name = m.split("/")[-1]
         marker = " ✅" if m == current else ""
-        kb.append([{"text": f"{name}{marker}", "callback_data": f"model:{m}"}])
+        kb.append([{"text": f"{name}{marker}", "callback_data": f"chat_model:{m}"}])
     mcp_status = "✅ Вкл" if mcp_on else "❌ Выкл"
     kb.append([{"text": f"MCP: {mcp_status}", "callback_data": "toggle_mcp"}])
     return kb
@@ -2486,9 +3149,9 @@ def main() -> None:
         state = user_state.setdefault(uid, _default_state())
         _log_event({"kind": "command", "uid": uid, "command": "/model",
                     "search_model": state["search_model"]})
-        kb = build_menu_markup(AVAILABLE_MODELS, state["search_model"], state["mcp"])
+        kb = build_menu_markup(AVAILABLE_MODELS, state["chat_model"], state["mcp"])
         await update.message.reply_text(
-            "Выбери модель поиска:",
+            "Выбери модель ответа. Модель поиска не меняется:",
             reply_markup={"inline_keyboard": kb},
         )
 
@@ -2627,8 +3290,22 @@ def main() -> None:
             return
         elif query.data == "toggle_mcp":
             state["mcp"] = not state["mcp"]
-        elif query.data.startswith("model:"):
-            state["search_model"] = query.data[6:]
+        elif query.data.startswith("chat_model:"):
+            model = query.data.split(":", 1)[1]
+            if model not in AVAILABLE_MODELS:
+                await query.edit_message_text("Эта модель сейчас не разрешена для теста.")
+                return
+            state["chat_model"] = model
+            _log_event({"kind": "callback", "uid": uid, "callback": query.data,
+                        "button_text": button_text,
+                        "state_before": state_before_callback,
+                        "chat_model_new": model,
+                        "search_model": state["search_model"]})
+            await query.edit_message_text(
+                f"✅ Модель ответа: {model}\n"
+                f"🔎 Модель поиска не менялась: {state['search_model']}"
+            )
+            return
         else:
             await query.edit_message_text("Эта кнопка уже неактуальна. Напишите запрос ещё раз — обновлю подборку.")
             return
@@ -2694,24 +3371,22 @@ def main() -> None:
 
         text = update.message.text.strip()
 
-        # Phone capture lives above LLM/search: если клиент прислал телефон после операторского CTA
-        # или выбранного ЖК, это согласие на контакт, а не новый поисковый запрос.
+        # Phone capture lives above LLM/search: если клиент прислал валидный телефон,
+        # сразу фиксируем контакт и отвечаем шаблоном. Не отправляем номер в LLM.
         phone = _extract_phone_from_text(text)
         if phone:
             was_awaiting = bool(state.pop("awaiting_phone", None))
-            if was_awaiting or _has_phone_capture_context(state):
-                _log_event({
-                    "kind": "phone_captured",
-                    "uid": uid,
-                    "source": "text",
-                    "was_awaiting_phone": was_awaiting,
-                    "state_after": _dialog_state_preview(state),
-                    **_phone_log_meta(phone),
-                })
-                await update.message.reply_text(_phone_captured_farewell(), reply_markup=ReplyKeyboardRemove())
-                return
-            _log_event({"kind": "phone_without_context", "uid": uid, "source": "text", **_phone_log_meta(phone)})
-            await update.message.reply_text(_phone_needs_context_response(), reply_markup=ReplyKeyboardRemove())
+            had_context = was_awaiting or _has_phone_capture_context(state)
+            _log_event({
+                "kind": "phone_captured",
+                "uid": uid,
+                "source": "text",
+                "was_awaiting_phone": was_awaiting,
+                "had_phone_context": had_context,
+                "state_after": _dialog_state_preview(state),
+                **_phone_log_meta(phone),
+            })
+            await update.message.reply_text(_phone_captured_farewell(), reply_markup=ReplyKeyboardRemove())
             return
 
         if state.get("awaiting_phone"):
@@ -3146,46 +3821,59 @@ def main() -> None:
                 f"Контекст клиента: {state.get('params', {}).get('purpose') or 'не указан'}. "
                 "Дай первичную живую презентацию выбранного ЖК без нового поиска."
             )
-            try:
-                response, chat_meta = await client.explain_known_option(
-                    option=option,
-                    client_request=client_request,
-                    chat_model=state["chat_model"],
-                )
-                response = _prepare_response_text(response)
-                response = await _maybe_style_text(
-                    client,
-                    response,
-                    intent="select_option_presenter",
-                    scene="followup_selected_option",
-                    context=str(option.get("name") or ""),
-                )
-                response = _strip_unsupported_complex_claims(response, option)
-                response = _strip_unrequested_live_data_cta(response, client_request)
-                response = _soften_layout_overclaim(response)
-                response = _soften_generic_selected_question(response)
-                response = _operator_cta_for_selected_investment(response, option, state.get("params", {}).get("purpose"))
-            except Exception:
-                LOGGER.exception("selected option initial LLM presenter failed")
-                chat_meta = {}
-                response = _prepare_response_text(_format_option_response(option, state.get("params", {}).get("purpose")))
-                response = _strip_unsupported_complex_claims(response, option)
-                response = _strip_unrequested_live_data_cta(response)
-                response = _soften_layout_overclaim(response)
-                response = _soften_generic_selected_question(response)
-                response = _operator_cta_for_selected_investment(response, option, state.get("params", {}).get("purpose"))
-                response = _operator_cta_for_selected_investment(response, option, state.get("params", {}).get("purpose"))
-                response = await _maybe_style_text(
-                    client,
-                    response,
-                    intent="select_option_fallback",
-                    scene="followup_selected_option",
-                    context=str(option.get("name") or ""),
-                )
-                response = _strip_unsupported_complex_claims(response, option)
-                response = _strip_unrequested_live_data_cta(response)
-                response = _soften_layout_overclaim(response)
-                response = _soften_generic_selected_question(response)
+            if STAGE_PRESENTER_ENABLED:
+                chat_meta = {"presenter": "stage_selected_object"}
+                scenario_for_stage = _reason_layer_scenario(text, state.get("params", {}))
+                if scenario_for_stage == "self_use" and state.get("params", {}).get("purpose"):
+                    scenario_for_stage = str(state.get("params", {}).get("purpose") or "self_use")
+                response = _prepare_response_text(_render_stage_selected_object(option, scenario_for_stage))
+            else:
+                try:
+                    response, chat_meta = await client.explain_known_option(
+                        option=option,
+                        client_request=client_request,
+                        chat_model=state["chat_model"],
+                    )
+                    response = _prepare_response_text(response)
+                    response = await _maybe_style_text(
+                        client,
+                        response,
+                        intent="select_option_presenter",
+                        scene="followup_selected_option",
+                        context=str(option.get("name") or ""),
+                    )
+                    response = _strip_unsupported_complex_claims(response, option)
+                    response = _strip_unrequested_live_data_cta(response, client_request)
+                    response = _soften_layout_overclaim(response)
+                    response = _soften_generic_selected_question(response)
+                    response = _operator_cta_for_selected_investment(response, option, state.get("params", {}).get("purpose"))
+                    response = _ensure_final_next_question(response, selected=True)
+                except Exception:
+                    LOGGER.exception("selected option initial LLM presenter failed")
+                    chat_meta = {}
+                    response = _prepare_response_text(_format_option_response(option, state.get("params", {}).get("purpose")))
+                    response = _strip_unsupported_complex_claims(response, option)
+                    response = _strip_unrequested_live_data_cta(response)
+                    response = _soften_layout_overclaim(response)
+                    response = _soften_generic_selected_question(response)
+                    response = _operator_cta_for_selected_investment(response, option, state.get("params", {}).get("purpose"))
+                    response = _operator_cta_for_selected_investment(response, option, state.get("params", {}).get("purpose"))
+                    response = await _maybe_style_text(
+                        client,
+                        response,
+                        intent="select_option_fallback",
+                        scene="followup_selected_option",
+                        context=str(option.get("name") or ""),
+                    )
+                    response = _strip_unsupported_complex_claims(response, option)
+                    response = _strip_unrequested_live_data_cta(response)
+                    response = _soften_layout_overclaim(response)
+                    response = _soften_generic_selected_question(response)
+                    response = _ensure_final_next_question(response, selected=True)
+            if not STAGE_PRESENTER_ENABLED:
+                pass
+            elif "?" not in "\n".join(response.splitlines()[-3:]):
+                response = _ensure_final_next_question(response, selected=True)
             idx = int(option.get("idx") or 1)
             kb_rows = _selected_option_rows(idx)
             _log_event({
@@ -3217,39 +3905,51 @@ def main() -> None:
         if dialog_intent.get("intent") == "explain_selected_option":
             option = dialog_intent["option"]
             state["selected_option"] = option
-            try:
-                response, chat_meta = await client.explain_known_option(
-                    option=option,
-                    client_request=(
-                        f"{text}\n"
-                        f"Контекст клиента: {state.get('params', {}).get('purpose') or 'не указан'}."
-                    ),
-                    chat_model=state["chat_model"],
-                )
-                response = _prepare_response_text(response)
-                response = _strip_unsupported_complex_claims(response, option)
-                response = _strip_unrequested_live_data_cta(response, text)
-                response = _soften_layout_overclaim(response)
-                response = await _maybe_style_text(
-                    client,
-                    response,
-                    intent="details_known_option",
-                    scene="followup_selected_option_details",
-                    context=str(option.get("name") or ""),
-                )
-                response = _strip_unsupported_complex_claims(response, option)
-                response = _strip_unrequested_live_data_cta(response, text)
-                response = _soften_layout_overclaim(response)
-                response = _soften_generic_selected_question(response)
-                kb_rows = _markup_from_chat_buttons(chat_meta, state, response, "selected-option-details")
-            except Exception:
-                LOGGER.exception("selected option explain chat failed")
-                response = _prepare_response_text(_format_option_response(option, state.get("params", {}).get("purpose")))
-                response = _strip_unsupported_complex_claims(response, option)
-                response = _strip_unrequested_live_data_cta(response, text)
-                response = _soften_layout_overclaim(response)
-                response = _soften_generic_selected_question(response)
+            if STAGE_PRESENTER_ENABLED:
+                chat_meta = {"presenter": "stage_selected_object_details"}
+                scenario_for_stage = _reason_layer_scenario(text, state.get("params", {}))
+                if scenario_for_stage == "self_use" and state.get("params", {}).get("purpose"):
+                    scenario_for_stage = str(state.get("params", {}).get("purpose") or "self_use")
+                response = _prepare_response_text(_render_stage_selected_object(option, scenario_for_stage))
+                response = _ensure_final_next_question(response, selected=True)
                 kb_rows = []
+            else:
+                try:
+                    response, chat_meta = await client.explain_known_option(
+                        option=option,
+                        client_request=(
+                            f"{text}\n"
+                            f"Контекст клиента: {state.get('params', {}).get('purpose') or 'не указан'}."
+                        ),
+                        chat_model=state["chat_model"],
+                    )
+                    response = _prepare_response_text(response)
+                    response = _strip_unsupported_complex_claims(response, option)
+                    response = _strip_unrequested_live_data_cta(response, text)
+                    response = _soften_layout_overclaim(response)
+                    response = await _maybe_style_text(
+                        client,
+                        response,
+                        intent="details_known_option",
+                        scene="followup_selected_option_details",
+                        context=str(option.get("name") or ""),
+                    )
+                    response = _strip_unsupported_complex_claims(response, option)
+                    response = _strip_unrequested_live_data_cta(response, text)
+                    response = _soften_layout_overclaim(response)
+                    response = _soften_generic_selected_question(response)
+                    response = _ensure_final_next_question(response, selected=True)
+                    kb_rows = _markup_from_chat_buttons(chat_meta, state, response, "selected-option-details")
+                except Exception:
+                    LOGGER.exception("selected option explain chat failed")
+                    chat_meta = {}
+                    response = _prepare_response_text(_format_option_response(option, state.get("params", {}).get("purpose")))
+                    response = _strip_unsupported_complex_claims(response, option)
+                    response = _strip_unrequested_live_data_cta(response, text)
+                    response = _soften_layout_overclaim(response)
+                    response = _soften_generic_selected_question(response)
+                    response = _ensure_final_next_question(response, selected=True)
+                    kb_rows = []
             _log_event({
                 "kind": "user_message",
                 "uid": uid,
@@ -3517,6 +4217,45 @@ def main() -> None:
         if state.get("last_result", {}).get("found"):
             state["turns_after_results"] = int(state.get("turns_after_results") or 0) + 1
         scenario = _infer_scenario(state, search_meta)
+
+        stage_presenter_meta: dict[str, Any] = {"enabled": STAGE_PRESENTER_ENABLED}
+        if STAGE_PRESENTER_ENABLED and len(state.get("last_options") or []) >= 2:
+            stage_scenario = _reason_layer_scenario(text, state.get("params", {}))
+            response = _render_stage_first_list(state.get("last_options") or [], stage_scenario)
+            state["visible_options"] = state.get("last_options", [])[:3]
+            state["numeric_choice_policy"] = _numeric_choice_policy_from_response(response, state.get("visible_options") or [])
+            stage_presenter_meta = {
+                "enabled": True,
+                "applied": True,
+                "stage": "first_list",
+                "scenario": stage_scenario,
+                "options_count": len(state.get("visible_options") or []),
+            }
+
+        # H001/reason-layer MVP: optional guarded rewrite for first 2-3 option lists.
+        # It is disabled by default and falls back to current response on any issue.
+        reason_layer_meta: dict[str, Any] = {"enabled": REASON_LAYER_ENABLED}
+        if not stage_presenter_meta.get("applied"):
+            response, reason_layer_meta = await _maybe_apply_reason_layer(
+                client,
+                user_text=text,
+                state=state,
+                fallback_response=response,
+            )
+            if reason_layer_meta.get("applied"):
+                state["visible_options"] = state.get("last_options", [])[:3]
+                state["numeric_choice_policy"] = _numeric_choice_policy_from_response(response, state.get("visible_options") or [])
+
+        duration_ms = int((time.monotonic() - t0) * 1000)
+
+        response = _append_model_stats_footer(
+            response,
+            state=state,
+            chat_meta=chat_meta,
+            duration_ms=duration_ms,
+            reason_layer_meta=reason_layer_meta,
+        )
+
         kb_rows = _markup_from_chat_buttons(chat_meta, state, response, scenario)
         markup: dict | None = {"inline_keyboard": kb_rows} if kb_rows else None
         state["last_buttons"] = kb_rows
@@ -3542,6 +4281,8 @@ def main() -> None:
             "response_text": response,
             "response_len": len(response),
             "buttons": _button_log_preview(kb_rows),
+            "reason_layer": reason_layer_meta,
+            "stage_presenter": stage_presenter_meta,
             "duration_ms": duration_ms,
             "is_error": response.startswith(("❌", "⏱️")),
             "error": error_text,
@@ -3587,15 +4328,13 @@ def main() -> None:
         phone = _extract_phone_from_text(update.message.contact.phone_number)
         if phone:
             was_awaiting = bool(state.pop("awaiting_phone", None))
-            if not (was_awaiting or _has_phone_capture_context(state)):
-                _log_event({"kind": "phone_without_context", "uid": uid, "source": "contact", **_phone_log_meta(phone)})
-                await update.message.reply_text(_phone_needs_context_response(), reply_markup=ReplyKeyboardRemove())
-                return
+            had_context = was_awaiting or _has_phone_capture_context(state)
             _log_event({
                 "kind": "phone_captured",
                 "uid": uid,
                 "source": "contact",
                 "was_awaiting_phone": was_awaiting,
+                "had_phone_context": had_context,
                 "state_after": _dialog_state_preview(state),
                 **_phone_log_meta(phone),
             })

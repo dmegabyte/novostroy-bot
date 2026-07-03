@@ -20,7 +20,7 @@ import os
 import re
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Final
 from uuid import uuid4
@@ -82,6 +82,25 @@ CHAT_SYSTEM_PROMPT = _load_prompt("chat_v1")
 AVAILABLE_MODELS = ANSWER_MODELS
 SHOW_MODEL_STATS: Final[bool] = os.getenv("NMBOT_SHOW_MODEL_STATS", "1") != "0"
 STAGE_PRESENTER_ENABLED: Final[bool] = os.getenv("NMBOT_STAGE_PRESENTER", "1") == "1"
+SALES_PHRASE_ENABLED: Final[bool] = os.getenv("NMBOT_SALES_PHRASE", "1") == "1"
+SALES_PHRASE_MODEL: Final[str] = os.getenv("NMBOT_SALES_PHRASE_MODEL", "google/gemini-3.5-flash")
+try:
+    SALES_PHRASE_TEMPERATURE: Final[float] = float(os.getenv("NMBOT_SALES_PHRASE_TEMPERATURE", "0.2"))
+except ValueError:
+    SALES_PHRASE_TEMPERATURE = 0.2
+try:
+    SALES_PHRASE_TIMEOUT: Final[int] = int(os.getenv("NMBOT_SALES_PHRASE_TIMEOUT", "90"))
+except ValueError:
+    SALES_PHRASE_TIMEOUT = 90
+OPTION_ENRICHMENT_ENABLED: Final[bool] = os.getenv("NMBOT_OPTION_ENRICHMENT", "1") == "1"
+try:
+    OPTION_ENRICHMENT_TIMEOUT: Final[int] = int(os.getenv("NMBOT_OPTION_ENRICHMENT_TIMEOUT", "45"))
+except ValueError:
+    OPTION_ENRICHMENT_TIMEOUT = 45
+try:
+    OPTION_ENRICHMENT_SELECT_WAIT: Final[float] = float(os.getenv("NMBOT_OPTION_ENRICHMENT_SELECT_WAIT", "2.0"))
+except ValueError:
+    OPTION_ENRICHMENT_SELECT_WAIT = 2.0
 
 STYLE_TOOL_ENABLED: Final[bool] = os.getenv("NMBOT_TEXT_STYLE_TOOL", "1") != "0"
 STYLE_TOOL_MODEL: Final[str] = os.getenv("NMBOT_STYLE_MODEL", "google/gemini-3.1-flash-lite-preview")
@@ -114,6 +133,12 @@ def _safe_json_preview(obj: Any, limit: int = 2000) -> str:
 def _safe_user_error_message(_error: str | None = None) -> str:
     """H024: человекочитаемая ошибка без OpenRouter/choices/traceback/JSON для Telegram."""
     return SAFE_UPSTREAM_ERROR_TEXT
+
+
+def _is_safe_upstream_fallback(text: Any) -> bool:
+    """True, если наружу уже надо отдать безопасный fallback, а не прогонять его через LLM-слои."""
+    normalized = str(text or "").strip()
+    return normalized == SAFE_UPSTREAM_ERROR_TEXT or normalized.lower() in {"", "none", "null"}
 
 
 async def _maybe_style_text(
@@ -196,6 +221,8 @@ class OvermindClient:
 
         search_result, search_meta = await self._run_gateway_request(search_request_data, headers, timeout)
         search_meta = {**search_meta, "_response_text": search_result}
+        if search_meta.get("_safe_fallback") or _is_safe_upstream_fallback(search_result):
+            return SAFE_UPSTREAM_ERROR_TEXT, {}, {**search_meta, "_safe_fallback": True}, {}
         if search_result.startswith("❌") or search_result.startswith("⏱️"):
             return search_result, {}, search_meta, {}
 
@@ -328,6 +355,78 @@ class OvermindClient:
         raw_text, meta = await self._run_gateway_request(request_data, headers, timeout)
         return _json_from_text(raw_text), {**meta, "_response_text": raw_text, "model": model}
 
+    async def sales_phrases(
+        self,
+        payload: dict[str, Any],
+        *,
+        model: str = SALES_PHRASE_MODEL,
+        timeout: int = SALES_PHRASE_TIMEOUT,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """MVP stage presenter: ask model only for short benefit phrases.
+
+        Code keeps the answer structure, facts and final questions. The model only
+        makes one human sales benefit per semantic card.
+        """
+        await self.ensure_session()
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OVERMIND_TOKEN}",
+        }
+        system_prompt = (
+            "Сформулируй короткую пользу для клиента по каждой карточке ЖК. "
+            "Используй только INPUT: facts и allowed_angles. Не добавляй новые факты. "
+            "Пиши живо, но спокойно: без рекламы, обещаний и будущей выгоды. "
+            "Не упоминай то, чего нет во входе: школы, парки, двор, вид, этажи, наличие, "
+            "ипотеку, скидки, аренду, доходность, рост цены. "
+            "Не пиши приветствие, вопрос, markdown или эмодзи. "
+            "Для каждого item верни одно предложение до 150 символов. "
+            "Верни только JSON: {\"items\":[{\"idx\":1,\"benefit\":\"...\"}]}"
+        )
+        request_data = {
+            "query": json.dumps(payload, ensure_ascii=False),
+            "service": "openrouter",
+            "model": model,
+            "system_prompt": system_prompt,
+            "parameters": {
+                "temperature": SALES_PHRASE_TEMPERATURE,
+                "max_tokens": 1200,
+            },
+            "external_api_key": OPENROUTER_API_KEY,
+        }
+        raw_text, meta = await self._run_gateway_request(request_data, headers, timeout)
+        return _json_from_text(raw_text), {**meta, "_response_text": raw_text, "model": model}
+
+    async def enrich_option_search(
+        self,
+        query: str,
+        *,
+        model: str = SEARCH_MODEL,
+        timeout: int = OPTION_ENRICHMENT_TIMEOUT,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Targeted MCP/search enrichment for one selected ЖК.
+
+        This is not a chat-answer call: it asks MCP/search for a richer factual JSON card.
+        """
+        await self.ensure_session()
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OVERMIND_TOKEN}",
+        }
+        request_data = {
+            "query": query,
+            "service": "openrouter",
+            "model": model,
+            "system_prompt": SEARCH_SYSTEM_PROMPT,
+            "parameters": {
+                "temperature": 0.2,
+                "max_tokens": 5000,
+            },
+            "external_api_key": OPENROUTER_API_KEY,
+            "mcp_servers": ["novostroym"],
+        }
+        raw_text, meta = await self._run_gateway_request(request_data, headers, timeout)
+        return _json_from_text(raw_text), {**meta, "_response_text": raw_text, "model": model}
+
     async def _run_gateway_request(self, request_data: dict, headers: dict, timeout: int) -> tuple[str, dict]:
         """Возвращает (response_text, metadata). При ошибке возвращает (error_text, {})."""
         session = await self.ensure_session()
@@ -348,12 +447,12 @@ class OvermindClient:
                     resp.status,
                     _safe_json_preview(task),
                 )
-                return _safe_user_error_message(), {}
+                return _safe_user_error_message(), {"_upstream_error": True, "_safe_fallback": True}
 
         task_id = task.get("id")
         if not task_id:
             LOGGER.error("gateway create task returned no id: payload=%s", _safe_json_preview(task))
-            return _safe_user_error_message(), {}
+            return _safe_user_error_message(), {"_upstream_error": True, "_safe_fallback": True}
 
         base = OVERMIND_URL.rstrip("/")
         start = time.time()
@@ -379,7 +478,7 @@ class OvermindClient:
                             error,
                             _safe_json_preview(result_obj),
                         )
-                        return _safe_user_error_message(error), metadata
+                        return _safe_user_error_message(error), {**metadata, "_upstream_error": True, "_safe_fallback": True}
 
                     if response_text:
                         return response_text, metadata
@@ -389,7 +488,7 @@ class OvermindClient:
                         status,
                         _safe_json_preview(result_obj),
                     )
-                    return _safe_user_error_message(), metadata
+                    return _safe_user_error_message(), {**metadata, "_upstream_error": True, "_safe_fallback": True}
 
             await asyncio.sleep(3)
 
@@ -438,6 +537,8 @@ class OvermindClient:
         """H004: chat-стадия с retry на невалидный JSON. До 2 повторов.
         Возвращает (response_text, chat_params, retries_count, chat_meta)."""
         chat_result, chat_meta = await self._run_gateway_request(chat_request_data, headers, timeout)
+        if chat_meta.get("_safe_fallback") or _is_safe_upstream_fallback(chat_result):
+            return SAFE_UPSTREAM_ERROR_TEXT, {}, 0, {**chat_meta, "_safe_fallback": True}
         # H007-A: strip markdown-обёртку ДО парсинга JSON, чтобы _parse_chat_json
         # работал с чистым текстом (без ```json ... ```).
         chat_result = _strip_markdown(chat_result)
@@ -737,11 +838,6 @@ def _is_rejected_option(option: dict[str, Any], state: dict[str, Any]) -> bool:
     return bool(name_key and name_key in rejected)
 
 
-def _looks_like_selected_option_rejection(text: str) -> bool:
-    t = str(text or "").lower().replace("ё", "е")
-    return bool(re.search(r"\b(не\s+подходит|не\s+этот|не\s+то|не\s+нравится|убери|уберите|убираем)\b", t))
-
-
 def _remember_rejected_selected_option(state: dict[str, Any]) -> None:
     option = state.get("selected_option")
     if not isinstance(option, dict) or not option.get("name"):
@@ -789,6 +885,7 @@ def _default_state() -> dict[str, Any]:
         "params": {},
         "last_result": {},  # {found, exact_count, near_count, scenario}
         "last_options": [],  # H016: последние варианты для «второй»/«подешевле»
+        "enriched_options": {},  # выбранные/top-3 ЖК, раскрытые точечным MCP/search
         "visible_options": [],  # порядок вариантов в последнем видимом клиенту списке
         "selected_option": None,  # PRODUCT_TZ: выбранный ЖК/вариант для follow-up и operator_context
         "turns_after_results": 0,
@@ -908,8 +1005,15 @@ def _apply_dialog_plan_to_state(state: dict[str, Any], plan: dict[str, Any], *, 
     selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
     selected_name = str(selected.get("name") or "")
     selected_key = _compact_option_text(selected_name)
-    allow_rejected_update = _looks_like_negation(user_text) or _looks_like_selected_option_rejection(user_text)
-    unsafe_numeric_choice = bool(_pure_option_choice_index(user_text) and state.get("numeric_choice_policy") == "reject")
+    # Семантику отказа/выбора определяет только LLM-orchestrator.
+    # Код здесь не распознаёт смысл текста regex'ами: он лишь безопасно применяет
+    # план к уже известным ЖК и не принимает новые названия на веру.
+    visible_policy = str(plan.get("visible_options_policy") or "")
+    params_delta = plan.get("params_delta") if isinstance(plan.get("params_delta"), dict) else {}
+    params_delta = _normalize_followup_params_delta(params_delta)
+    selected_action = str(plan.get("selected_option_action") or "")
+    list_will_change = visible_policy == "clear" or bool(params_delta) or selected_action == "clear"
+    allow_rejected_update = bool(plan.get("rejected_options_add")) and list_will_change
     for raw_name in plan.get("rejected_options_add") or []:
         if not allow_rejected_update:
             continue
@@ -919,30 +1023,27 @@ def _apply_dialog_plan_to_state(state: dict[str, Any], plan: dict[str, Any], *, 
             rejected.append(safe_name)
             applied["applied"].append("rejected_options_add")
 
-    if plan.get("selected_option_action") == "clear":
+    numeric_choice_is_blocked = state.get("numeric_choice_policy") == "reject" and _pure_option_choice_index(user_text) is not None
+
+    if selected_action == "clear":
         state["selected_option"] = None
         state["last_offer_type"] = ""
         applied["applied"].append("selected_option_clear")
-    elif plan.get("selected_option_action") == "set":
-        option = None if unsafe_numeric_choice else _find_option_by_name(state, plan.get("selected_option_name"))
-        if option:
+    elif selected_action == "set":
+        option = _find_option_by_name(state, plan.get("selected_option_name"))
+        if option and numeric_choice_is_blocked:
+            applied["applied"].append("selected_option_set_blocked_by_numeric_policy")
+        elif option:
             state["selected_option"] = option
             applied["applied"].append("selected_option_set")
-        elif unsafe_numeric_choice:
-            applied["applied"].append("selected_option_set_blocked_by_numeric_policy")
 
-    visible_policy = str(plan.get("visible_options_policy") or "")
     if visible_policy == "clear":
         state["visible_options"] = []
         applied["applied"].append("visible_options_clear")
 
-    params_delta = plan.get("params_delta") if isinstance(plan.get("params_delta"), dict) else {}
-    params_delta = _normalize_followup_params_delta(params_delta)
-
     numeric_policy = str(plan.get("numeric_choice_policy") or "")
     if numeric_policy in {"accept", "reject"}:
-        if unsafe_numeric_choice and numeric_policy == "accept":
-            state["numeric_choice_policy"] = "reject"
+        if numeric_policy == "accept" and numeric_choice_is_blocked:
             applied["applied"].append("numeric_choice_accept_blocked_by_numeric_policy")
         elif numeric_policy == "reject" and state.get("visible_options") and visible_policy != "clear" and not params_delta and not allow_rejected_update:
             # Planner может предложить reject для «покажи другие»/общих follow-up,
@@ -957,10 +1058,6 @@ def _apply_dialog_plan_to_state(state: dict[str, Any], plan: dict[str, Any], *, 
         state["params"] = {**state.get("params", {}), **params_delta}
         applied["params_delta"] = params_delta
         applied["applied"].append("params_delta")
-
-    if _looks_like_selected_option_rejection(user_text) and selected_name and selected_name not in rejected:
-        rejected.append(selected_name)
-        applied["applied"].append("rejected_selected_by_text_safety")
 
     return applied
 
@@ -980,51 +1077,8 @@ def _clarification_from_followup(meta: dict[str, Any], state: dict[str, Any]) ->
 
 
 def _local_followup_intent(text: str, state: dict[str, Any]) -> str:
-    """Safety-net для очевидных коротких ответов, если LLM-classifier недоступен.
-
-    Это не основной «мозг» диалога, а fail-open защита: live-бот не должен
-    ломаться на «да» после вопроса про оператора только из-за env/сети.
-    """
-    t = text.lower().replace("ё", "е").strip()
-    offer = str(state.get("last_offer_type") or "")
-    yes = bool(re.fullmatch(r"(да|ага|угу|ок|хорошо|давай|хочу)", t))
-    no = bool(re.fullmatch(r"(нет|неа|не надо|не нужно)", t))
-    if offer == "operator_for_selected":
-        if yes:
-            return "operator_contact_accept"
-        if no:
-            return "reject_offer"
-        if re.search(r"(зачем|почему|для чего)", t):
-            return "explain_operator_reason"
-        if re.search(r"(продолж|подбор|дальше|еще|ещё|вариант)", t):
-            return "continue_selection"
-    if offer == "compare_selected":
-        if yes:
-            return "compare_selected"
-        if no:
-            return "reject_offer"
-    if _is_operator_phone_refusal(t):
-        return "reject_operator"
+    """Semantic fallback disabled: смысл follow-up определяет LLM-orchestrator."""
     return ""
-
-
-def _looks_like_negation(text: str) -> bool:
-    t = text.lower().replace("ё", "е").strip()
-    return bool(re.search(r"\b(не|нет|неа|без)\b|не\s+надо|не\s+нужно|не\s+хочу|не\s+подходит|не\s+этот|убер(и|ите|ем)", t))
-
-
-def _is_operator_phone_refusal(text: str) -> bool:
-    """Минимальный code safety: явный отказ от оператора/звонка/номера.
-
-    Остальные отрицания специально отдаём LLM follow-up classifier'у.
-    """
-    t = text.lower().replace("ё", "е").strip()
-    return bool(re.search(
-        r"(не\s+хочу|не\s+надо|не\s+нужно|без).{0,25}(оператор|менеджер|звон|звонк|телефон|номер|контакт)|"
-        r"(оператор|менеджер|звон|звонк)\s+не\s+(нужен|нужна|надо)|"
-        r"номер\s+не\s+(дам|оставлю)|не\s+оставлю\s+(номер|телефон|контакт)",
-        t,
-    ))
 
 
 def _reject_operator_response(state: dict[str, Any]) -> str:
@@ -1283,6 +1337,37 @@ def _continue_selection_response(state: dict[str, Any]) -> str:
     return "Хорошо, продолжим подбор. Что поменять в условиях: бюджет, район, срок сдачи или количество комнат?"
 
 
+def _followup_expansion_option_names(state: dict[str, Any]) -> list[str]:
+    options = state.get("visible_options") or state.get("last_options") or []
+    names: list[str] = []
+    for option in options[:3]:
+        name = _compact_option_text(option.get("name"))
+        if name and name not in names:
+            names.append(name)
+    selected = state.get("selected_option")
+    if isinstance(selected, dict):
+        selected_name = _compact_option_text(selected.get("name"))
+        if selected_name and selected_name not in names:
+            names.append(selected_name)
+    return names
+
+
+def _build_followup_expansion_query(text: str, state: dict[str, Any]) -> tuple[str, list[str]]:
+    excluded_names = _followup_expansion_option_names(state)
+    parts = [
+        str(text or "").strip(),
+        "",
+        "Клиент просит ещё похожие варианты.",
+        "Сделай свежую подборку по тем же или максимально близким условиям, но не повторяй уже показанные ЖК.",
+    ]
+    if excluded_names:
+        parts.extend([
+            "",
+            "Внутреннее ограничение диалога: не показывай снова эти ЖК: " + ", ".join(excluded_names) + ".",
+        ])
+    return "\n".join(parts).strip(), excluded_names
+
+
 def _parse_budget_callback_value(value: str) -> int | None:
     """H023: parse budget callback values like '5m', '10m', '15m', or 'none'."""
     if value == "none":
@@ -1363,19 +1448,30 @@ def _extract_options(search_text: str) -> list[dict[str, Any]]:
     for item in raw:
         if not isinstance(item, dict):
             continue
-        price = item.get("price") or item.get("min_price") or item.get("price_range") or item.get("cost")
+        price_range = item.get("price_range") or item.get("prices") or ""
+        price = price_range or item.get("price") or item.get("cost") or item.get("min_price")
         opt = {
             "idx": len(options) + 1,
             "name": item.get("name") or item.get("title") or "вариант",
             "location": item.get("location") or item.get("district") or "",
             "price": price or "",
+            "price_range": price_range or "",
             "price_min": _price_min(price),
             "finishing": item.get("finishing") or item.get("renovation") or "",
             "area": item.get("area") or item.get("square") or item.get("площадь") or "",
             "ready": item.get("ready") or item.get("status") or item.get("deadline") or "",
             "developer": item.get("developer") or item.get("dev") or item.get("застройщик") or "",
             "metro": item.get("metro") or "",
+            "transport": item.get("transport") or item.get("walk_minutes") or item.get("транспорт") or "",
+            "rooms": item.get("rooms") or item.get("room_types") or item.get("комнатность") or "",
             "why_close": item.get("why_close") or "",
+            "infrastructure": _join_fact_values(item.get("infrastructure"), item.get("infrastructure_family"), item.get("family_infrastructure")),
+            "schools": _join_fact_values(item.get("schools"), item.get("school"), item.get("школы"), item.get("школа")),
+            "kindergartens": _join_fact_values(item.get("kindergartens"), item.get("kindergarten"), item.get("детские_сады"), item.get("детский_сад")),
+            "parks": _join_fact_values(item.get("parks"), item.get("park"), item.get("green_area"), item.get("forest"), item.get("embankment"), item.get("парки"), item.get("парк"), item.get("лес"), item.get("набережная")),
+            "clinics": _join_fact_values(item.get("clinics"), item.get("clinic"), item.get("polyclinic"), item.get("pharmacies"), item.get("поликлиника"), item.get("аптеки")),
+            "yards": _join_fact_values(item.get("yards"), item.get("yard_without_cars"), item.get("playgrounds"), item.get("двор"), item.get("площадки")),
+            "shops": _join_fact_values(item.get("shops"), item.get("services"), item.get("retail"), item.get("магазины"), item.get("сервисы")),
             "raw": item,
         }
         options.append(opt)
@@ -1508,111 +1604,24 @@ def _numeric_choice_policy_from_response(response_text: str, visible_options: li
 
 
 def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
-    """H016: быстрый resolver follow-up сообщений, которые ссылаются на прошлый список."""
-    t = text.lower().replace("ё", "е")
+    """Решает только вход в LLM-orchestrator или новый поиск.
+
+    По правилу проекта код не распознаёт семантику regex'ами. Телефон ловится
+    выше отдельным phone guard; всё остальное после памяти диалога отдаётся LLM.
+    """
     memory_options = state.get("last_options") or []
     visible_options = state.get("visible_options") or []
     options = visible_options or memory_options
     selected = state.get("selected_option")
-
-    if selected and _is_short_yes_to_contact_offer(text, state):
-        return {"intent": "operator_contact_accept", "option": selected}
-
-    if selected and _is_operator_phone_refusal(t):
-        return {"intent": "reject_operator", "option": selected}
-
-    pure_idx = _pure_option_choice_index(text)
-    if pure_idx and state.get("numeric_choice_policy") == "reject":
+    has_dialog_memory = bool(
+        options
+        or selected
+        or state.get("last_bot_question")
+        or state.get("last_answer_kind")
+        or state.get("last_search_response")
+    )
+    if has_dialog_memory:
         return {"intent": "followup_classifier"}
-    if pure_idx and options and 1 <= pure_idx <= len(options):
-        return {"intent": "select_option", "option": options[pure_idx - 1]}
-
-    mixed_option, action_text = _split_choice_and_action(text, options)
-    if mixed_option:
-        action_l = action_text.lower().replace("ё", "е")
-        if not action_text:
-            return {"intent": "select_option", "option": mixed_option}
-        if _is_operator_phone_refusal(action_l):
-            return {"intent": "reject_operator", "option": mixed_option}
-        if _looks_like_negation(action_l):
-            return {"intent": "followup_classifier", "option": mixed_option}
-        if _needs_operator_for_selected_option(action_l):
-            return {"intent": "operator_for_selected", "option": mixed_option}
-        if _shows_handoff_readiness_for_selected(action_l, {**state, "selected_option": mixed_option}):
-            return {"intent": "operator_for_selected", "option": mixed_option}
-        if _is_selected_option_explain_request(action_l):
-            return {"intent": "explain_selected_option", "option": mixed_option}
-        return {"intent": "followup_classifier", "option": mixed_option}
-
-    if selected and _looks_like_negation(t):
-        return {"intent": "followup_classifier", "option": selected}
-
-    if selected and options and re.search(r"(похож|сравн|друг|еще|ещё|альтернатив)", t):
-        selected_name = _compact_option_text(selected.get("name"))
-        other_options = [
-            option for option in options
-            if _compact_option_text(option.get("name")) != selected_name
-        ]
-        return {"intent": "compare_others", "options": other_options[:3]}
-
-    if selected and _needs_operator_for_selected_option(t):
-        return {"intent": "operator_for_selected", "option": selected}
-
-    if selected and _shows_handoff_readiness_for_selected(t, state):
-        return {"intent": "operator_for_selected", "option": selected}
-
-    if selected and _is_selected_option_explain_request(t):
-        return {"intent": "explain_selected_option", "option": selected}
-
-    # Короткие смысловые ответы после вопроса Ирины («да», «нет», «хочу»,
-    # «возможно», «наверное») нельзя понимать без контекста. Их отдаём
-    # follow-up classifier'у: он видит last_bot_question/last_offer_type и
-    # возвращает действие. Так бот не повторяет карточку на «да».
-    if selected and re.fullmatch(r"\s*[а-яa-z\s]{1,40}\s*", t):
-        return {"intent": "followup_classifier", "option": selected}
-
-    if not options:
-        return {"intent": "new_search"}
-
-    if re.search(r"(различ|сравн|отлич|чем\s+они|чем\s+вариант|разница)", t):
-        return {"intent": "compare_others", "options": options[:3]}
-
-    budget_limit = _budget_limit_from_text(t)
-    if budget_limit:
-        matched = [
-            option for option in options
-            if option.get("price_min") and int(option.get("price_min") or 0) <= budget_limit
-        ]
-        sorted_opts = sorted(matched or options, key=lambda o: o.get("price_min") or 10**18)
-        return {"intent": "sort_price_asc", "options": sorted_opts[:3], "budget_limit": budget_limit}
-
-    if "дешев" in t or "подеш" in t:
-        sorted_opts = sorted(options, key=lambda o: o.get("price_min") or 10**18)
-        if "ремонт" in t or "отдел" in t:
-            with_finish = [
-                o for o in sorted_opts
-                if "отдел" in str(o.get("finishing", "")).lower()
-                and "без отдел" not in str(o.get("finishing", "")).lower()
-            ]
-            sorted_opts = with_finish or sorted_opts
-        return {"intent": "sort_price_asc", "options": sorted_opts[:3]}
-
-    if "ремонт" in t or "отдел" in t:
-        with_finish = [
-            o for o in options
-            if "отдел" in str(o.get("finishing", "")).lower()
-            and "без отдел" not in str(o.get("finishing", "")).lower()
-        ]
-        if with_finish:
-            return {"intent": "filter_finish", "options": with_finish[:3]}
-
-    # Всё смешанное после списка — не «кнопка», а смысловая фраза.
-    # Например: «бюджет, у меня 15 млн», «1 но дорого», «второй если с отделкой».
-    # Такое отдаём LLM follow-up router'у, чтобы он выбрал update_search_params /
-    # choose_option / clarify по контексту последнего вопроса.
-    if options:
-        return {"intent": "followup_classifier"}
-
     return {"intent": "new_search"}
 
 
@@ -1645,6 +1654,36 @@ def _format_operator_handoff_for_option(option: dict[str, Any]) -> str:
         f"С этажами, бронью и конкретными квартирами по {name} лучше не гадать — это зависит от свободных вариантов прямо сейчас. "
         "Оператор посмотрит, что реально доступно, и подскажет, можно ли это забронировать.\n\n"
         "Хотите оставить номер для связи?"
+    )
+
+
+def _format_operator_handoff_for_context(state: dict[str, Any], user_text: str = "") -> str:
+    options = (state.get("visible_options") or state.get("last_options") or [])[:3]
+    names = [
+        _display_complex_name(option.get("name"))
+        for option in options
+        if isinstance(option, dict) and option.get("name")
+    ]
+    params = state.get("params") if isinstance(state.get("params"), dict) else {}
+    context_bits: list[str] = []
+    if names:
+        context_bits.append("варианты: " + ", ".join(names))
+    purpose = params.get("purpose") or params.get("scenario")
+    if purpose:
+        context_bits.append(f"сценарий: {purpose}")
+    if user_text:
+        context_bits.append(f"последний вопрос: {user_text}")
+
+    if context_bits:
+        context = "; ".join(context_bits)
+        return (
+            "Да, можно связаться с оператором. Передам ему текущий контекст подбора: "
+            f"{context}.\n\n"
+            "Напишите номер для связи — оператор посмотрит актуальные квартиры и вернётся уже с конкретикой."
+        )
+    return (
+        "Да, можно связаться с оператором. Напишите номер для связи — передам ваш запрос, "
+        "и оператор уточнит актуальные варианты и условия."
     )
 
 
@@ -1742,16 +1781,10 @@ def _non_text_fallback_response(message_type: str) -> str:
 def _build_known_option_prompt(option: dict[str, Any], client_request: str) -> str:
     """Контекст для LLM: раскрыть выбранный ЖК по уже известным данным, без нового поиска и выдумок."""
     safe_option = _safe_option_payload(option)
-    request_l = str(client_request or "").lower().replace("ё", "е")
-    client_intent = "live_data_request" if _needs_operator_for_selected_option(request_l) else "selected_option_detail"
-    if "investment" in request_l or "инвест" in request_l:
-        client_purpose = "investment"
-    elif any(marker in request_l for marker in ("self_use", "для жизни", "для себя", "жить", "переезд")):
-        client_purpose = "self_use"
-    elif any(marker in request_l for marker in ("family", "сем", "ребен", "ребён")):
-        client_purpose = "family"
-    else:
-        client_purpose = "unknown"
+    # Смысл запроса не выводим substring/regex'ами. Этот prompt только передаёт
+    # LLM безопасные факты; intent/purpose должны приходить из orchestrator/search state.
+    client_intent = "selected_option_detail"
+    client_purpose = "unknown"
     allowed_inferences = {
         "price": "можно говорить про понятный бюджет входа и ценовой ориентир",
         "finishing": "если есть отделка — меньше ремонта на старте; НЕ добавляй аренду, перепродажу или доходность, если таких фактов нет в SAFE_FACTS",
@@ -1880,6 +1913,8 @@ def _looks_missing(value: Any) -> bool:
     return (
         not text
         or text in {"нет", "не указан", "не указано", "информация отсутствует", "none", "null", "уточняется"}
+        or "не указан" in text
+        or "не указано" in text
         or "отсутств" in text
         or "уточн" in text
     )
@@ -2097,6 +2132,9 @@ def _client_ready_fact(value: Any) -> str:
         return "дом уже сдан"
     year = _extract_year(text)
     if year:
+        current_year = datetime.now(timezone.utc).year
+        if year <= current_year:
+            return "дом уже сдан"
         return f"сдача запланирована на {year} год"
     return f"срок: {text}"
 
@@ -2108,53 +2146,197 @@ def _client_finishing_fact(value: Any) -> str:
     low = text.lower().replace("ё", "е")
     if "без отдел" in low:
         return "без отделки"
-    if "отдел" in low:
+    if "отдел" in low or low in {"есть", "да", "true", "1"}:
         return "есть квартиры с отделкой"
     return text
 
 
+def _has_positive_finishing(value: Any) -> bool:
+    finishing = _client_finishing_fact(value)
+    return bool(finishing) and "без отдел" not in finishing.lower()
+
+
 def _client_price_fact(option: dict[str, Any]) -> str:
-    price = _format_price_value(option.get("price"), option.get("price_min")) if not _looks_missing(option.get("price")) else ""
+    raw_price = option.get("price_range") or option.get("price")
+    price = _format_price_value(raw_price, option.get("price_min")) if not _looks_missing(raw_price) else ""
     if not price and option.get("price_min"):
         price = _format_price_value("", option.get("price_min"))
     if not price:
         return ""
-    price = re.sub(r"(\d)\.(\d)", r"\1,\2", str(price)).replace(" - ", " до ")
+    raw = str(raw_price or "")
+    nums = re.findall(r"\d[\d\s]{5,}(?:[.,]\d+)?", raw)
+    if len(nums) >= 2 and "млн" not in raw.lower():
+        vals: list[float] = []
+        for n in nums[:2]:
+            try:
+                vals.append(float(n.replace(" ", "").replace(",", ".")) / 1_000_000)
+            except ValueError:
+                vals = []
+                break
+        if len(vals) == 2:
+            pretty = []
+            for value in vals:
+                item = f"{value:.2f}".replace(".", ",").rstrip("0").rstrip(",")
+                pretty.append(item)
+            return f"цены от {pretty[0]} до {pretty[1]} млн рублей"
+    price = re.sub(r"(\d)\.(\d)", r"\1,\2", str(price)).replace(" - ", " до ").replace(" – ", " до ")
+    if " до " in price and not price.lower().startswith("от "):
+        price = f"от {price}"
     return f"цены {price}" if str(price).startswith("от ") else f"цены {price}"
 
 
-def _stage_option_fact_parts(option: dict[str, Any]) -> list[str]:
-    parts: list[str] = []
+def _client_area_fact(value: Any) -> str:
+    if _looks_missing(value):
+        return ""
+    text = str(value).strip()
+    text = re.sub(r"(\d)\.(\d)", r"\1,\2", text)
+    text = text.replace(" - ", " до ").replace(" – ", " до ")
+    if re.search(r"\d\s*до\s*\d", text) and not text.lower().startswith("от "):
+        text = f"от {text}"
+    return f"площади {text}"
+
+
+def _join_fact_values(*values: Any) -> str:
+    chunks: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if _looks_missing(value):
+            continue
+        items = value if isinstance(value, list) else [value]
+        for item in items:
+            text = str(item).strip()
+            if not text:
+                continue
+            compact = _compact_option_text(text)
+            if compact and compact not in seen:
+                seen.add(compact)
+                chunks.append(text)
+    return "; ".join(chunks)
+
+
+def _infra_text(option: dict[str, Any]) -> str:
+    chunks: list[str] = []
+    for key in ("infrastructure", "schools", "kindergartens", "parks", "clinics", "yards", "shops"):
+        value = option.get(key)
+        if _looks_missing(value):
+            continue
+        if isinstance(value, list):
+            value = ", ".join(str(v).strip() for v in value if str(v).strip())
+        boolish = str(value).strip().lower().strip(" .,!;:")
+        if isinstance(value, bool) or boolish in {"1", "true", "да", "yes"}:
+            text = "двор без машин" if key == "yards" else ""
+        else:
+            text = str(value).strip()
+        if text:
+            chunks.append(text)
+    return "; ".join(chunks)
+
+
+def _has_fact_kind(option: dict[str, Any], kind: str) -> bool:
+    hay = " ".join(str(option.get(k) or "") for k in (
+        "infrastructure", "schools", "kindergartens", "parks", "clinics", "yards", "shops", "metro", "why_close"
+    )).lower().replace("ё", "е")
+    patterns = {
+        "park": r"парк|лес|зелен|набережн|водоем",
+        "school": r"школ",
+        "kindergarten": r"детск\w*\s+сад|садик|садов",
+        "clinic": r"поликлиник|клиник|аптек",
+        "yard": r"двор|площадк|без\s+машин",
+        "metro": r"\bметро\b|м\.\s*[а-яa-z]|мцд|бкл",
+    }
+    pattern = patterns.get(kind)
+    return bool(pattern and re.search(pattern, hay))
+
+
+def _stage_option_fact_parts(option: dict[str, Any], scenario: str = "self_use") -> list[str]:
+    base: dict[str, str] = {}
     if not _looks_missing(option.get("location")):
-        parts.append(_format_location_value(option.get("location")))
+        base["location"] = _format_location_value(option.get("location"))
     ready = _client_ready_fact(option.get("ready") or option.get("status") or option.get("delivered"))
     if ready:
-        parts.append(ready)
+        base["ready"] = ready
     finish = _client_finishing_fact(option.get("finishing"))
     if finish:
-        parts.append(finish)
-    if not _looks_missing(option.get("area")):
-        parts.append(f"площади {option['area']}")
+        base["finishing"] = finish
+    area = _client_area_fact(option.get("area"))
+    if area:
+        base["area"] = area
     price = _client_price_fact(option)
     if price:
-        parts.append(price)
+        base["price"] = price
     if not _looks_missing(option.get("metro")):
-        parts.append(f"метро: {option['metro']}")
+        base["metro"] = f"метро: {option['metro']}"
+
+    infra_parts = {
+        "schools": option.get("schools"),
+        "kindergartens": option.get("kindergartens"),
+        "parks": option.get("parks"),
+        "clinics": option.get("clinics"),
+        "yards": option.get("yards"),
+        "shops": option.get("shops"),
+        "infrastructure": option.get("infrastructure"),
+    }
+
+    def add_infra(parts: list[str], key: str) -> None:
+        value = infra_parts.get(key)
+        if _looks_missing(value):
+            return
+        text = _join_fact_values(value)
+        if text:
+            parts.append(text)
+
+    parts: list[str] = []
+    if scenario == "family":
+        for key in ("schools", "kindergartens", "parks", "clinics", "yards", "infrastructure"):
+            add_infra(parts, key)
+        for key in ("location", "price", "ready", "finishing", "area", "metro"):
+            if base.get(key):
+                parts.append(base[key])
+    elif scenario == "investment":
+        for key in ("price", "area", "ready", "finishing", "location", "metro"):
+            if base.get(key):
+                parts.append(base[key])
+    elif scenario == "fast_move":
+        for key in ("ready", "finishing", "price", "location", "area", "metro"):
+            if base.get(key):
+                parts.append(base[key])
+    else:
+        for key in ("location", "ready", "finishing", "area", "price", "metro"):
+            if base.get(key):
+                parts.append(base[key])
+        infra = _infra_text(option)
+        if infra:
+            parts.append(infra)
     return parts
 
 
 def _stage_option_benefit(option: dict[str, Any], scenario: str, used: set[str]) -> str:
     ready = _client_ready_fact(option.get("ready") or option.get("status") or option.get("delivered"))
-    finishing = _client_finishing_fact(option.get("finishing"))
-    area = "" if _looks_missing(option.get("area")) else str(option.get("area"))
+    finishing = _client_finishing_fact(option.get("finishing")) if _has_positive_finishing(option.get("finishing")) else ""
+    area = _client_area_fact(option.get("area")).replace("площади ", "", 1)
     price = _client_price_fact(option)
     metro = "" if _looks_missing(option.get("metro")) else str(option.get("metro"))
+    infra = _infra_text(option)
+    schools = _join_fact_values(option.get("schools"))
+    kindergartens = _join_fact_values(option.get("kindergartens"))
+    parks = _join_fact_values(option.get("parks"))
+    clinics = _join_fact_values(option.get("clinics"))
+    yards = _join_fact_values(option.get("yards"))
 
     candidates: list[tuple[str, str]] = []
     if scenario == "family":
+        edu = _join_fact_values(schools, kindergartens)
+        if edu:
+            candidates.append((f"edu_family:{_compact_option_text(edu)}", f"Для семьи это удобно: {edu} помогают закрыть ежедневную рутину рядом с домом."))
+        if parks:
+            candidates.append((f"park_family:{_compact_option_text(parks)}", f"Для прогулок с детьми рядом есть {parks}."))
+        if clinics:
+            candidates.append((f"clinic_family:{_compact_option_text(clinics)}", f"{clinics} рядом — полезный плюс, когда важно быстро решать бытовые вопросы семьи."))
+        if yards:
+            candidates.append((f"yard_family:{_compact_option_text(yards)}", f"{yards} добавляют удобства для прогулок и игр рядом с домом."))
         if ready == "дом уже сдан":
             candidates.append(("ready_family", "Готовый дом проще планировать для переезда семьи."))
-        if finishing and "отдел" in finishing:
+        if finishing:
             candidates.append(("finish_family", "С отделкой меньше ремонтных хлопот после покупки."))
         if area:
             candidates.append(("area_family", f"Диапазон площадей {area} помогает подобрать формат под семью."))
@@ -2163,7 +2345,7 @@ def _stage_option_benefit(option: dict[str, Any], scenario: str, used: set[str])
     elif scenario == "investment":
         if price:
             candidates.append(("price_invest", "По цене сразу понятно, с чем сравнивать этот вариант."))
-        if finishing and "отдел" in finishing:
+        if finishing:
             candidates.append(("finish_invest", "Отделка уменьшает объём работ и вложений после покупки."))
         if ready == "дом уже сдан":
             candidates.append(("ready_invest", "Готовый дом проще оценивать без долгого ожидания сдачи."))
@@ -2171,11 +2353,17 @@ def _stage_option_benefit(option: dict[str, Any], scenario: str, used: set[str])
         if metro:
             candidates.append(("metro", "Метро рядом — это удобно для ежедневных поездок."))
         if price:
-            candidates.append(("price_metro", "Цена помогает сразу сравнить варианты рядом с метро."))
+            candidates.append(("price_metro", "Цена помогает сразу сравнить варианты по бюджету и локации."))
     else:
+        if _has_fact_kind(option, "park"):
+            candidates.append(("park_self", "Зелёная зона рядом — приятный плюс для прогулок и повседневной жизни."))
+        if _has_fact_kind(option, "clinic") or _has_fact_kind(option, "school") or _has_fact_kind(option, "kindergarten"):
+            candidates.append(("infra_self", "Инфраструктура рядом помогает проще решать повседневные дела."))
+        if _has_fact_kind(option, "yard"):
+            candidates.append(("yard_self", "Дворовая инфраструктура добавляет удобства рядом с домом."))
         if ready == "дом уже сдан":
             candidates.append(("ready", "Готовый дом проще планировать для переезда."))
-        if finishing and "отдел" in finishing:
+        if finishing:
             candidates.append(("finish", "С отделкой меньше ремонтных хлопот после покупки."))
         if area:
             candidates.append(("area", f"По площади есть ориентир {area}, проще выбрать подходящий формат."))
@@ -2191,39 +2379,303 @@ def _stage_option_benefit(option: dict[str, Any], scenario: str, used: set[str])
     return candidates[0][1] if candidates else "Можно выбрать этот вариант и дальше проверить конкретные квартиры."
 
 
-def _stage_lead_for_first_list(scenario: str, count: int) -> str:
-    word = "три" if count >= 3 else "несколько"
+_SALES_PHRASE_BAD_RE = re.compile(
+    r"(?:лучш\w*|идеальн\w*|выгодн\w*|перспективн\w*|премиальн\w*|отличн\w*|"
+    r"хороший\s+вариант|сценари\w*|сдача/готовность|верхняя\s+точка|по\s+данным|в\s+базе|"
+    r"доходност\w*|аренд\w*|ликвидност\w*|рост\s+цен\w*|прибыл\w*|скидк\w*|ипотек\w*)",
+    re.IGNORECASE,
+)
+
+
+def _stage_sales_allowed_angles(option: dict[str, Any], scenario: str) -> list[str]:
+    ready = _client_ready_fact(option.get("ready") or option.get("status") or option.get("delivered"))
+    finishing = _client_finishing_fact(option.get("finishing")) if _has_positive_finishing(option.get("finishing")) else ""
+    area = _client_area_fact(option.get("area")).replace("площади ", "", 1)
+    price = _client_price_fact(option)
+    metro = "" if _looks_missing(option.get("metro")) else str(option.get("metro"))
+    angles: list[str] = []
     if scenario == "family":
-        return f"Подобрала {word} варианта для семьи."
+        infra_angles: list[str] = []
+        if _has_fact_kind(option, "park"):
+            infra_angles.append("рядом есть место для прогулок с детьми на свежем воздухе")
+        if _has_fact_kind(option, "school") or _has_fact_kind(option, "kindergarten"):
+            infra_angles.append("школы и детские сады рядом упрощают семейную рутину")
+        if _has_fact_kind(option, "clinic"):
+            infra_angles.append("поликлиника или аптеки рядом помогают быстрее решать бытовые вопросы")
+        if _has_fact_kind(option, "yard"):
+            infra_angles.append("дворовая инфраструктура делает прогулки рядом с домом удобнее")
+        if infra_angles:
+            return infra_angles[:4]
+        if ready == "дом уже сдан":
+            angles.append("готовый дом проще планировать для переезда семьи")
+        if finishing:
+            angles.append("отделка уменьшает ремонтные хлопоты после покупки")
+        if area:
+            angles.append("диапазон площадей помогает подобрать формат под семью")
+        if price:
+            angles.append("цена даёт понятный ориентир для семейного бюджета")
+    elif scenario == "investment":
+        if price:
+            angles.append("цена даёт понятную точку входа для сравнения")
+        if finishing:
+            angles.append("отделка уменьшает объём работ после покупки")
+        if ready == "дом уже сдан":
+            angles.append("готовый дом проще оценивать без ожидания сдачи")
+        angles.append("не обещать доходность, аренду или рост цены")
+    elif scenario == "metro_access":
+        if metro:
+            angles.append("ежедневные поездки проще, когда метро рядом")
+        if price:
+            if metro:
+                angles.append("цена помогает сравнить варианты рядом с метро")
+            else:
+                angles.append("цена помогает сравнить варианты по бюджету и локации")
+        if ready:
+            angles.append("срок можно учитывать при выборе")
+    elif scenario == "budget":
+        if price:
+            angles.append("цена помогает понять, попадает ли вариант в бюджет")
+        if finishing:
+            angles.append("отделка снижает стартовые ремонтные хлопоты")
+        if area:
+            angles.append("площадь помогает оценить, подходит ли формат")
+    else:
+        infra_angles: list[str] = []
+        if _has_fact_kind(option, "park"):
+            infra_angles.append("рядом есть место для прогулок и повседневного отдыха")
+        if _has_fact_kind(option, "clinic") or _has_fact_kind(option, "school") or _has_fact_kind(option, "kindergarten"):
+            infra_angles.append("инфраструктура рядом помогает в повседневных делах")
+        if _has_fact_kind(option, "yard"):
+            infra_angles.append("дворовая инфраструктура добавляет удобства рядом с домом")
+        angles.extend(infra_angles[:2])
+        if ready == "дом уже сдан":
+            angles.append("готовый дом проще планировать для переезда")
+        if finishing:
+            angles.append("отделка уменьшает ремонтные хлопоты")
+        if area:
+            angles.append("площадь помогает выбрать подходящий формат")
+        if price:
+            angles.append("цена даёт понятный ориентир для сравнения")
+        if metro:
+            angles.append("метро рядом удобно для ежедневных поездок")
+    return angles[:4] or ["коротко объяснить пользу только из перечисленных фактов"]
+
+
+def _build_sales_phrase_payload(options: list[dict[str, Any]], scenario: str) -> dict[str, Any]:
+    return {
+        "task": "Write one short human benefit for each item. Code will assemble the final answer.",
+        "scenario": scenario,
+        "items": [
+            {
+                "idx": idx,
+                "object": option.get("name") or f"вариант {idx}",
+                "facts": _stage_option_fact_parts(option, scenario),
+                "allowed_angles": _stage_sales_allowed_angles(option, scenario),
+            }
+            for idx, option in enumerate(options[:3], start=1)
+        ],
+    }
+
+
+def _sales_phrase_claims_allowed(benefit: str, option: dict[str, Any]) -> bool:
+    low = benefit.lower().replace("ё", "е")
+    checks = [
+        (r"парк|лес|зелен|набережн|водоем", "park"),
+        (r"школ", "school"),
+        (r"детск\w*\s+сад|садик|садов", "kindergarten"),
+        (r"поликлиник|клиник|аптек", "clinic"),
+        (r"двор|площадк|без\s+машин", "yard"),
+        (r"\bметро\b|м\.\s*[а-яa-z]|мцд|бкл", "metro"),
+    ]
+    for pattern, kind in checks:
+        if re.search(pattern, low) and not _has_fact_kind(option, kind):
+            return False
+    return True
+
+
+def _validate_sales_phrase_items(data: dict[str, Any], options_count: int, options: list[dict[str, Any]] | None = None) -> dict[int, str]:
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list) or len(items) != options_count:
+        return {}
+    out: dict[int, str] = {}
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            return {}
+        try:
+            idx = int(item.get("idx"))
+        except (TypeError, ValueError):
+            return {}
+        benefit = str(item.get("benefit") or "").strip()
+        compact = _compact_option_text(benefit)
+        if idx < 1 or idx > options_count or not benefit:
+            return {}
+        if len(benefit) > 180 or "?" in benefit or "*" in benefit or "•" in benefit:
+            return {}
+        if _SALES_PHRASE_BAD_RE.search(benefit):
+            return {}
+        if options and idx <= len(options) and not _sales_phrase_claims_allowed(benefit, options[idx - 1]):
+            return {}
+        if compact in seen:
+            return {}
+        seen.add(compact)
+        out[idx] = _ensure_sentence_period(benefit)
+    return out if len(out) == options_count else {}
+
+
+def _stage_lead_for_first_list(scenario: str, count: int, options: list[dict[str, Any]] | None = None) -> str:
+    word = "три варианта" if count >= 3 else "несколько вариантов"
+    if scenario == "family":
+        return f"Подобрала {word} для семьи."
     if scenario == "investment":
-        return f"Подобрала {word} варианта под инвестицию."
+        return f"Подобрала {word} под инвестицию."
     if scenario == "metro_access":
-        return f"Нашла {word} варианта рядом с метро."
+        metro_count = sum(1 for option in (options or [])[:3] if not _looks_missing(option.get("metro")))
+        if metro_count >= min(2, count):
+            return f"Нашла {word} рядом с метро."
+        return f"Нашла {word}, которые можно сравнить по цене и локации."
     if scenario == "budget":
-        return f"Нашла {word} варианта по бюджету."
-    return f"Нашла {word} понятных варианта."
+        return f"Нашла {word} по бюджету."
+    return f"Нашла {word} для сравнения."
 
 
-def _render_stage_first_list(options: list[dict[str, Any]], scenario: str) -> str:
+async def _sales_phrases_for_stage(
+    client: OvermindClient,
+    options: list[dict[str, Any]],
+    scenario: str,
+) -> tuple[dict[int, str], dict[str, Any]]:
+    if not SALES_PHRASE_ENABLED or not options:
+        return {}, {"enabled": SALES_PHRASE_ENABLED, "applied": False}
+    payload = _build_sales_phrase_payload(options, scenario)
+    try:
+        data, meta = await client.sales_phrases(payload)
+        benefits = _validate_sales_phrase_items(data, min(len(options), 3), options[:3])
+        if benefits:
+            return benefits, {
+                "enabled": True,
+                "applied": True,
+                "model": meta.get("model") or SALES_PHRASE_MODEL,
+                "meta": meta,
+            }
+        LOGGER.warning("sales_phrase invalid output: %s", _safe_json_preview({"data": data, "meta": meta}))
+        return {}, {"enabled": True, "applied": False, "skipped": "invalid_model_output", "meta": meta}
+    except Exception:
+        LOGGER.exception("sales_phrase failed")
+        return {}, {"enabled": True, "applied": False, "skipped": "exception"}
+
+
+def _render_stage_first_list(options: list[dict[str, Any]], scenario: str, sales_benefits: dict[int, str] | None = None) -> str:
     visible = options[:3]
     used: set[str] = set()
-    blocks = [_stage_lead_for_first_list(scenario, len(visible))]
+    sales_benefits = sales_benefits or {}
+    blocks = [_stage_lead_for_first_list(scenario, len(visible), visible)]
     for idx, option in enumerate(visible, start=1):
-        facts = ", ".join(_stage_option_fact_parts(option)[:5])
-        benefit = _stage_option_benefit(option, scenario, used)
+        facts = ", ".join(_stage_option_fact_parts(option, scenario)[:5])
+        benefit = sales_benefits.get(idx) or _stage_option_benefit(option, scenario, used)
         name = option.get("name") or f"вариант {idx}"
         line = f"{idx}. {name}"
         if facts:
             line += f" — {facts}"
-        blocks.append(f"{_ensure_sentence_period(line)}\n   {benefit}")
+        # Комментарий к ЖК должен быть отдельным абзацем, а не «прилипшей» строкой
+        # под пунктом списка. Так Telegram-ответ читается как карточка: факт → польза.
+        blocks.append(f"{_ensure_sentence_period(line)}\n\n{benefit}")
     blocks.append("Какой ЖК хотите рассмотреть подробнее?")
     return _format_numbered_list_spacing("\n\n".join(blocks))
 
 
-def _render_stage_selected_object(option: dict[str, Any], scenario: str = "self_use") -> str:
+def _recommendation_score(option: dict[str, Any], scenario: str) -> int:
+    score = 0
+    if scenario == "family":
+        weights = {
+            "schools": 4,
+            "kindergartens": 4,
+            "parks": 3,
+            "clinics": 2,
+            "yards": 2,
+            "infrastructure": 1,
+        }
+        for key, weight in weights.items():
+            if not _looks_missing(option.get(key)):
+                score += weight
+        if _client_ready_fact(option.get("ready") or option.get("status") or option.get("delivered")) == "дом уже сдан":
+            score += 1
+        return score
+    if scenario == "fast_move":
+        if _client_ready_fact(option.get("ready") or option.get("status") or option.get("delivered")) == "дом уже сдан":
+            score += 5
+        if _has_positive_finishing(option.get("finishing")):
+            score += 3
+        if _client_price_fact(option):
+            score += 1
+        return score
+    if scenario == "investment":
+        if _client_price_fact(option):
+            score += 4
+        if _client_area_fact(option.get("area")):
+            score += 2
+        if _has_positive_finishing(option.get("finishing")):
+            score += 1
+        if not _looks_missing(option.get("metro")):
+            score += 1
+        return score
+    return len(_stage_option_fact_parts(option, scenario))
+
+
+def _render_stage_recommendation(options: list[dict[str, Any]], scenario: str) -> str:
+    visible = [option for option in options[:3] if isinstance(option, dict)]
+    if not visible:
+        return "Могу подсказать, но мне нужен текущий список вариантов. Хотите, сначала подберу 2–3 ЖК под ваши условия?"
+
+    ranked = sorted(enumerate(visible), key=lambda item: (_recommendation_score(item[1], scenario), -item[0]), reverse=True)
+    best_idx, best = ranked[0]
+    name = best.get("name") or f"вариант {best_idx + 1}"
+    benefit = _stage_option_benefit(best, scenario, set())
+    facts = _stage_option_fact_parts(best, scenario)[:4]
+    fact_text = ", ".join(facts)
+    blocks = [f"Если выбирать из этих вариантов, я бы сначала смотрела {name}."]
+    if fact_text:
+        blocks.append(f"Почему: {fact_text}.")
+    blocks.append(benefit)
+
+    if len(ranked) > 1:
+        second = ranked[1][1]
+        second_name = second.get("name") or "второй вариант"
+        second_facts = _stage_option_fact_parts(second, scenario)[:2]
+        if second_facts:
+            blocks.append(f"Вторым я бы держала {second_name}: там тоже есть {', '.join(second_facts)}.")
+        else:
+            blocks.append(f"Вторым я бы держала {second_name}, если первый не подойдёт по квартире или бюджету.")
+
+    blocks.append(f"Хотите, разберу {name} подробнее?")
+    return _format_numbered_list_spacing("\n\n".join(_ensure_sentence_period(block) if not block.endswith("?") else block for block in blocks))
+
+
+def _render_stage_selected_object(option: dict[str, Any], scenario: str = "self_use", sales_benefit: str | None = None) -> str:
     name = option.get("name") or "этот ЖК"
-    facts = _stage_option_fact_parts(option)
-    main_facts = ", ".join(facts[:5])
+    main_parts: list[str] = []
+    if not _looks_missing(option.get("developer")):
+        main_parts.append(f"проект {option.get('developer')}")
+    if not _looks_missing(option.get("location")):
+        main_parts.append(_format_location_value(option.get("location")))
+    if not _looks_missing(option.get("metro")):
+        main_parts.append(f"метро: {option.get('metro')}")
+    elif not _looks_missing(option.get("transport")):
+        main_parts.append(f"транспорт: {option.get('transport')}")
+    if not _looks_missing(option.get("rooms")):
+        main_parts.append(f"типы квартир: {option.get('rooms')}")
+    area_fact = _client_area_fact(option.get("area"))
+    if area_fact:
+        main_parts.append(area_fact)
+    price_fact = _client_price_fact(option)
+    if price_fact:
+        main_parts.append(price_fact)
+    finish_fact = _client_finishing_fact(option.get("finishing"))
+    if finish_fact:
+        main_parts.append(finish_fact)
+    ready_fact = _client_ready_fact(option.get("ready") or option.get("status") or option.get("delivered"))
+    if ready_fact:
+        main_parts.append(ready_fact)
+    main_facts = ", ".join(main_parts[:8])
     ready = _client_ready_fact(option.get("ready") or option.get("status") or option.get("delivered"))
     finishing = _client_finishing_fact(option.get("finishing"))
     area = "" if _looks_missing(option.get("area")) else str(option.get("area"))
@@ -2232,14 +2684,56 @@ def _render_stage_selected_object(option: dict[str, Any], scenario: str = "self_
     if main_facts:
         intro += f" — {main_facts}"
     intro = _ensure_sentence_period(intro)
-    if scenario == "family" and ready == "дом уже сдан" and finishing:
+    if sales_benefit:
+        benefit = sales_benefit.strip()
+    elif scenario == "family" and ready == "дом уже сдан" and finishing:
         benefit = "Для семьи это удобно: готовый дом проще планировать для переезда, а отделка уменьшает ремонтные хлопоты."
     elif scenario == "family" and area:
         benefit = f"Для семьи это удобно: по площади есть ориентир {area}, проще выбрать подходящий формат."
     else:
         benefit = _stage_option_benefit(option, scenario, used)
+    infra_parts: list[str] = []
+    full_infra = _infra_text(option)
+    if full_infra:
+        infra_parts.append(full_infra)
+    else:
+        if _has_fact_kind(option, "school") or _has_fact_kind(option, "kindergarten"):
+            schools = []
+            if not _looks_missing(option.get("schools")):
+                schools.append(str(option.get("schools")).strip())
+            if not _looks_missing(option.get("kindergartens")):
+                schools.append(str(option.get("kindergartens")).strip())
+            infra_parts.append("; ".join(schools) if schools else "есть школы и детские сады")
+        if _has_fact_kind(option, "yard"):
+            infra_parts.append(str(option.get("yards") or "игровые и спортивные площадки / дворовая инфраструктура").strip())
+        if _has_fact_kind(option, "clinic"):
+            infra_parts.append("поликлиники, аптеки или сервисы рядом")
+        if _has_fact_kind(option, "park"):
+            infra_parts.append(str(option.get("parks") or "есть зелёные зоны для прогулок").strip())
+    infra_paragraph = ""
+    if infra_parts:
+        infra_text = "; ".join(dict.fromkeys(infra_parts[:3]))
+        infra_text = re.sub(r"\s*;\s*", ". ", infra_text)
+        infra_text = re.sub(r"\.{2,}", ".", infra_text).strip(" .")
+        infra_paragraph = "Для семьи и повседневной жизни здесь важна инфраструктура: " + infra_text + "."
     question = f"Хотите, позвать оператора проверить актуальные квартиры по {name}?"
-    return "\n\n".join([intro, benefit.strip(), question])
+    parts = [intro, benefit.strip()]
+    if infra_paragraph and infra_paragraph not in parts:
+        parts.append(infra_paragraph)
+    parts.append(question)
+    return "\n\n".join(parts)
+
+
+def _render_stage_clarification(scenario: str) -> str:
+    if scenario == "metro_access":
+        return "Поняла, будем искать с удобным метро. Уточните, пожалуйста, район или бюджет — от этого зависит нормальная подборка."
+    if scenario == "budget":
+        return "Поняла по бюджету. Уточните, пожалуйста, район или комнатность — так я смогу подобрать варианты точнее."
+    if scenario == "family":
+        return "Поняла, ищем вариант для семьи. Уточните, пожалуйста, район или бюджет — тогда подберу более точные ЖК."
+    if scenario == "investment":
+        return "Поняла, смотрим под инвестицию. Уточните, пожалуйста, бюджет или район — так подборка будет точнее."
+    return "Поняла задачу. Уточните, пожалуйста, район или бюджет — и я подберу более точные варианты."
 
 
 _REASON_LAYER_FORBIDDEN_RE = re.compile(
@@ -2923,6 +3417,179 @@ def _refresh_search_state(state: dict, search_meta: dict) -> None:
     }
 
 
+def _option_enrichment_key(option: dict[str, Any], scenario: str) -> str:
+    name = _compact_name_key(option.get("name"))
+    link = _compact_name_key(option.get("link"))
+    base = link or name
+    return f"{base}::{scenario or 'self_use'}" if base else ""
+
+
+def _build_option_enrichment_query(option: dict[str, Any], scenario: str) -> str:
+    name = _display_complex_name(option.get("name") or "")
+    location = _format_location_value(option.get("location")) if not _looks_missing(option.get("location")) else ""
+    scenario_label = {
+        "family": "семья с детьми",
+        "investment": "инвестиционный выбор без обещаний доходности",
+        "metro_access": "важна транспортная доступность и метро",
+        "budget": "важен бюджет и честные компромиссы",
+        "fast_move": "важно быстрее переехать",
+    }.get(scenario, "покупка для себя")
+    common_fields = [
+        "район / локация",
+        "цены и минимальная цена",
+        "площади",
+        "типы квартир / комнатность",
+        "отделка",
+        "готовность / сдан ли дом",
+        "метро, расстояние до метро и транспорт",
+        "застройщик",
+    ]
+    scenario_fields = {
+        "family": [
+            "школы",
+            "детские сады",
+            "парки, лес, зелёные зоны, набережные",
+            "поликлиники и аптеки",
+            "дворы без машин",
+            "игровые и спортивные площадки",
+            "магазины и сервисы на первых этажах",
+        ],
+        "investment": [
+            "транспортная доступность",
+            "готовность",
+            "отделка",
+            "ценовой диапазон без прогнозов доходности",
+        ],
+        "metro_access": ["метро", "пешая доступность", "транспорт", "цены рядом с метро"],
+        "budget": ["бюджетные ограничения", "почему вариант близок", "честные отличия и компромиссы"],
+        "fast_move": ["готовые корпуса", "выдача ключей", "отделка", "что помогает быстрее переехать"],
+    }.get(scenario, ["инфраструктура", "магазины", "сервисы", "парки", "клиники"])
+    fields = common_fields + scenario_fields
+    loc_line = f"\nЛокация из текущей карточки: {location}." if location else ""
+    return (
+        f"Раскрой подробно {name} для сценария: {scenario_label}.{loc_line}\n\n"
+        "Нужны только реальные MCP-факты по полям:\n"
+        + "\n".join(f"- {field};" for field in fields)
+        + "\n\nВерни JSON facts/near/missing/params. "
+        "Не выдумывай. Если поля нет — не добавляй. "
+        "Для facts[0] скопируй все доступные поля MCP, включая infrastructure/infrastructure_family."
+    )
+
+
+def _merge_option_cards(base: dict[str, Any], enriched: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base or {})
+    for key, value in (enriched or {}).items():
+        if key == "raw":
+            continue
+        if _looks_missing(value):
+            continue
+        if key in {"price", "price_range"}:
+            base_price = str(merged.get("price") or "")
+            if key == "price_range" and merged.get("price_range"):
+                base_price = str(merged.get("price_range") or base_price)
+            new_price = str(value or "")
+            base_has_range = bool(re.search(r"\bдо\b|[-–]", base_price.lower()))
+            new_has_range = bool(re.search(r"\bдо\b|[-–]", new_price.lower()))
+            if base_has_range and not new_has_range:
+                continue
+        merged[key] = value
+    raw = dict((base or {}).get("raw") or {})
+    raw.update(dict((enriched or {}).get("raw") or {}))
+    if raw:
+        merged["raw"] = raw
+    return merged
+
+
+def _best_enriched_option(parsed: dict[str, Any], base_option: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(parsed, dict):
+        return None
+    raw = json.dumps(parsed, ensure_ascii=False)
+    options = _extract_options(raw)
+    if not options:
+        return None
+    base_key = _compact_name_key(base_option.get("name"))
+    for option in options:
+        if base_key and base_key in _compact_name_key(option.get("name")):
+            return option
+    return options[0]
+
+
+async def _enrich_option(
+    client: OvermindClient,
+    option: dict[str, Any],
+    scenario: str,
+    *,
+    timeout: int = OPTION_ENRICHMENT_TIMEOUT,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    if not OPTION_ENRICHMENT_ENABLED or not isinstance(option, dict) or not option.get("name"):
+        return None, {"enabled": OPTION_ENRICHMENT_ENABLED, "applied": False}
+    query = _build_option_enrichment_query(option, scenario)
+    try:
+        parsed, meta = await client.enrich_option_search(query, timeout=timeout)
+        enriched = _best_enriched_option(parsed, option)
+        if not enriched:
+            return None, {"enabled": True, "applied": False, "skipped": "no_enriched_option", "meta": meta}
+        return _merge_option_cards(option, enriched), {"enabled": True, "applied": True, "meta": meta}
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        LOGGER.exception("option enrichment failed")
+        return None, {"enabled": True, "applied": False, "skipped": "exception"}
+
+
+async def _prefetch_options_enrichment(
+    client: OvermindClient,
+    state: dict[str, Any],
+    options: list[dict[str, Any]],
+    scenario: str,
+) -> None:
+    if not OPTION_ENRICHMENT_ENABLED or not options:
+        return
+    cache = state.setdefault("enriched_options", {})
+    tasks: list[tuple[str, dict[str, Any], asyncio.Task]] = []
+    for option in options[:3]:
+        key = _option_enrichment_key(option, scenario)
+        if not key or key in cache:
+            continue
+        task = asyncio.create_task(_enrich_option(client, option, scenario))
+        tasks.append((key, option, task))
+    for key, _option, task in tasks:
+        try:
+            enriched, meta = await task
+            if enriched:
+                cache[key] = {"option": enriched, "meta": meta, "ts": datetime.now(timezone.utc).isoformat()}
+                LOGGER.info("option enrichment cached: key=%s name=%s", key, enriched.get("name"))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception("option enrichment prefetch failed: key=%s", key)
+
+
+async def _get_or_fetch_enriched_option(
+    client: OvermindClient,
+    state: dict[str, Any],
+    option: dict[str, Any],
+    scenario: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    key = _option_enrichment_key(option, scenario)
+    cache = state.setdefault("enriched_options", {})
+    cached = cache.get(key) if key else None
+    if isinstance(cached, dict) and isinstance(cached.get("option"), dict):
+        return cached["option"], {"enabled": True, "applied": True, "source": "cache", "key": key, "meta": cached.get("meta") or {}}
+    try:
+        enriched, meta = await asyncio.wait_for(
+            _enrich_option(client, option, scenario, timeout=OPTION_ENRICHMENT_TIMEOUT),
+            timeout=max(0.5, OPTION_ENRICHMENT_SELECT_WAIT),
+        )
+        if enriched:
+            if key:
+                cache[key] = {"option": enriched, "meta": meta, "ts": datetime.now(timezone.utc).isoformat()}
+            return enriched, {**meta, "source": "sync_short_wait", "key": key}
+        return option, {**meta, "source": "fallback_short_card", "key": key}
+    except asyncio.TimeoutError:
+        return option, {"enabled": True, "applied": False, "skipped": "select_wait_timeout", "source": "fallback_short_card", "key": key}
+
+
 # ── Experiment Loop logging ─────────────────────────────────
 
 
@@ -3008,6 +3675,107 @@ def _append_dialog_markdown(event: dict[str, Any]) -> None:
             f.write("\n".join(lines) + "\n")
     except Exception as e:  # pragma: no cover - best effort companion log
         LOGGER.warning("Failed to write dialog markdown log: %s", e)
+
+
+def _dialog_log_dates(days: int = 3) -> list[str]:
+    today = datetime.now(timezone.utc).date()
+    return [(today - timedelta(days=i)).isoformat() for i in range(max(1, days))]
+
+
+def _load_user_dialog_history(uid: int, *, limit: int = 5, days: int = 3) -> list[dict[str, Any]]:
+    """Read recent user_message events for one Telegram user from dialogs-jsonl logs."""
+    events: list[dict[str, Any]] = []
+    for date_stamp in _dialog_log_dates(days):
+        path = LOGS_DIR / f"dialogs-{date_stamp}.jsonl"
+        if not path.exists():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except Exception as e:  # pragma: no cover - history must be best effort
+            LOGGER.warning("Failed to read dialog history %s: %s", path, e)
+            continue
+        for raw in reversed(lines):
+            if len(events) >= limit:
+                break
+            try:
+                event = json.loads(raw)
+            except Exception:
+                continue
+            if event.get("kind") != "user_message":
+                continue
+            try:
+                event_uid = int(event.get("uid") or 0)
+            except Exception:
+                event_uid = 0
+            if event_uid != uid:
+                continue
+            events.append(event)
+        if len(events) >= limit:
+            break
+    return list(reversed(events))
+
+
+def _history_search_preview(event: dict[str, Any], limit: int = 900) -> str:
+    trace = event.get("trace") if isinstance(event.get("trace"), dict) else {}
+    internal = trace.get("internal") if isinstance(trace.get("internal"), dict) else {}
+    raw = event.get("search_response") or internal.get("search_response") or ""
+    return _compact_trace_value(raw, limit)
+
+
+def _format_history_event(event: dict[str, Any], idx: int) -> str:
+    trace = event.get("trace") if isinstance(event.get("trace"), dict) else {}
+    internal = trace.get("internal") if isinstance(trace.get("internal"), dict) else {}
+    output = trace.get("output") if isinstance(trace.get("output"), dict) else {}
+    input_trace = trace.get("input") if isinstance(trace.get("input"), dict) else {}
+    user_text = str(event.get("user_text") or input_trace.get("user_text") or "").strip()
+    response_text = str(event.get("response_text") or output.get("response_text") or "").strip()
+    dialog_plan = event.get("dialog_plan") or internal.get("dialog_plan") or ""
+    search_preview = _history_search_preview(event)
+    cost = event.get("cost") or output.get("cost") or {}
+    buttons = event.get("buttons") or output.get("buttons") or []
+    parts = [
+        f"#{idx} · {event.get('ts', '-')}",
+        f"Вы: {_compact_trace_value(user_text, 500)}",
+        f"Бот: {_compact_trace_value(response_text, 900)}",
+        f"intent: {_compact_trace_value(event.get('dialog_intent') or internal.get('dialog_intent') or '-', 500)}",
+    ]
+    if dialog_plan:
+        parts.append(f"plan: {_compact_trace_value(dialog_plan, 700)}")
+    if search_preview:
+        parts.append("MCP/search_response:")
+        parts.append(_compact_trace_value(search_preview, 900))
+    if buttons:
+        parts.append(f"buttons: {_compact_trace_value(buttons, 400)}")
+    if cost:
+        parts.append(f"cost: {_compact_trace_value(cost, 300)}")
+    return "\n".join(parts)
+
+
+def _format_history_response(uid: int, *, limit: int = 5) -> str:
+    events = _load_user_dialog_history(uid, limit=limit)
+    if not events:
+        return (
+            "Истории пока нет. Напишите обычный запрос боту, и после ответа здесь появятся "
+            "последние сообщения, ответ Ирины и MCP/search trace."
+        )
+    blocks = [_format_history_event(event, i) for i, event in enumerate(events, start=1)]
+    return "🧾 История последних ответов бота\n\n" + "\n\n---\n\n".join(blocks)
+
+
+def _telegram_chunks(text: str, limit: int = 3800) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    rest = text
+    while len(rest) > limit:
+        cut = rest.rfind("\n\n---\n\n", 0, limit)
+        if cut < 500:
+            cut = limit
+        chunks.append(rest[:cut].strip())
+        rest = rest[cut:].lstrip()
+    if rest.strip():
+        chunks.append(rest.strip())
+    return chunks
 
 
 def _log_event(event: dict[str, Any]) -> None:
@@ -3111,6 +3879,8 @@ def main() -> None:
             f"Команды:\n"
             f"• /model — сменить модель\n"
             f"• /mcp — вкл/выкл MCP\n"
+            f"• /history — последние ответы и MCP/search trace\n"
+            f"• /hisotry — то же самое, алиас с опечаткой\n"
             f"• /reset — сбросить настройки\n"
             f"• /status — текущие настройки",
             parse_mode="HTML",
@@ -3172,6 +3942,20 @@ def main() -> None:
         await update.message.reply_text(
             f"✅ Настройки сброшены. Поиск: {SEARCH_MODEL}, общение: {CHAT_MODEL}, MCP: включён"
         )
+
+    async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        uid = update.effective_user.id if update.effective_user else 0
+        command_text = (update.message.text.split()[0] if update.message and update.message.text else "/history")
+        limit = 5
+        if context.args:
+            try:
+                limit = max(1, min(10, int(context.args[0])))
+            except Exception:
+                limit = 5
+        _log_event({"kind": "command", "uid": uid, "command": command_text, "limit": limit})
+        history_text = _format_history_response(uid, limit=limit)
+        for chunk in _telegram_chunks(history_text):
+            await update.message.reply_text(_to_html(chunk), parse_mode="HTML")
 
     async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -3440,8 +4224,34 @@ def main() -> None:
             if dialog_plan.get("clarification_question") and not followup_meta.get("clarification_question"):
                 followup_meta["clarification_question"] = dialog_plan.get("clarification_question")
             followup_intent = followup_meta.get("intent")
-            if followup_meta.get("fallback_used"):
-                followup_intent = _local_followup_intent(text, state) or followup_intent
+            dialog_action = str(dialog_plan.get("dialog_action") or "")
+            visible_policy = str(dialog_plan.get("visible_options_policy") or "")
+            planner_confidence = float(dialog_plan.get("confidence") or 0.0)
+            planner_ready = bool(dialog_action and not dialog_plan.get("fallback_used") and planner_confidence >= 0.7)
+            if planner_ready:
+                followup_meta["orchestrator_action"] = dialog_action
+                if dialog_plan.get("selected_option_name"):
+                    followup_meta["target"] = str(dialog_plan.get("selected_option_name") or "")
+                if dialog_action == "select_option":
+                    followup_intent = "choose_option"
+                elif dialog_action == "expand_more_options" or (dialog_action == "update_search" and visible_policy == "rebuild" and (state.get("visible_options") or state.get("last_options"))):
+                    followup_intent = "expand_more_options"
+                elif dialog_action == "compare_options":
+                    followup_intent = "compare_options"
+                elif dialog_action == "recommend_options":
+                    followup_intent = "recommend_options"
+                elif dialog_action == "update_search":
+                    followup_intent = "update_search_params"
+                    followup_meta["params_delta"] = dialog_plan.get("params_delta") if isinstance(dialog_plan.get("params_delta"), dict) else {}
+                elif dialog_action == "new_search":
+                    followup_intent = "new_search"
+                elif dialog_action == "continue_from_memory":
+                    followup_intent = "continue_selection"
+                elif dialog_action == "operator_live_check":
+                    followup_intent = "operator_for_selected"
+                elif dialog_action in {"reject_offer", "reject_operator", "reject_phone", "reject_selected_option", "reject_similar_options", "clarify_negation"}:
+                    followup_intent = dialog_action
+                followup_meta["intent"] = followup_intent
             selected = state.get("selected_option")
             if dialog_plan.get("dialog_action") == "ask_clarification" and dialog_plan.get("clarification_question"):
                 response = _prepare_response_text(str(dialog_plan.get("clarification_question") or ""))
@@ -3457,7 +4267,7 @@ def main() -> None:
                 })
                 await update.message.reply_text(_to_html(response), parse_mode="HTML")
                 return
-            if followup_intent == "compare_selected" and selected:
+            if followup_intent in {"compare_selected", "compare_options"} and selected:
                 selected_name = _compact_option_text(selected.get("name"))
                 options = state.get("visible_options") or state.get("last_options") or []
                 dialog_intent = {
@@ -3467,8 +4277,14 @@ def main() -> None:
                         if _compact_option_text(option.get("name")) != selected_name
                     ][:3],
                 }
+            elif followup_intent == "compare_options":
+                dialog_intent = {"intent": "compare_others", "options": (state.get("visible_options") or state.get("last_options") or [])[:3]}
+            elif followup_intent == "recommend_options":
+                dialog_intent = {"intent": "recommend_options", "options": (state.get("visible_options") or state.get("last_options") or [])[:3]}
             elif followup_intent == "operator_for_selected" and selected:
                 dialog_intent = {"intent": "operator_for_selected", "option": selected}
+            elif followup_intent == "operator_for_selected":
+                dialog_intent = {"intent": "operator_for_context", "options": (state.get("visible_options") or state.get("last_options") or [])[:3]}
             elif followup_intent == "operator_contact_accept" and selected:
                 dialog_intent = {"intent": "operator_contact_accept", "option": selected}
             elif followup_intent in {"reject_operator", "reject_phone"}:
@@ -3479,30 +4295,18 @@ def main() -> None:
                 dialog_intent = {"intent": "reject_similar_options", "option": selected}
             elif followup_intent == "clarify_negation":
                 dialog_intent = {"intent": "clarify_negation", "meta": followup_meta, "option": selected}
-            elif followup_intent == "reject_offer" and _looks_like_negation(text):
+            elif followup_intent == "reject_offer":
                 # LLM classifier can label phrases like «не надо бронь» as generic reject_offer.
                 # For negated live-data topics this is not a plain no; answer via negation presenter
                 # and clarify what to do next instead of falling into generic clarify/fallback.
                 dialog_intent = {"intent": "clarify_negation", "meta": followup_meta, "option": selected}
             elif followup_intent == "choose_option":
-                target = str(followup_meta.get("target") or text)
+                target = str(followup_meta.get("target") or dialog_plan.get("selected_option_name") or "")
                 options = state.get("visible_options") or state.get("last_options") or []
-                idx = _pure_option_choice_index(target)
-                if idx and state.get("numeric_choice_policy") == "reject":
-                    response = _prepare_response_text("Я сейчас не вижу надёжного списка с номерами. Напишите название ЖК или попросите показать варианты ещё раз.")
-                    _remember_bot_response(state, response, offer_type="clarify", answer_kind="numeric_choice_rejected")
-                    _log_event({
-                        "kind": "user_message", "uid": uid, "user_text": text,
-                        "dialog_intent": "numeric_choice_rejected", "search_model": state["search_model"],
-                        "chat_model": state["chat_model"], "mcp": state["mcp"],
-                        "params_before": params_before, "params_after": dict(state.get("params", {})),
-                        "params_delta": {}, "response_text": response, "response_len": len(response),
-                        "buttons": [], "duration_ms": 0, "is_error": False, "error": None, "cost": {},
-                        "dialog_plan": dialog_plan,
-                    })
-                    await update.message.reply_text(_to_html(response), parse_mode="HTML")
-                    return
-                matched = options[idx - 1] if idx and 1 <= idx <= len(options) else _match_option_from_text(target, options)
+                matched = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else None
+                if matched and target and _compact_option_text(matched.get("name")) != _compact_option_text(target):
+                    matched = None
+                matched = matched or _match_option_from_text(target, options)
                 if matched:
                     dialog_intent = {"intent": "select_option", "option": matched}
                 else:
@@ -3574,6 +4378,8 @@ def main() -> None:
                     LOGGER.info("User %d: params updated from followup: %s", uid, state["params"])
                 state["numeric_choice_policy"] = "reject"
                 dialog_intent = {"intent": "new_search"}
+            elif followup_intent == "expand_more_options":
+                dialog_intent = {"intent": "expand_more_options", "options": state.get("visible_options") or state.get("last_options") or []}
             elif followup_intent == "new_search":
                 state["numeric_choice_policy"] = "reject"
                 dialog_intent = {"intent": "new_search"}
@@ -3766,8 +4572,6 @@ def main() -> None:
 
         if dialog_intent.get("intent") == "clarify_negation":
             negation_meta = dialog_intent.get("meta") or {}
-            if _looks_like_selected_option_rejection(text):
-                _remember_rejected_selected_option(state)
             try:
                 response, chat_meta = await client.explain_negation_followup(
                     intent="clarify_negation",
@@ -3826,7 +4630,11 @@ def main() -> None:
                 scenario_for_stage = _reason_layer_scenario(text, state.get("params", {}))
                 if scenario_for_stage == "self_use" and state.get("params", {}).get("purpose"):
                     scenario_for_stage = str(state.get("params", {}).get("purpose") or "self_use")
-                response = _prepare_response_text(_render_stage_selected_object(option, scenario_for_stage))
+                option_for_answer, enrichment_meta = await _get_or_fetch_enriched_option(client, state, option, scenario_for_stage)
+                state["selected_option"] = option_for_answer
+                sales_benefits, sales_meta = await _sales_phrases_for_stage(client, [option_for_answer], scenario_for_stage)
+                chat_meta = {**chat_meta, "sales_phrase": sales_meta, "enrichment": enrichment_meta}
+                response = _prepare_response_text(_render_stage_selected_object(option_for_answer, scenario_for_stage, sales_benefits.get(1)))
             else:
                 try:
                     response, chat_meta = await client.explain_known_option(
@@ -3874,6 +4682,7 @@ def main() -> None:
                 pass
             elif "?" not in "\n".join(response.splitlines()[-3:]):
                 response = _ensure_final_next_question(response, selected=True)
+            option = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else option
             idx = int(option.get("idx") or 1)
             kb_rows = _selected_option_rows(idx)
             _log_event({
@@ -3910,7 +4719,11 @@ def main() -> None:
                 scenario_for_stage = _reason_layer_scenario(text, state.get("params", {}))
                 if scenario_for_stage == "self_use" and state.get("params", {}).get("purpose"):
                     scenario_for_stage = str(state.get("params", {}).get("purpose") or "self_use")
-                response = _prepare_response_text(_render_stage_selected_object(option, scenario_for_stage))
+                option_for_answer, enrichment_meta = await _get_or_fetch_enriched_option(client, state, option, scenario_for_stage)
+                state["selected_option"] = option_for_answer
+                sales_benefits, sales_meta = await _sales_phrases_for_stage(client, [option_for_answer], scenario_for_stage)
+                chat_meta = {**chat_meta, "sales_phrase": sales_meta, "enrichment": enrichment_meta}
+                response = _prepare_response_text(_render_stage_selected_object(option_for_answer, scenario_for_stage, sales_benefits.get(1)))
                 response = _ensure_final_next_question(response, selected=True)
                 kb_rows = []
             else:
@@ -3985,15 +4798,11 @@ def main() -> None:
                 "client_question": text,
                 "reason": "selected_option_live_details",
             }
+            # Если клиент уже дошёл до стадии оператора / актуальных квартир,
+            # не продаём операторский шаг повторно — сразу просим номер.
+            state["awaiting_phone"] = True
             response = _prepare_response_text(_format_operator_handoff_for_option(option))
-            response = await _maybe_style_text(
-                client,
-                response,
-                intent="operator_handoff",
-                scene="followup_operator",
-                context=str(option.get("name") or ""),
-            )
-            kb_rows = [[{"text": "📞 Связаться с оператором", "callback_data": "action:operator"}]]
+            kb_rows = []
             _log_event({
                 "kind": "operator_handoff_ready",
                 "uid": uid,
@@ -4004,7 +4813,61 @@ def main() -> None:
                 "buttons": _button_log_preview(kb_rows),
             })
             state["last_buttons"] = kb_rows
-            _remember_bot_response(state, response, offer_type="operator_for_selected", answer_kind="operator_handoff")
+            _remember_bot_response(state, response, offer_type="awaiting_phone", answer_kind="operator_contact_request")
+            await update.message.reply_text(_to_html(response), parse_mode="HTML")
+            return
+
+        if dialog_intent.get("intent") == "operator_for_context":
+            options = dialog_intent.get("options") or state.get("visible_options") or state.get("last_options") or []
+            state["operator_context"] = {
+                "selected_option": None,
+                "known_facts": {"options": options[:3], "params": state.get("params", {})},
+                "client_question": text,
+                "reason": "operator_context_request",
+            }
+            state["awaiting_phone"] = True
+            response = _prepare_response_text(_format_operator_handoff_for_context(state, text))
+            kb_rows = []
+            _log_event({
+                "kind": "operator_handoff_ready",
+                "uid": uid,
+                "user_text": text,
+                "selected_option": None,
+                "reason": "operator_context_request",
+                "response_text": response,
+                "buttons": _button_log_preview(kb_rows),
+            })
+            state["last_buttons"] = kb_rows
+            _remember_bot_response(state, response, offer_type="awaiting_phone", answer_kind="operator_contact_request")
+            await update.message.reply_text(_to_html(response), parse_mode="HTML")
+            return
+
+        if dialog_intent.get("intent") == "recommend_options":
+            options = dialog_intent.get("options") or state.get("visible_options") or state.get("last_options") or []
+            stage_scenario = _reason_layer_scenario(text, state.get("params", {}))
+            response = _prepare_response_text(_render_stage_recommendation(options, stage_scenario))
+            kb_rows = _option_select_rows(options)
+            _log_event({
+                "kind": "user_message",
+                "uid": uid,
+                "user_text": text,
+                "dialog_intent": "recommend_options",
+                "search_model": state["search_model"],
+                "chat_model": state["chat_model"],
+                "mcp": state["mcp"],
+                "params_before": params_before,
+                "params_after": dict(state.get("params", {})),
+                "params_delta": {},
+                "response_text": response,
+                "response_len": len(response),
+                "buttons": _button_log_preview(kb_rows),
+                "duration_ms": 0,
+                "is_error": False,
+                "error": None,
+                "cost": {},
+            })
+            state["last_buttons"] = kb_rows
+            _remember_bot_response(state, response, offer_type="selected_option_details", answer_kind="recommend_options")
             await update.message.reply_text(_to_html(response), parse_mode="HTML")
             return
 
@@ -4046,6 +4909,106 @@ def main() -> None:
             _remember_bot_response(state, response, offer_type="choose_option", answer_kind="options_summary")
             await update.message.reply_text(_to_html(response), parse_mode="HTML")
             return
+
+        if dialog_intent.get("intent") == "expand_more_options":
+            query_for_search, excluded_names = _build_followup_expansion_query(text, state)
+            try:
+                response, new_params, search_meta, chat_meta = await client.ask(
+                    query=query_for_search,
+                    search_model=state["search_model"],
+                    chat_model=state["chat_model"],
+                    use_mcp=state["mcp"],
+                    params=state.get("params", {}),
+                )
+                if new_params:
+                    state["params"] = {**state.get("params", {}), **new_params}
+                    LOGGER.info("User %d: params updated from expanded followup: %s", uid, state["params"])
+                _refresh_search_state(state, search_meta)
+                temp_state = dict(state)
+                temp_state["rejected_option_names"] = excluded_names
+                state["last_options"] = _filter_rejected_options(state.get("last_options") or [], temp_state)
+                stage_scenario = _reason_layer_scenario(text, state.get("params", {}))
+                stage_options = state.get("last_options") or []
+                if len(stage_options) >= 2:
+                    sales_benefits, sales_meta = await _sales_phrases_for_stage(client, stage_options, stage_scenario)
+                    response = _render_stage_first_list(stage_options, stage_scenario, sales_benefits)
+                    state["visible_options"] = stage_options[:3]
+                    state["numeric_choice_policy"] = _numeric_choice_policy_from_response(response, state.get("visible_options") or [])
+                    if OPTION_ENRICHMENT_ENABLED:
+                        asyncio.create_task(_prefetch_options_enrichment(client, state, stage_options[:3], stage_scenario))
+                    turn_meta = {
+                        "enabled": True,
+                        "applied": True,
+                        "stage": "expanded_first_list",
+                        "scenario": stage_scenario,
+                        "options_count": len(state.get("visible_options") or []),
+                        "sales_phrase": sales_meta,
+                        "excluded_names": excluded_names,
+                    }
+                elif len(stage_options) == 1:
+                    option_for_answer, enrichment_meta = await _get_or_fetch_enriched_option(client, state, stage_options[0], stage_scenario)
+                    sales_benefits, sales_meta = await _sales_phrases_for_stage(client, [option_for_answer], stage_scenario)
+                    response = _render_stage_selected_object(option_for_answer, stage_scenario, sales_benefits.get(1))
+                    state["visible_options"] = []
+                    state["selected_option"] = option_for_answer
+                    turn_meta = {
+                        "enabled": True,
+                        "applied": True,
+                        "stage": "expanded_selected_object",
+                        "scenario": stage_scenario,
+                        "options_count": 1,
+                        "sales_phrase": sales_meta,
+                        "enrichment": enrichment_meta,
+                        "excluded_names": excluded_names,
+                    }
+                else:
+                    response = _prepare_response_text("Пока не вижу новых вариантов без расширения условий. Могу посмотреть соседние районы или чуть поднять бюджет.")
+                    state["visible_options"] = []
+                    turn_meta = {
+                        "enabled": True,
+                        "applied": False,
+                        "stage": "expanded_empty",
+                        "scenario": stage_scenario,
+                        "options_count": 0,
+                        "excluded_names": excluded_names,
+                    }
+                response = await _maybe_style_text(
+                    client,
+                    response,
+                    intent="expand_more_options",
+                    scene="followup_expand_more_options",
+                    context=", ".join(str(o.get("name") or "") for o in (state.get("visible_options") or [])[:3]),
+                )
+                kb_rows = _option_select_rows(state.get("visible_options") or [])
+                state["last_buttons"] = kb_rows
+                _remember_bot_response(state, response, offer_type="choose_option", answer_kind="options_summary")
+                _log_event({
+                    "kind": "user_message",
+                    "uid": uid,
+                    "user_text": text,
+                    "dialog_intent": "expand_more_options",
+                    "search_model": state["search_model"],
+                    "chat_model": state["chat_model"],
+                    "mcp": state["mcp"],
+                    "params_before": params_before,
+                    "params_after": dict(state.get("params", {})),
+                    "params_delta": new_params if 'new_params' in locals() else {},
+                    "response_text": response,
+                    "response_len": len(response),
+                    "buttons": _button_log_preview(kb_rows),
+                    "duration_ms": 0,
+                    "is_error": False,
+                    "error": None,
+                    "cost": {},
+                    "turn_meta": turn_meta,
+                })
+                await update.message.reply_text(_to_html(response), reply_markup={"inline_keyboard": kb_rows} if kb_rows else None, parse_mode="HTML")
+                return
+            except Exception as e:
+                LOGGER.exception("Error handling expanded followup")
+                response = _prepare_response_text(f"❌ Ошибка при расширении подбора: {e}")
+                await update.message.reply_text(_to_html(response), parse_mode="HTML")
+                return
 
         if dialog_intent.get("intent") == "sort_price_asc":
             options = dialog_intent.get("options", [])
@@ -4173,6 +5136,59 @@ def main() -> None:
         s_cost, s_in, s_out, s_used = _meta_cost(search_meta)
         c_cost, c_in, c_out, c_used = _meta_cost(chat_meta)
 
+        upstream_failed = bool(search_meta.get("_safe_fallback") or chat_meta.get("_safe_fallback"))
+        if upstream_failed or _is_safe_upstream_fallback(response):
+            response = SAFE_UPSTREAM_ERROR_TEXT
+            _refresh_search_state(state, search_meta)
+            state["visible_options"] = []
+            state["numeric_choice_policy"] = "reject"
+            reason_layer_meta: dict[str, Any] = {"enabled": REASON_LAYER_ENABLED, "skipped": "safe_upstream_fallback"}
+            stage_presenter_meta: dict[str, Any] = {"enabled": STAGE_PRESENTER_ENABLED, "skipped": "safe_upstream_fallback"}
+            duration_ms = int((time.monotonic() - t0) * 1000)
+            response = _append_model_stats_footer(
+                response,
+                state=state,
+                chat_meta=chat_meta,
+                duration_ms=duration_ms,
+                reason_layer_meta=reason_layer_meta,
+            )
+            kb_rows: list[list[dict[str, Any]]] = []
+            markup = None
+            state["last_buttons"] = kb_rows
+            _remember_bot_response(state, response, offer_type="", answer_kind="main_search_error")
+            _log_event({
+                "kind": "user_message",
+                "uid": uid,
+                "user_text": text,
+                "dialog_intent": "main_search",
+                "search_model": state["search_model"],
+                "chat_model": state["chat_model"],
+                "mcp": state["mcp"],
+                "search_response": search_meta.get("_response_text", ""),
+                "params_before": params_before,
+                "params_after": dict(state.get("params", {})),
+                "params_delta": new_params,
+                "state_after": _dialog_state_preview(state),
+                "response_text": response,
+                "response_len": len(response),
+                "buttons": [],
+                "reason_layer": reason_layer_meta,
+                "stage_presenter": stage_presenter_meta,
+                "duration_ms": duration_ms,
+                "is_error": True,
+                "error": error_text or "safe_upstream_fallback",
+                "cost": {
+                    "search_usd": round(s_cost, 6) or None,
+                    "chat_usd": round(c_cost, 6) or None,
+                    "total_usd": round(s_cost + c_cost, 6) or None,
+                    "search_tokens_used": s_used or None,
+                    "chat_tokens_used": c_used or None,
+                    "total_tokens_used": (s_used + c_used) or None,
+                },
+            })
+            await update.message.reply_text(_to_html(response), parse_mode="HTML", reply_markup=markup)
+            return
+
         response = _prepare_response_text(_strip_markdown(response))
         response = _strip_unsupported_complex_claims(response)
         response = _strip_unrequested_live_data_cta(response, text)
@@ -4219,18 +5235,51 @@ def main() -> None:
         scenario = _infer_scenario(state, search_meta)
 
         stage_presenter_meta: dict[str, Any] = {"enabled": STAGE_PRESENTER_ENABLED}
-        if STAGE_PRESENTER_ENABLED and len(state.get("last_options") or []) >= 2:
+        if STAGE_PRESENTER_ENABLED:
             stage_scenario = _reason_layer_scenario(text, state.get("params", {}))
-            response = _render_stage_first_list(state.get("last_options") or [], stage_scenario)
-            state["visible_options"] = state.get("last_options", [])[:3]
-            state["numeric_choice_policy"] = _numeric_choice_policy_from_response(response, state.get("visible_options") or [])
-            stage_presenter_meta = {
-                "enabled": True,
-                "applied": True,
-                "stage": "first_list",
-                "scenario": stage_scenario,
-                "options_count": len(state.get("visible_options") or []),
-            }
+            stage_options = state.get("last_options") or []
+            if len(stage_options) >= 2:
+                sales_benefits, sales_meta = await _sales_phrases_for_stage(client, stage_options, stage_scenario)
+                response = _render_stage_first_list(stage_options, stage_scenario, sales_benefits)
+                state["visible_options"] = stage_options[:3]
+                state["numeric_choice_policy"] = _numeric_choice_policy_from_response(response, state.get("visible_options") or [])
+                if OPTION_ENRICHMENT_ENABLED:
+                    asyncio.create_task(_prefetch_options_enrichment(client, state, stage_options[:3], stage_scenario))
+                stage_presenter_meta = {
+                    "enabled": True,
+                    "applied": True,
+                    "stage": "first_list",
+                    "scenario": stage_scenario,
+                    "options_count": len(state.get("visible_options") or []),
+                    "sales_phrase": sales_meta,
+                    "enrichment_prefetch": {"enabled": OPTION_ENRICHMENT_ENABLED, "scheduled": OPTION_ENRICHMENT_ENABLED, "count": min(len(stage_options), 3)},
+                }
+            elif len(stage_options) == 1:
+                option_for_answer, enrichment_meta = await _get_or_fetch_enriched_option(client, state, stage_options[0], stage_scenario)
+                sales_benefits, sales_meta = await _sales_phrases_for_stage(client, [option_for_answer], stage_scenario)
+                response = _render_stage_selected_object(option_for_answer, stage_scenario, sales_benefits.get(1))
+                state["visible_options"] = []
+                state["selected_option"] = option_for_answer
+                stage_presenter_meta = {
+                    "enabled": True,
+                    "applied": True,
+                    "stage": "selected_object",
+                    "scenario": stage_scenario,
+                    "options_count": 1,
+                    "sales_phrase": sales_meta,
+                    "enrichment": enrichment_meta,
+                }
+            elif "?" in response and response.count("?") > 1:
+                response = _render_stage_clarification(stage_scenario)
+                state["visible_options"] = []
+                stage_presenter_meta = {
+                    "enabled": True,
+                    "applied": True,
+                    "stage": "clarification",
+                    "scenario": stage_scenario,
+                    "options_count": 0,
+                    "sales_phrase": {"enabled": SALES_PHRASE_ENABLED, "applied": False},
+                }
 
         # H001/reason-layer MVP: optional guarded rewrite for first 2-3 option lists.
         # It is disabled by default and falls back to current response on any issue.
@@ -4353,6 +5402,8 @@ def main() -> None:
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("model", model_command))
     app.add_handler(CommandHandler("mcp", mcp_command))
+    app.add_handler(CommandHandler("history", history_command))
+    app.add_handler(CommandHandler("hisotry", history_command))
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.CONTACT, handle_contact))

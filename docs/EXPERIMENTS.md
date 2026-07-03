@@ -142,6 +142,30 @@ nmbot/
 
 Перед изменением UX-логики Ирины ЧАТИ сначала проверяет гипотезу в read-only симуляции.
 
+### Semantic orchestration gate
+
+Если проблема связана с пониманием смысла сообщения клиента, сначала определяется слой:
+
+```text
+semantic user intent → stage/dialog orchestrator
+mechanical input      → deterministic guard/router
+```
+
+К semantic intent относятся живые фразы вроде:
+
+- `подбери похожие`;
+- `найди похожие`;
+- `ещё такие`;
+- `похожие варианты`;
+- `другие варианты`;
+- `давай ещё`.
+
+Их нельзя чинить расширением regex в lower-level router. Acceptance criteria для таких кейсов должны проверять, что orchestrator выбрал правильную stage/action.
+
+Regex допустим только для механики без семантики: номер телефона. Чистый numeric choice (`1`, `2`, `3`) тоже идёт в LLM-orchestrator: он должен вернуть exact `selected_option_name` из `visible_options`.
+
+Safety может быть code-veto после решения, но не способом распознавания смысла. Семантику отказа, согласия, смены условий, просьбы похожих вариантов и операторских намерений определяет LLM-orchestrator.
+
 ## Prod Verification Gate
 
 Локальная проверка не считается финальной проверкой MINION.
@@ -160,6 +184,8 @@ nmbot/
 8. `python3 scripts/or_cost.py` после live/prod проверки.
 
 Если выполнены только локальные тесты, в отчёте обязательно писать: **«локально зелёное, prod ещё не проверен»**.
+
+Если баг пришёл из live-лога, prod smoke обязан включать **точную пользовательскую фразу из лога**, а не только похожий общий сценарий. Пример: если в live было `подбери похожие`, проверка `похожие варианты` не считается достаточной.
 
 Причина правила: 2026-07-01 пользователь написал в реальный MINION после локальных зелёных тестов, но VPS крутил старый runtime. Из-за этого повторился loop `жк южные сады → да → да`: prod не имел `operator_contact_accept`, новых prompt rules и `visible_options`.
 
@@ -205,8 +231,10 @@ python3 scripts/nmbot_mcp_only_sim.py \
 8. **Расхождение** — коротко, что именно не совпало: ушёл в classifier, потерял `last_options`, упомянул запрещённый факт, сделал пустой список, позвал оператора рано и т.д.
 9. **Где менять** — конкретный файл и слой: `prompts/chat_v1.txt`, `scripts/chat_tester_bot.py::_resolve_dialog_intent`, `dialog_plan executor`, formatter/postprocess, state contract.
 10. **Подсказка для патча** — минимальное изменение, которое должно закрыть сценарий.
-11. **Acceptance criteria** — что должно стать зелёным после патча: например, no `вторичка`, no empty options-summary, route=`compare_others`, `selected_option` заполнен, journal status=`ok`.
-12. **Prod gate** — если изменение влияет на ответы/routing/state, явно пометить: «локально зелёное, prod ещё не проверен» до VPS-проверки.
+11. **Layer decision** — semantic intent должен идти в orchestrator; regex/router только для mechanical input: телефон. Выбор `1`/`2`/`3` проверяется как orchestrator `select_option` с exact `selected_option_name`.
+12. **Acceptance criteria** — что должно стать зелёным после патча: например, no `вторичка`, no empty options-summary, stage=`expand_more_options`, `selected_option` заполнен, journal status=`ok`.
+13. **Exact live phrase** — если источник проблемы live-log, указать точную фразу, которую надо прогнать (`подбери похожие`, а не обобщённое `похожие варианты`).
+14. **Prod gate** — если изменение влияет на ответы/routing/state, явно пометить: «локально зелёное, prod ещё не проверен» до VPS-проверки.
 
 **Канонический шаблон записи:**
 
@@ -288,6 +316,7 @@ Acceptance:
 - `selected_complex_policy` — клиент выбрал/назвал конкретный ЖК: короткая карточка из MCP-фактов.
 - `selected_complex_ready_to_handoff_policy` — выбран ЖК и клиент показывает интерес: вести к оператору, а не продолжать допрос.
 - `compare_policy` — сравнить текущие сохранённые варианты, не запускать новый широкий поиск.
+- `expand_more_options_policy` — фразы `ещё варианты`, `похожие варианты`, `другие варианты` после списка запускают свежий поиск с исключением уже показанных ЖК.
 - `budget_refinement_policy` — бюджет после списка сначала применить к `last_options`.
 - `no_data_policy` — если `facts=[]` и `near=[]`, не делать пустой список и не советовать вторичку; предложить расширить географию.
 - `operator_handoff_policy` — просьба позвонить/связаться/обсудить детали ведёт к operator handoff.
@@ -295,6 +324,7 @@ Acceptance:
 ### Принятые симуляционные фиксы 2026-07-01
 
 - `compare_policy`: фразы `чем различаются`, `сравни`, `отличаются` до выбранного ЖК теперь дают route=`compare_others` по текущим `last_options`.
+- `expand_more_options_policy`: фразы `ещё варианты`, `похожие варианты`, `другие варианты` после списка теперь дают route=`expand_more_options` и не повторяют уже показанные ЖК.
 - `budget_refinement_policy`: фразы `до 15 млн`, `бюджет 15 млн` после списка дают route=`sort_price_asc` с `budget_limit` и сортировкой/фильтрацией сохранённых вариантов.
 - `filter_finish`: `с отделкой` после списка обрабатывается до generic classifier и даёт route=`filter_finish`.
 - `selected_complex_ready_to_handoff_policy`: выбранный ЖК + показанная карточка + `интересно/что дальше/подходит` даёт route=`operator_for_selected`.

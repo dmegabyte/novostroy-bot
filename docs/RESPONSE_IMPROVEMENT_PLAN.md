@@ -378,6 +378,21 @@ google/gemini-3.1-flash-lite-preview
 
 ## 7. Порядок работ
 
+### Базовое правило слоя
+
+Модель ответа и formatter не должны компенсировать ошибку stage selection.
+
+Если проблема звучит как “бот не понял, что клиент хочет”, сначала проверяется orchestrator:
+
+- semantic intent → orchestrator;
+- текст ответа → presenter / prompt;
+- номер телефона → deterministic code guard;
+- чистый numeric choice (`1`, `2`, `3`) → orchestrator `select_option` с exact `selected_option_name` из `visible_options`.
+
+Safety-veto может оставаться проверкой после решения, но не заменяет LLM-orchestrator для распознавания смысла.
+
+Для live-фраз вроде `подбери похожие` нельзя считать фикс готовым, если он держится только на regex в lower-level router. Правильный результат — orchestrator выбрал fresh expansion stage/action, а presenter уже красиво показал новый shortlist.
+
 ### Шаг 1 — кодовые UX-фиксы
 
 1. Сделать продающую `_format_option_response`.
@@ -411,6 +426,7 @@ google/gemini-3.1-flash-lite-preview
 4. полный `scripts/nmbot_test_agent.py`
 5. VPS deploy smoke
 6. ручной Telegram smoke в `@minionassist_bot`
+7. если баг пришёл из live-лога — отдельный smoke с точной фразой из лога, без замены на “похожий” тестовый текст.
 
 ## 8. Решение по умолчанию
 

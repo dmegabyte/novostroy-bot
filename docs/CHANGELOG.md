@@ -4,6 +4,55 @@
 
 ---
 
+## 2026-07-03 — Public NMBOT history tab 🔁
+
+### Последние диалоги теперь видны в публичном overview
+- **Что добавлено:** на `http://193.107.155.236:8765/nmbot-project-7f3a9c/index.html` появилась вкладка/секция `История`.
+- **Как обновляется:** страница подгружает `/nmbot-project-7f3a9c/history.json` каждые 10 секунд; на VPS включён user-systemd timer `nmbot-public-history.timer`, который пересобирает JSON из `logs/dialogs-YYYY-MM-DD.jsonl`.
+- **Что видно:** последние клиентские сообщения, ответы Ирины, intent, dialog plan, MCP/search trace, buttons и cost/debug meta.
+- **Безопасность:** перед публикацией `scripts/publish_public_history.py` маскирует телефоны, email и токены, а длинные поля обрезает.
+
+---
+
+## 2026-07-03 — Mandatory MCP/search rule for apartment requests 🔒
+
+### Квартирные запросы нельзя обслуживать без инструментального поиска
+- **Что зафиксировано:** в `prompts/search_v1.txt` добавлено жёсткое правило: любой запрос о квартире, новостройке, ЖК или подборе вариантов сначала должен идти через MCP/search. Ответ по памяти модели запрещён.
+- **Что обновлено в доках:** `docs/BOT_ARCHITECTURE.md` и `docs/BOT_SCENARIO_MAP.html` теперь явно показывают цепочку `квартирный запрос → обязательный MCP/search → нормализация фактов → ответ Ирины`.
+- **Что обновлено в публичном обзоре:** `scripts/build_public_overview.py` выводит это правило на странице NMBOT overview, чтобы оно было видно рядом с блок‑схемой и активными промтами.
+
+---
+
+## 2026-07-03 — Public services index + NMBOT project overview 🌐
+
+### Один веб-вход для MPN quality и NMBOT overview
+- **Что добавлено:** `scripts/build_public_overview.py` собирает статический сайт для уже существующего публичного сервиса на `http://193.107.155.236:8765/`.
+- **Главная страница:** `/index.html` показывает список сервисов: существующий `MPN quality dashboard` и новый `NMBOT / Ирина — проект целиком`.
+- **NMBOT overview:** `/nmbot-project-7f3a9c/index.html` показывает ТЗ проекта, архитектуру, активные промты, MCP/search поля, реальные примеры и встроенную HTML-блок-схему сценариев.
+- **Безопасность:** публикуется только allow-list docs/prompts. `.env`, логи, backups, pycache и произвольные пути не попадают в веб.
+
+---
+
+## 2026-07-03 — Human-readable bot scenario map HTML 🗺️
+
+### Текущая логика Ирины вынесена в отдельную визуальную схему
+- **Что добавлено:** `docs/BOT_SCENARIO_MAP.html` — standalone HTML-карта сценариев с блоками и стрелками: Telegram → state → LLM-orchestrator → MCP/search → normalizer → presenter → ответ клиенту.
+- **Что внутри:** Stage 0/1/1B/1C/2/3/4/4.5/5/6, отдельная ветка `recommend_options`, оператор без выбранного ЖК, state-память, реальные MCP/search поля, примеры `facts[]/near[]/missing/params` и сценарные примеры family/investment/operator.
+- **Промты:** в схеме зафиксированы реальные рабочие контракты `prompts/search_v1.txt`, `prompts/chat_v1.txt`, `followup_intent_classifier.py` и `DIALOG_STATE_PLANNER_PROMPT`.
+- **Цель:** чтобы человек без погружения в код мог открыть HTML и понять, какие сценарии бот отрабатывает, откуда берутся факты и где чинить конкретный тип ошибки.
+
+---
+
+## 2026-07-03 — Bot-visible `/history` / `/hisotry` trace 🧾
+
+### Историю диалога и MCP/search cycle теперь можно смотреть прямо в Telegram
+- **Проблема:** для разбора качества ответов приходилось смотреть серверные JSONL/markdown-логи. Пользователь попросил отдельную команду `/hisotry`, чтобы история была видна прямо в боте и показывала не только запрос/ответ, но и цикл поиска: что пришло из MCP/search, какой intent/plan был применён, кнопки и cost.
+- **Фикс:** в `scripts/chat_tester_bot.py` добавлена команда `/history` и alias `/hisotry`. Команда читает последние `user_message` события текущего Telegram-пользователя из `logs/dialogs-YYYY-MM-DD.jsonl`, показывает `Вы`, `Бот`, `intent`, `plan`, `MCP/search_response`, `buttons`, `cost`.
+- **Safety:** вывод ограничен по длине и режется на Telegram-safe chunks, чтобы длинный MCP/search trace не ломал отправку сообщения.
+- **Автотесты:** H029 проверяет формат history-event, наличие MCP/search facts в выводе, chunking и регистрацию обеих команд.
+
+---
+
 ## 2026-07-01 — Scenario simulation gate + selected complex formatting ✅
 
 ### Ирина перестала отвечать «портянкой» по выбранному ЖК и лучше ведёт к оператору

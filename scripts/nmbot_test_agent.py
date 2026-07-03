@@ -83,6 +83,7 @@ from chat_tester_bot import (  # noqa: E402
     _format_option_response,
     _format_options_summary_response,
     _format_numbered_list_spacing,
+    _format_operator_handoff_for_context,
     _format_operator_handoff_for_option,
     _fix_complex_name_artifacts,
     _operator_reason_response,
@@ -90,7 +91,10 @@ from chat_tester_bot import (  # noqa: E402
     _clarification_from_followup,
     _apply_dialog_plan_to_state,
     _dialog_planner_state_payload,
+    _extract_options,
     _followup_state_payload,
+    _format_history_event,
+    _history_search_preview,
     _local_followup_intent,
     _markup_from_chat_buttons,
     _prepare_response_text,
@@ -108,6 +112,10 @@ from chat_tester_bot import (  # noqa: E402
     _pure_option_choice_index,
     _reject_operator_response,
     _reject_selected_option_response,
+    _render_stage_first_list,
+    _render_stage_recommendation,
+    _stage_option_fact_parts,
+    _telegram_chunks,
     _normalize_followup_params_delta,
     _reset_dialog_state_preserve_settings,
     _resolve_dialog_intent,
@@ -1710,6 +1718,94 @@ def _run_h021_unit_tests() -> list[Result]:
         duration_ms=int((time.time() - started) * 1000),
     ))
 
+    family_search_payload = json.dumps({
+        "facts": [
+            {
+                "name": "ЖК «Лучи»",
+                "location": "Солнцево",
+                "price_range": "от 10,6 млн",
+                "schools": "2 школы",
+                "kindergartens": "4 детских сада",
+                "forest": "Чоботовский лес",
+                "embankment": "набережная",
+                "pharmacies": "аптеки",
+                "yard_without_cars": "закрытый двор без машин",
+            }
+        ]
+    }, ensure_ascii=False)
+    normalized_family = _extract_options(family_search_payload)[0]
+    normalized_family_text = json.dumps(normalized_family, ensure_ascii=False)
+    pass_family_aliases = (
+        "Чоботовский лес" in str(normalized_family.get("parks"))
+        and "набережная" in str(normalized_family.get("parks"))
+        and "аптеки" in str(normalized_family.get("clinics"))
+        and "закрытый двор без машин" in str(normalized_family.get("yards"))
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="family_infrastructure_aliases_are_preserved_from_search_payload",
+        passed=pass_family_aliases,
+        error="" if pass_family_aliases else f"bad normalized family aliases: {normalized_family_text}",
+        response_text=normalized_family_text,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    family_first_list_options = [
+        {
+            "name": "ЖК «Лучи»",
+            "location": "Солнцево",
+            "price": "от 10,6 млн",
+            "schools": "2 школы",
+            "kindergartens": "4 детских сада",
+            "parks": "Мещерский парк; Чоботовский лес",
+        },
+        {
+            "name": "ЖК «Скандинавия»",
+            "location": "Коммунарка",
+            "schools": "школа на 1775 мест",
+            "kindergartens": "детские сады",
+            "clinics": "поликлиника",
+            "parks": "парк с ландшафтным дизайном",
+            "yards": "закрытые дворы без машин",
+        },
+        {
+            "name": "Город-парк «Переделкино Ближнее»",
+            "location": "Внуковское поселение",
+            "schools": "2 школы",
+            "kindergartens": "7 детских садов",
+            "clinics": "поликлиника",
+            "parks": "парки; набережная",
+        },
+        {
+            "name": "ЖК «Лишний»",
+            "schools": "школа",
+        },
+    ]
+    family_fact_parts = _stage_option_fact_parts(family_first_list_options[0], "family")[:5]
+    family_first_list = _render_stage_first_list(family_first_list_options, "family")
+    family_first_list_low = family_first_list.lower()
+    pass_family_first_list = (
+        "4 детских сада" in family_first_list
+        and "2 школы" in family_first_list
+        and "Мещерский парк" in family_first_list
+        and "Чоботовский лес" in family_first_list
+        and "поликлиника" in family_first_list
+        and "школа на 1775 мест" in family_first_list
+        and "ЖК «Лишний»" not in family_first_list
+        and family_first_list.count("?") == 1
+        and family_first_list_low.rstrip().endswith("какой жк хотите рассмотреть подробнее?")
+        and family_fact_parts[0] == "2 школы"
+        and any("Мещерский парк" in part for part in family_fact_parts)
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="family_first_list_prioritizes_real_infrastructure",
+        passed=pass_family_first_list,
+        error="" if pass_family_first_list else f"bad family first_list: facts={family_fact_parts}; response={family_first_list}",
+        response_text=family_first_list,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
     weak_state = {"params": {"rooms": "s", "max_price": 5_000_000, "district": "msk"}, "asked_questions": []}
     weak_rows = _pick_quick_actions(weak_state, "C-narrow-empty")
     weak_callbacks = [btn["callback_data"] for row in weak_rows for btn in row]
@@ -2014,7 +2110,11 @@ def _run_h021_unit_tests() -> list[Result]:
         and "selected_option_action=\"clear\"" in planner_prompt_low
         and "numeric_choice_policy=\"reject\"" in planner_prompt_low
         and "не придумывай max_price" in planner_prompt_low
+        and "recommend_options" in planner_prompt_low
+        and "что посоветуешь" in planner_prompt_low
+        and "как связаться с оператором" in planner_prompt_low
         and normalize_dialog_action("update_search") == "update_search"
+        and normalize_dialog_action("recommend_options") == "recommend_options"
         and normalize_dialog_action("bad") == "continue_from_memory"
     )
     results.append(Result(
@@ -2023,6 +2123,84 @@ def _run_h021_unit_tests() -> list[Result]:
         passed=pass_dialog_planner_prompt,
         error="" if pass_dialog_planner_prompt else "dialog planner prompt lacks state contract/examples",
         response_text=DIALOG_STATE_PLANNER_PROMPT,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    advice_options = [
+        {
+            "name": "Город-парк «Переделкино Ближнее»",
+            "schools": "2 школы",
+            "kindergartens": "7 детских садов",
+            "parks": "парки; набережная",
+            "clinics": "поликлиника",
+            "yards": "спортивные площадки",
+            "price_min": 9560000,
+            "price_max": 35960000,
+            "ready": "2028",
+            "finishing": "с отделкой",
+        },
+        {
+            "name": "ЖК «Люблинский парк»",
+            "infrastructure": "инфраструктура для детей",
+            "yards": "закрытые дворы и зоны отдыха",
+            "price_min": 10910000,
+            "price_max": 34040000,
+            "ready": "2028",
+            "finishing": "с отделкой",
+        },
+        {
+            "name": "ЖК «Кузьминский лес»",
+            "schools": "школы",
+            "kindergartens": "детские сады",
+            "parks": "парки; вода",
+            "ready": "дом уже сдан",
+            "finishing": "с отделкой",
+            "price_min": 8880000,
+            "price_max": 21790000,
+        },
+    ]
+    advice_text = _render_stage_recommendation(advice_options, "family")
+    advice_low = advice_text.lower()
+    pass_advice = (
+        "переделкино ближнее" in advice_low
+        and "я бы сначала смотрела" in advice_low
+        and "2 школы" in advice_text
+        and "7 детских садов" in advice_text
+        and "парки" in advice_low
+        and "хотите" in advice_low
+        and advice_text.count("?") == 1
+        and "давайте сравним" not in advice_low
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="family_advice_recommends_best_option_not_compare_loop",
+        passed=pass_advice,
+        error="" if pass_advice else f"bad advice text: {advice_text}",
+        response_text=advice_text,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    operator_context_state = {
+        "visible_options": advice_options,
+        "last_options": advice_options,
+        "params": {"purpose": "family"},
+    }
+    operator_context_text = _format_operator_handoff_for_context(operator_context_state, "как связаться с оператором?")
+    operator_context_low = operator_context_text.lower()
+    pass_operator_context = (
+        "напишите номер" in operator_context_low
+        and "оператор" in operator_context_low
+        and "переделкино ближнее" in operator_context_low
+        and "люблинский парк" in operator_context_low
+        and "кузьминский лес" in operator_context_low
+        and "первый, второй или третий" not in operator_context_low
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="operator_without_selected_asks_phone_with_current_context",
+        passed=pass_operator_context,
+        error="" if pass_operator_context else f"bad operator context text: {operator_context_text}",
+        response_text=operator_context_text,
         duration_ms=int((time.time() - started) * 1000),
     ))
 
@@ -2232,6 +2410,71 @@ def _run_h021_unit_tests() -> list[Result]:
         passed=pass_button_log,
         error="" if pass_button_log else f"preview={preview}, pressed={pressed_text!r}",
         response_text=f"preview={preview}; pressed={pressed_text}",
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    history_event = {
+        "kind": "user_message",
+        "uid": 42,
+        "ts": "2026-07-03T12:00:00.000Z",
+        "user_text": "мне нужна квартира рядом с парком",
+        "dialog_intent": "main_search",
+        "dialog_plan": {"dialog_action": "new_search"},
+        "search_response": json.dumps({
+            "facts": [{"name": "ЖК «Лучи»", "parks": "Мещерский парк"}],
+            "missing": [],
+        }, ensure_ascii=False),
+        "response_text": "Подобрала вариант рядом с парком.",
+        "buttons": [[{"text": "Да, подробнее", "callback_data": "action:details:1"}]],
+        "cost": {"total_usd": 0.01},
+    }
+    history_text = _format_history_event(history_event, 1)
+    pass_history_format = (
+        "Вы: мне нужна квартира рядом с парком" in history_text
+        and "Бот: Подобрала вариант рядом с парком." in history_text
+        and "intent: main_search" in history_text
+        and "plan:" in history_text
+        and "MCP/search_response:" in history_text
+        and "ЖК «Лучи»" in history_text
+        and "Мещерский парк" in history_text
+        and "buttons:" in history_text
+        and "cost:" in history_text
+        and "ЖК «Лучи»" in _history_search_preview(history_event)
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="history_event_shows_user_bot_search_plan_buttons_cost",
+        passed=pass_history_format,
+        error="" if pass_history_format else f"bad history text: {history_text}",
+        response_text=history_text,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    long_history = "A" * 3900 + "\n\n---\n\n" + "B" * 3900
+    chunks = _telegram_chunks(long_history, limit=3800)
+    pass_history_chunks = len(chunks) >= 2 and all(len(chunk) <= 3800 for chunk in chunks)
+    results.append(Result(
+        suite="h029",
+        scenario="history_output_is_chunked_for_telegram",
+        passed=pass_history_chunks,
+        error="" if pass_history_chunks else f"bad chunks: {[len(c) for c in chunks]}",
+        response_text=f"chunks={[len(c) for c in chunks]}",
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    pass_history_command_source = (
+        "async def history_command" in bot_source
+        and 'CommandHandler("history", history_command)' in bot_source
+        and 'CommandHandler("hisotry", history_command)' in bot_source
+        and "/history — последние ответы и MCP/search trace" in bot_source
+        and "/hisotry — то же самое" in bot_source
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="history_and_hisotry_commands_are_registered",
+        passed=pass_history_command_source,
+        error="" if pass_history_command_source else "history/hisotry command handler or help text missing",
+        response_text="history command source ok" if pass_history_command_source else bot_source[bot_source.find("async def history_command") - 500: bot_source.find("async def history_command") + 1000],
         duration_ms=int((time.time() - started) * 1000),
     ))
 

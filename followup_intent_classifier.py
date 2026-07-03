@@ -14,6 +14,7 @@ ALLOWED_INTENTS = {
     "choose_option",
     "compare_selected",
     "operator_for_selected",
+    "recommend_options",
     "explain_operator_reason",
     "continue_selection",
     "update_search_params",
@@ -29,10 +30,19 @@ ALLOWED_INTENTS = {
 ALLOWED_DIALOG_ACTIONS = {
     "new_search",
     "update_search",
+    "expand_more_options",
+    "compare_options",
     "continue_from_memory",
     "select_option",
     "ask_clarification",
     "operator_live_check",
+    "recommend_options",
+    "reject_offer",
+    "reject_operator",
+    "reject_phone",
+    "reject_selected_option",
+    "reject_similar_options",
+    "clarify_negation",
 }
 ALLOWED_SELECTED_OPTION_ACTIONS = {"keep", "clear", "set"}
 ALLOWED_VISIBLE_OPTIONS_POLICIES = {"keep", "rebuild", "clear"}
@@ -61,6 +71,8 @@ FOLLOWUP_INTENT_PROMPT = """
 - choose_option — клиент выбрал вариант из видимого списка;
 - compare_selected — клиент согласился сравнить выбранный ЖК с похожими;
 - operator_for_selected — клиент хочет оператора/актуальное наличие/бронь/этаж/показ/детали, которых нет в карточке;
+- recommend_options — клиент просит совет/рекомендацию по текущему списку: "что посоветуешь", "какой лучше", "что бы ты выбрала";
+- operator_for_selected — клиент хочет оператора/актуальное наличие/бронь/этаж/показ/детали, которых нет в карточке, или прямо спрашивает как связаться с оператором/менеджером;
 - explain_operator_reason — клиент спрашивает зачем нужен оператор / почему нельзя ответить здесь;
 - continue_selection — клиент хочет продолжить подбор здесь, посмотреть другие варианты или вернуться к списку;
 - update_search_params — клиент уточнил или отверг параметр поиска;
@@ -88,6 +100,8 @@ FOLLOWUP_INTENT_PROMPT = """
 - Если не уверен — intent=clarify и один короткий clarification_question.
 - Отрицания и отказы не должны автоматически запускать новый поиск.
 - Если клиент пишет "не хочу оператора", "без оператора", "не надо звонить" — reject_operator.
+- Если клиент спрашивает "что посоветуешь", "твой совет", "какой лучше выбрать" по текущему списку — intent=recommend_options. Не превращай это в compare_selected/compare_options.
+- Если клиент прямо спрашивает "как связаться с оператором", "как связаться с менеджером", "хочу оператора", "позови менеджера" — intent=operator_for_selected даже если selected_option пустой: код передаст оператору текущий список/критерии.
 - Если клиент пишет "не оставлю номер", "номер не дам", "не хочу оставлять контакт" — reject_phone.
 - Если клиент пишет "не этот", "не подходит", "этот не нравится" про выбранный ЖК — reject_selected_option.
 - Если клиент пишет "не надо похожие", "похожие не нужны" — reject_similar_options.
@@ -108,7 +122,7 @@ DIALOG_STATE_PLANNER_PROMPT = """
 
 Верни строго JSON:
 {
-  "dialog_action": "new_search | update_search | continue_from_memory | select_option | ask_clarification | operator_live_check",
+  "dialog_action": "new_search | update_search | expand_more_options | compare_options | recommend_options | continue_from_memory | select_option | ask_clarification | operator_live_check | reject_offer | reject_operator | reject_phone | reject_selected_option | reject_similar_options | clarify_negation",
   "confidence": 0.0,
   "params_delta": {},
   "selected_option_action": "keep | clear | set",
@@ -121,6 +135,15 @@ DIALOG_STATE_PLANNER_PROMPT = """
 }
 
 Ключевые правила:
+- Ты — единственный слой, который понимает смысл фразы клиента. Код ниже только исполняет твой dialog_action.
+- Если клиент после списка просит ещё/похожие/другие варианты: "подбери похожие", "найди похожие",
+  "покажи ещё", "ещё такие", "другие варианты" — dialog_action="expand_more_options",
+  visible_options_policy="rebuild", numeric_choice_policy="reject". Не выбирай continue_from_memory.
+- Если клиент просит сравнить текущие варианты: "сравни", "чем отличаются", "в чем разница" — dialog_action="compare_options".
+- Если клиент просит совет/рекомендацию по текущим вариантам: "что посоветуешь", "твой совет", "какой лучше выбрать" — dialog_action="recommend_options". Не выбирай compare_options: нужен один приоритетный совет по фактам.
+- Если клиент прямо спрашивает "как связаться с оператором" или просит связаться с оператором/менеджером — dialog_action="operator_live_check". Если selected_option пустой, всё равно выбирай operator_live_check: код передаст оператору текущий список и критерии.
+- Если клиент выбирает вариант номером или названием из visible_options — dialog_action="select_option",
+  selected_option_action="set", selected_option_name=точное name из visible_options. Даже для "1"/"2" верни name, а не цифру.
 - Если клиент отвергает выбранный ЖК ("не подходит", "не этот", "не нравится") и просит изменить условия,
   добавь текущий selected_option в rejected_options_add, selected_option_action="clear",
   visible_options_policy="clear", numeric_choice_policy="reject".
@@ -129,7 +152,7 @@ DIALOG_STATE_PLANNER_PROMPT = """
 - Если клиент пишет "хочу дешевле" без суммы — НЕ придумывай max_price: dialog_action="ask_clarification"
   и спроси до какого бюджета смотреть.
 - Если клиент пишет "до 12 млн", "до 17 млн", "бюджет 10" — update_search с params_delta.max_price.
-- Если клиент просит бронь/наличие/этажи/показ, но selected_option пустой — dialog_action="ask_clarification",
+- Если клиент просит бронь/наличие/этажи/показ по конкретному ЖК, но selected_option пустой — dialog_action="ask_clarification",
   спроси какой ЖК проверить. Не выбирай старый ЖК сам.
 - Если visible_options пустой или список в прошлом ответе был ненадёжный, numeric_choice_policy="reject".
   Нельзя принимать "1"/"2" как выбор, если нет надёжного видимого списка.

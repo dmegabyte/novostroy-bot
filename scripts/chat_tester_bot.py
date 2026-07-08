@@ -63,6 +63,29 @@ def _load_prompt(name: str) -> str:
     return path.read_text(encoding="utf-8").rstrip("\n")
 
 
+def _active_chat_prompt_name() -> str:
+    """Выбирает chat prompt без изменения default runtime.
+
+    По умолчанию прод и локальная разработка остаются на `chat_v1`.
+    Compact-кандидат включается явно через `NMBOT_CHAT_PROMPT=compact`
+    и сначала проверяется только на staging.
+    """
+    value = os.getenv("NMBOT_CHAT_PROMPT", "chat_v1").strip().lower()
+    aliases = {
+        "": "chat_v1",
+        "default": "chat_v1",
+        "baseline": "chat_v1",
+        "chat_v1": "chat_v1",
+        "compact": "chat_v1_compact",
+        "chat_v1_compact": "chat_v1_compact",
+    }
+    if value not in aliases:
+        raise ValueError(
+            "NMBOT_CHAT_PROMPT must be one of: default, baseline, chat_v1, compact, chat_v1_compact"
+        )
+    return aliases[value]
+
+
 SEARCH_MODEL = "google/gemini-3.1-flash-lite-preview"
 CHAT_MODEL = "google/gemini-2.5-flash"
 
@@ -77,7 +100,8 @@ ANSWER_MODELS: Final[list[str]] = [
 ]
 
 SEARCH_SYSTEM_PROMPT = _load_prompt("search_v1")
-CHAT_SYSTEM_PROMPT = _load_prompt("chat_v1")
+ACTIVE_CHAT_PROMPT_NAME: Final[str] = _active_chat_prompt_name()
+CHAT_SYSTEM_PROMPT = _load_prompt(ACTIVE_CHAT_PROMPT_NAME)
 
 
 def _load_prompt_path(relative_path: str) -> str:

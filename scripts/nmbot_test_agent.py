@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import re
 import subprocess
 import sys
@@ -79,12 +80,14 @@ _load_dotenv_if_present()
 
 from chat_tester_bot import (  # noqa: E402
     OvermindClient,
+    ACTIVE_CHAT_PROMPT_NAME,
     CHAT_SYSTEM_PROMPT,
     STAGE_PRESENTER_ENABLED,
     _button_log_preview,
     _callback_button_text,
     _append_dialog_turn,
     _build_known_option_prompt,
+    _chat_system_prompt_for_params,
     _building_fact_check_params,
     _building_status_response_from_search,
     _building_status_unknown_response,
@@ -112,6 +115,7 @@ from chat_tester_bot import (  # noqa: E402
     _continue_selection_response,
     _clarification_from_followup,
     _apply_dialog_plan_to_state,
+    _active_chat_prompt_name,
     _dialog_planner_state_payload,
     _extract_options,
     _filter_rejected_options,
@@ -2988,9 +2992,10 @@ def _run_h021_unit_tests() -> list[Result]:
         "{{scenario_overlay}}" in chat_prompt_low
         and "{{facet_overlays}}" in chat_prompt_low
         and "json-контракт" in chat_prompt_low
-        and "scenario overlay" in chat_prompt_low
-        and "facet overlay" in chat_prompt_low
-        and "основной prompt не хранит сценарную матрицу фактов" in chat_prompt_low
+        and ("operator" in chat_prompt_low or "оператор" in chat_prompt_low)
+        and ("mcp" in chat_prompt_low or "факт" in chat_prompt_low)
+        and "final_question" in chat_prompt_low
+        and "visible_options" in chat_prompt_low
     )
     results.append(Result(
         suite="h029",
@@ -3112,6 +3117,46 @@ def _run_h021_unit_tests() -> list[Result]:
         passed=pass_chat_v1_final_question_contract,
         error="" if pass_chat_v1_final_question_contract else "chat_v1 lacks simplified final_question/refine contract",
         response_text=chat_v1_text[:1600],
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    old_prompt_env = os.environ.get("NMBOT_CHAT_PROMPT")
+    try:
+        os.environ.pop("NMBOT_CHAT_PROMPT", None)
+        selector_default = _active_chat_prompt_name()
+        os.environ["NMBOT_CHAT_PROMPT"] = "compact"
+        selector_compact = _active_chat_prompt_name()
+        os.environ["NMBOT_CHAT_PROMPT"] = "chat_v1_compact"
+        selector_compact_explicit = _active_chat_prompt_name()
+    finally:
+        if old_prompt_env is None:
+            os.environ.pop("NMBOT_CHAT_PROMPT", None)
+        else:
+            os.environ["NMBOT_CHAT_PROMPT"] = old_prompt_env
+    compact_prompt_text = (REPO / "prompts" / "chat_v1_compact.txt").read_text(encoding="utf-8").lower()
+    pass_prompt_selector = (
+        ACTIVE_CHAT_PROMPT_NAME in {"chat_v1", "chat_v1_compact"}
+        and selector_default == "chat_v1"
+        and selector_compact == "chat_v1_compact"
+        and selector_compact_explicit == "chat_v1_compact"
+        and "{{scenario_overlay}}" in compact_prompt_text
+        and "{{facet_overlays}}" in compact_prompt_text
+        and "json-контракт" in compact_prompt_text
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="chat_prompt_env_selector_keeps_baseline_default_and_allows_compact",
+        passed=pass_prompt_selector,
+        error="" if pass_prompt_selector else (
+            f"active={ACTIVE_CHAT_PROMPT_NAME}; default={selector_default}; compact={selector_compact}; "
+            f"explicit={selector_compact_explicit}"
+        ),
+        response_text=json.dumps({
+            "active": ACTIVE_CHAT_PROMPT_NAME,
+            "default": selector_default,
+            "compact": selector_compact,
+            "explicit": selector_compact_explicit,
+        }, ensure_ascii=False),
         duration_ms=int((time.time() - started) * 1000),
     ))
 
@@ -3392,21 +3437,20 @@ def _run_h021_unit_tests() -> list[Result]:
         duration_ms=int((time.time() - started) * 1000),
     ))
 
-    family_prompt = CHAT_SYSTEM_PROMPT.lower()
+    family_prompt = _chat_system_prompt_for_params({"purpose": "family"}).lower()
     pass_family_prompt = (
-        "{{scenario_overlay}}" in family_prompt
-        and "{{facet_overlays}}" in family_prompt
-        and "основной prompt не хранит сценарную матрицу фактов" in family_prompt
-        and "scenario overlay" in family_prompt
-        and "facet overlay" in family_prompt
-        and "purpose" in family_prompt
+        "{{scenario_overlay}}" not in family_prompt
+        and "{{facet_overlays}}" not in family_prompt
+        and "сем" in family_prompt
+        and "final_question" in family_prompt
+        and "visible_options" in family_prompt
     )
     results.append(Result(
         suite="h029",
         scenario="family_personalization_is_in_chat_prompt",
         passed=pass_family_prompt,
         error="" if pass_family_prompt else "family/purpose constraints missing in chat prompt",
-        response_text="family prompt ok" if pass_family_prompt else CHAT_SYSTEM_PROMPT[:1000],
+        response_text="family prompt ok" if pass_family_prompt else family_prompt[:1000],
         duration_ms=int((time.time() - started) * 1000),
     ))
 

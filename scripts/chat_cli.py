@@ -628,8 +628,27 @@ def _load_prompt(name: str) -> str:
     return path.read_text(encoding="utf-8").strip()
 
 
+def _active_chat_prompt_file() -> str:
+    """Выбирает chat prompt тем же env-контрактом, что Telegram runtime."""
+    value = os.getenv("NMBOT_CHAT_PROMPT", "chat_v1").strip().lower()
+    aliases = {
+        "": "chat_v1.txt",
+        "default": "chat_v1.txt",
+        "baseline": "chat_v1.txt",
+        "chat_v1": "chat_v1.txt",
+        "compact": "chat_v1_compact.txt",
+        "chat_v1_compact": "chat_v1_compact.txt",
+    }
+    if value not in aliases:
+        raise ValueError(
+            "NMBOT_CHAT_PROMPT must be one of: default, baseline, chat_v1, compact, chat_v1_compact"
+        )
+    return aliases[value]
+
+
 SEARCH_SYSTEM_PROMPT = _load_prompt("search_v1.txt")
-CHAT_SYSTEM_PROMPT = _load_prompt("chat_v1.txt")
+ACTIVE_CHAT_PROMPT_FILE = _active_chat_prompt_file()
+CHAT_SYSTEM_PROMPT = _load_prompt(ACTIVE_CHAT_PROMPT_FILE)
 
 
 def _load_prompt_path(relative_path: str) -> str:

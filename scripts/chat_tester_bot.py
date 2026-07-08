@@ -2390,6 +2390,164 @@ def _compact_option_text(value: Any) -> str:
     ).strip()
 
 
+_BUILDING_STATUS_KEYS = (
+    "delivered_houses",
+    "under_construction_houses",
+    "building_statuses",
+    "houses",
+    "houses_status",
+    "settlement_info",
+)
+
+
+def _building_status_fields_from_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Корпусные факты из MCP/search JSON поднимаем на уровень option.
+
+    Общий срок ЖК (`ready`) не равен статусу каждого корпуса. Если MCP вернул
+    корпусную разбивку, она должна пережить `_extract_options()` и попасть в
+    `selected_option`, иначе follow-up снова начнёт отвечать по грубому ready.
+    """
+    out: dict[str, Any] = {}
+    for key in _BUILDING_STATUS_KEYS:
+        value = item.get(key)
+        if not _looks_missing(value):
+            out[key] = value
+    return out
+
+
+def _has_building_status_fields(card: Any) -> bool:
+    if not isinstance(card, dict):
+        return False
+    if any(not _looks_missing(card.get(key)) for key in _BUILDING_STATUS_KEYS):
+        return True
+    raw = card.get("raw")
+    return isinstance(raw, dict) and any(not _looks_missing(raw.get(key)) for key in _BUILDING_STATUS_KEYS)
+
+
+def _is_building_readiness_question(text: str) -> bool:
+    """Вопрос про корпуса/ключи/заселение требует fact_check, а не chat-only."""
+    low = str(text or "").lower().replace("ё", "е")
+    building_markers = (
+        "корпус", "корпуса", "корпусов", "дом", "дома", "очеред",
+        "ключ", "ключи", "выдача", "заселен", "заселение", "заехать",
+    )
+    ready_markers = (
+        "сдан", "сданы", "сдана", "готов", "готовые", "строятся", "строится",
+        "стадия", "быстр", "срок сдач", "ввод", "гк",
+    )
+    return any(m in low for m in building_markers) and any(m in low for m in ready_markers)
+
+
+def _selected_option_for_fact_check(state: dict[str, Any]) -> dict[str, Any] | None:
+    selected = state.get("selected_option")
+    if isinstance(selected, dict) and selected.get("name"):
+        return selected
+    visible = state.get("visible_options") if isinstance(state.get("visible_options"), list) else []
+    if len(visible) == 1 and isinstance(visible[0], dict) and visible[0].get("name"):
+        return visible[0]
+    last = state.get("last_options") if isinstance(state.get("last_options"), list) else []
+    if len(last) == 1 and isinstance(last[0], dict) and last[0].get("name"):
+        return last[0]
+    return None
+
+
+def _building_fact_check_params(option: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "purpose": "fact_check",
+        "selected_option_name": option.get("name") or option.get("complex_name") or "",
+        "fact_to_check": "building_statuses houses delivered stage keys settlement",
+        "need": ["houses", "building_statuses", "delivered", "stage", "ready_quarter", "infrastructure"],
+    }
+
+
+def _should_run_building_status_fact_check(text: str, state: dict[str, Any]) -> bool:
+    return _is_building_readiness_question(text) and _selected_option_for_fact_check(state) is not None
+
+
+def _short_fact_list(value: Any, limit: int = 8) -> str:
+    if _looks_missing(value):
+        return ""
+    if isinstance(value, list):
+        parts: list[str] = []
+        for row in value:
+            if isinstance(row, dict):
+                name = row.get("name") or row.get("building") or row.get("corpus") or row.get("house") or "корпус"
+                status = row.get("status") or row.get("stage") or row.get("ready") or row.get("delivery") or ""
+                year = row.get("built_year") or row.get("year") or ""
+                quarter = row.get("ready_quarter") or ""
+                tail = ", ".join(str(x) for x in (status, f"{quarter} кв." if quarter else "", year) if str(x or "").strip())
+                parts.append(f"{name} ({tail})" if tail else str(name))
+            else:
+                parts.append(str(row))
+        shown = parts[:limit]
+        if len(parts) > limit:
+            shown.append(f"и ещё {len(parts) - limit}")
+        return "; ".join(shown)
+    if isinstance(value, dict):
+        return _join_fact_values(value)
+    return str(value).strip()
+
+
+def _split_houses_by_status(houses: Any) -> tuple[str, str]:
+    if not isinstance(houses, list):
+        return "", ""
+    delivered: list[Any] = []
+    building: list[Any] = []
+    for row in houses:
+        text = json.dumps(row, ensure_ascii=False).lower() if isinstance(row, dict) else str(row).lower()
+        if any(m in text for m in ("сдан", "заселен", "done", "gk", "ключ")):
+            delivered.append(row)
+        elif any(m in text for m in ("стро", "фасад", "этаж", "pit", "floor", "facade")):
+            building.append(row)
+    return _short_fact_list(delivered), _short_fact_list(building)
+
+
+def _building_status_unknown_response(option: dict[str, Any] | None) -> str:
+    name = (option or {}).get("name") or (option or {}).get("complex_name") or "этому ЖК"
+    return (
+        f"По {name} у меня сейчас есть только общий срок по проекту, но нет точной разбивки по корпусам. "
+        "Поэтому я не буду делать вывод по готовности корпусов: общий срок ЖК — это не статус каждого корпуса.\n\n"
+        "Лучше уточню у оператора, какие корпуса уже сданы, где идёт выдача ключей и куда можно быстрее заехать. "
+        "Хотите, передам вопрос оператору?"
+    )
+
+
+def _building_status_response_from_search(search_text: str, fallback_option: dict[str, Any] | None = None) -> str:
+    data = _json_from_text(search_text)
+    rows: list[dict[str, Any]] = []
+    if isinstance(data, dict):
+        for section in ("facts", "near"):
+            values = data.get(section)
+            if isinstance(values, list):
+                rows.extend([row for row in values if isinstance(row, dict)])
+    fact = next((row for row in rows if _has_building_status_fields(row)), None)
+    if fact is None:
+        return _building_status_unknown_response(fallback_option)
+
+    name = fact.get("name") or (fallback_option or {}).get("name") or "этому ЖК"
+    delivered = _short_fact_list(fact.get("delivered_houses"))
+    under_construction = _short_fact_list(fact.get("under_construction_houses"))
+    if not delivered and not under_construction:
+        delivered, under_construction = _split_houses_by_status(fact.get("houses"))
+    houses_status = _short_fact_list(fact.get("houses_status"))
+    settlement = _short_fact_list(fact.get("settlement_info"))
+    infrastructure = _join_fact_values(fact.get("infrastructure"), fact.get("family_infrastructure"), fact.get("infrastructure_family"))
+
+    lines = [f"По {name} вижу корпусную разбивку, поэтому тут нельзя смотреть только на общий срок ЖК."]
+    if delivered:
+        lines.append(f"Уже сданы или заселяются: {delivered}.")
+    if under_construction:
+        lines.append(f"Ещё строятся: {under_construction}.")
+    if houses_status and houses_status not in " ".join(lines):
+        lines.append(houses_status.rstrip(".") + ".")
+    if settlement:
+        lines.append(settlement.rstrip(".") + ".")
+    if infrastructure:
+        lines.append(f"По инфраструктуре: {infrastructure}.")
+    lines.append("Какой корпус хотите проверить подробнее?")
+    return "\n\n".join(line for line in lines if line.strip())
+
+
 def _extract_options(search_text: str) -> list[dict[str, Any]]:
     """H016: превращает facts+near в индексированный список вариантов для follow-up."""
     data = _json_from_text(search_text)
@@ -2440,6 +2598,7 @@ def _extract_options(search_text: str) -> list[dict[str, Any]]:
             "shops": _join_fact_values(item.get("shops"), item.get("services"), item.get("retail"), item.get("магазины"), item.get("сервисы")),
             "raw": item,
         }
+        opt.update(_building_status_fields_from_item(item))
         opt.update(scenario_blocks)
         options.append(opt)
     return options[:8]
@@ -5692,6 +5851,52 @@ def main() -> None:
                     "is_error": False,
                     "error": None,
                     "cost": {},
+                })
+                await update.message.reply_text(_to_html(response), parse_mode="HTML")
+                return
+            elif followup_intent in {"consultation_answer", "conversation_answer"} and _should_run_building_status_fact_check(text, state):
+                option = _selected_option_for_fact_check(state)
+                fact_params = _building_fact_check_params(option or {})
+                response, new_params, search_meta, chat_meta = await client.ask(
+                    query=text,
+                    search_model=state["search_model"],
+                    chat_model=state["chat_model"],
+                    use_mcp=state["mcp"],
+                    params=fact_params,
+                )
+                search_text = search_meta.get("_response_text", "") if isinstance(search_meta, dict) else ""
+                if isinstance(new_params, dict) and new_params:
+                    state["params"] = {**state.get("params", {}), **new_params}
+                _refresh_search_state(state, search_meta if isinstance(search_meta, dict) else {})
+                enriched_options = state.get("last_options") if isinstance(state.get("last_options"), list) else []
+                if enriched_options:
+                    state["selected_option"] = enriched_options[0]
+                    state["visible_options"] = enriched_options[:1]
+                response = _prepare_response_text(_building_status_response_from_search(search_text, option))
+                _store_active_conversation_topic(state, text)
+                _remember_bot_response(state, response, offer_type="fact_check_building_statuses", answer_kind="fact_check_building_statuses")
+                _log_event({
+                    "kind": "user_message",
+                    "uid": uid,
+                    "user_text": text,
+                    "dialog_intent": "fact_check_building_statuses",
+                    "search_model": state["search_model"],
+                    "chat_model": state["chat_model"],
+                    "mcp": state["mcp"],
+                    "params_before": params_before,
+                    "params_after": dict(state.get("params", {})),
+                    "params_delta": new_params if isinstance(new_params, dict) else {},
+                    "response_text": response,
+                    "response_len": len(response),
+                    "buttons": [],
+                    "duration_ms": 0,
+                    "is_error": False,
+                    "error": None,
+                    "cost": {
+                        "search": search_meta.get("cost", {}) if isinstance(search_meta, dict) else {},
+                        "chat": chat_meta.get("cost", {}) if isinstance(chat_meta, dict) else {},
+                    },
+                    "dialog_plan": dialog_plan,
                 })
                 await update.message.reply_text(_to_html(response), parse_mode="HTML")
                 return

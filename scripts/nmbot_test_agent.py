@@ -83,6 +83,9 @@ from chat_tester_bot import (  # noqa: E402
     _callback_button_text,
     _append_dialog_turn,
     _build_known_option_prompt,
+    _building_fact_check_params,
+    _building_status_response_from_search,
+    _building_status_unknown_response,
     _build_consultation_answer_prompt,
     _build_negation_response_prompt,
     _build_conversation_answer_prompt,
@@ -122,6 +125,7 @@ from chat_tester_bot import (  # noqa: E402
     _normalize_phone,
     _extract_phone_from_text,
     _has_phone_capture_context,
+    _is_building_readiness_question,
     _looks_like_phone_text,
     _non_text_fallback_response,
     _non_text_message_type,
@@ -144,6 +148,7 @@ from chat_tester_bot import (  # noqa: E402
     _refresh_search_state,
     _resolve_dialog_intent,
     _remember_bot_response,
+    _should_run_building_status_fact_check,
     _safe_user_error_message,
     _strip_markdown,
     _strip_rejected_options_from_response,
@@ -1610,6 +1615,52 @@ def _run_h021_unit_tests() -> list[Result]:
         passed=pass_structured_sensitive,
         error="" if pass_structured_sensitive else f"ok={ok_fact_check}; bad={bad_fact_check}",
         response_text=f"ok={ok_fact_check}; bad={bad_fact_check}",
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    # H029: вопрос про корпуса/ключи нельзя отвечать по общему сроку ЖК.
+    # Если корпусных фактов нет — это unknown, а не "готовых корпусов нет".
+    luchi_option = {"name": "ЖК «Лучи»", "ready": "сдача в 2027 г."}
+    luchi_state = {
+        "selected_option": luchi_option,
+        "last_options": [luchi_option],
+        "visible_options": [luchi_option],
+    }
+    corpus_question = "А какие корпуса уже сданы? Мне важно заехать поскорее."
+    corpus_params = _building_fact_check_params(luchi_option)
+    unknown_corpus_response = _building_status_unknown_response(luchi_option).lower()
+    corpus_search = json.dumps({
+        "facts": [{
+            "name": "ЖК «Лучи»",
+            "delivered_houses": ["Корпус 1 (2019)", "Корпус 12 (2023)"],
+            "under_construction_houses": ["Корпус 5-9 (сдача 2027, стадия: фасад)"],
+            "settlement_info": "Выдача ключей осуществляется по мере ввода корпусов в эксплуатацию.",
+            "infrastructure": "4 детских сада и 2 школы, рядом парк.",
+        }],
+        "near": [],
+    }, ensure_ascii=False)
+    corpus_options = _extract_options(corpus_search)
+    corpus_rendered = _building_status_response_from_search(corpus_search, luchi_option).lower()
+    pass_corpus_fact_check = (
+        _is_building_readiness_question(corpus_question)
+        and _should_run_building_status_fact_check(corpus_question, luchi_state)
+        and corpus_params.get("purpose") == "fact_check"
+        and corpus_params.get("selected_option_name") == "ЖК «Лучи»"
+        and "building_statuses" in corpus_params.get("fact_to_check", "")
+        and corpus_options
+        and corpus_options[0].get("delivered_houses") == ["Корпус 1 (2019)", "Корпус 12 (2023)"]
+        and "готовых корпусов нет" not in unknown_corpus_response
+        and "не буду делать вывод" in unknown_corpus_response
+        and "уже сданы" in corpus_rendered
+        and "корпус 1" in corpus_rendered
+        and "еще строятся" in corpus_rendered.replace("ё", "е")
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="building_readiness_question_uses_fact_check_not_project_ready",
+        passed=pass_corpus_fact_check,
+        error="" if pass_corpus_fact_check else f"params={corpus_params}; options={corpus_options}; unknown={unknown_corpus_response}; rendered={corpus_rendered}",
+        response_text=f"params={corpus_params}; unknown={unknown_corpus_response}; rendered={corpus_rendered}",
         duration_ms=int((time.time() - started) * 1000),
     ))
 

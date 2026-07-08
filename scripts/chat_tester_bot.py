@@ -127,6 +127,41 @@ def _chat_system_prompt_for_params(params: dict[str, Any] | None) -> str:
         prompt = f"{prompt}\n\n## Дополнительный facet-модуль\n{facet_block}"
     return prompt
 
+
+def _len_text(value: Any) -> int:
+    return len(str(value or ""))
+
+
+def _log_model_payload_metrics(stage: str, request_data: dict[str, Any], *, retry: int | None = None) -> None:
+    """Append-only metrics for model payload size, without prompt contents.
+
+    The log is intentionally metadata-only: no user text, no prompts, no API keys,
+    no model responses. It lets us accumulate real production/staging evidence about
+    context bloat before changing prompt contracts.
+    """
+    try:
+        parameters = request_data.get("parameters") if isinstance(request_data.get("parameters"), dict) else {}
+        row = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "kind": "model_payload_metrics",
+            "stage": str(stage or "unknown"),
+            "model": str(request_data.get("model") or ""),
+            "service": str(request_data.get("service") or ""),
+            "query_chars": _len_text(request_data.get("query")),
+            "system_prompt_chars": _len_text(request_data.get("system_prompt")),
+            "max_tokens": parameters.get("max_tokens"),
+            "temperature": parameters.get("temperature"),
+            "has_mcp": bool(request_data.get("mcp_servers")),
+        }
+        if retry is not None:
+            row["retry"] = retry
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        path = LOGS_DIR / f"model_payload_metrics-{datetime.now(timezone.utc).date().isoformat()}.jsonl"
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except Exception as e:
+        LOGGER.warning("model payload metrics log failed: %s", e)
+
 AVAILABLE_MODELS = ANSWER_MODELS
 SHOW_MODEL_STATS: Final[bool] = os.getenv("NMBOT_SHOW_MODEL_STATS", "1") != "0"
 # Legacy stage presenter is intentionally opt-in.
@@ -391,6 +426,7 @@ class OvermindClient:
             full_query = f"Текущие параметры: {json.dumps(params, ensure_ascii=False)}\n\nКлиент: {query}"
 
         search_request_data = {
+            "_payload_stage": "main_search",
             "query": full_query,
             "service": "openrouter",
             "model": search_model,
@@ -420,6 +456,7 @@ class OvermindClient:
             f"Найденные факты, которыми можно пользоваться:\n{search_result}"
         )
         chat_request_data = {
+            "_payload_stage": "main_answer",
             "query": chat_query,
             "service": "openrouter",
             "model": chat_model,
@@ -495,6 +532,7 @@ class OvermindClient:
         }
         chat_query = _build_known_option_prompt(option, client_request)
         chat_request_data = {
+            "_payload_stage": "selected_option_answer",
             "query": chat_query,
             "service": "openrouter",
             "model": chat_model,
@@ -528,6 +566,7 @@ class OvermindClient:
         }
         chat_query = _build_negation_response_prompt(intent=intent, user_text=user_text, state=state, meta=meta or {})
         chat_request_data = {
+            "_payload_stage": "negation_answer",
             "query": chat_query,
             "service": "openrouter",
             "model": chat_model,
@@ -560,6 +599,7 @@ class OvermindClient:
         }
         chat_query = _build_conversation_answer_prompt(user_text=user_text, state=state, dialog_plan=dialog_plan or {})
         chat_request_data = {
+            "_payload_stage": "conversation_answer",
             "query": chat_query,
             "service": "openrouter",
             "model": chat_model,
@@ -592,6 +632,7 @@ class OvermindClient:
         }
         chat_query = _build_consultation_answer_prompt(user_text=user_text, state=state, dialog_plan=dialog_plan or {})
         chat_request_data = {
+            "_payload_stage": "consultation_answer",
             "query": chat_query,
             "service": "openrouter",
             "model": chat_model,
@@ -625,6 +666,7 @@ class OvermindClient:
             "Authorization": f"Bearer {OVERMIND_TOKEN}",
         }
         request_data = {
+            "_payload_stage": "client_card_summary",
             "query": prompt,
             "service": "openrouter",
             "model": model,
@@ -669,6 +711,7 @@ class OvermindClient:
             "Верни строго JSON без markdown: {\"items\":[{\"idx\":1,\"angle\":\"...\",\"tone\":\"...\"}]}"
         )
         request_data = {
+            "_payload_stage": "reason_layer",
             "query": json.dumps(payload, ensure_ascii=False),
             "service": "openrouter",
             "model": model,
@@ -710,6 +753,7 @@ class OvermindClient:
             "Верни только JSON: {\"items\":[{\"idx\":1,\"benefit\":\"...\"}]}"
         )
         request_data = {
+            "_payload_stage": "sales_phrase",
             "query": json.dumps(payload, ensure_ascii=False),
             "service": "openrouter",
             "model": model,
@@ -740,6 +784,7 @@ class OvermindClient:
             "Authorization": f"Bearer {OVERMIND_TOKEN}",
         }
         request_data = {
+            "_payload_stage": "option_enrichment_search",
             "query": query,
             "service": "openrouter",
             "model": model,
@@ -757,6 +802,9 @@ class OvermindClient:
     async def _run_gateway_request(self, request_data: dict, headers: dict, timeout: int) -> tuple[str, dict]:
         """Возвращает (response_text, metadata). При ошибке возвращает (error_text, {})."""
         session = await self.ensure_session()
+        request_data = dict(request_data)
+        payload_stage = str(request_data.pop("_payload_stage", "gateway"))
+        _log_model_payload_metrics(payload_stage, request_data)
         payload = {
             "agent_name": "gateway-agent",
             "endpoint": "/process",

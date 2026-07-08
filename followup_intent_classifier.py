@@ -4,9 +4,14 @@ import asyncio
 import json
 import os
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import aiohttp
+
+REPO_ROOT = Path(__file__).resolve().parent
+LOGS_DIR = REPO_ROOT / "logs"
 
 DEFAULT_INTENT = "clarify"
 DEFAULT_DIALOG_ACTION = "continue_from_memory"
@@ -185,6 +190,34 @@ def _env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
+def _len_text(value: Any) -> int:
+    return len(str(value or ""))
+
+
+def _log_model_payload_metrics(stage: str, request_data: dict[str, Any]) -> None:
+    """Append payload-size telemetry only; never write prompt/query contents."""
+    try:
+        params = request_data.get("parameters") if isinstance(request_data.get("parameters"), dict) else {}
+        row = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "kind": "model_payload_metrics",
+            "stage": str(stage or "unknown"),
+            "model": str(request_data.get("model") or ""),
+            "service": str(request_data.get("service") or ""),
+            "query_chars": _len_text(request_data.get("query")),
+            "system_prompt_chars": _len_text(request_data.get("system_prompt")),
+            "max_tokens": params.get("max_tokens"),
+            "temperature": params.get("temperature"),
+            "has_mcp": bool(request_data.get("mcp_servers")),
+        }
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        path = LOGS_DIR / f"model_payload_metrics-{datetime.now(timezone.utc).date().isoformat()}.jsonl"
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+
+
 def _required_env(name: str) -> str:
     value = _env(name)
     if not value:
@@ -292,6 +325,7 @@ async def classify_followup_intent(
         "parameters": {"temperature": 0.0, "max_tokens": 700},
         "external_api_key": _required_env("OPENROUTER_API_KEY"),
     }
+    _log_model_payload_metrics("followup_classifier", request_data)
 
     try:
         token = _overmind_token()
@@ -391,6 +425,7 @@ async def plan_dialog_state(
         "parameters": {"temperature": 0.0, "max_tokens": 900},
         "external_api_key": _required_env("OPENROUTER_API_KEY"),
     }
+    _log_model_payload_metrics("dialog_planner", request_data)
 
     fallback = {
         "dialog_action": DEFAULT_DIALOG_ACTION,

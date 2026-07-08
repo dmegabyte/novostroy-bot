@@ -750,6 +750,8 @@ def _complex_name_grounding_key(name: Any) -> str:
             word = word[:-3] + "ий"
         elif len(word) > 5 and word.endswith("ском"):
             word = word[:-4] + "ский"
+        elif len(word) > 4 and word.endswith("ии"):
+            word = word[:-2] + "ия"
         elif len(word) > 4 and word.endswith("ом"):
             word = word[:-2] + "ый"
         elif len(word) > 4 and word.endswith("ых"):
@@ -1512,10 +1514,10 @@ def _run_h021_unit_tests() -> list[Result]:
     # H029: grounding-gate принимает естественную падежную форму только если
     # она сводится к имени ЖК из структурного MCP/search JSON.
     grounding_search = json.dumps({
-        "facts": [{"name": "Кузьминский лес"}],
+        "facts": [{"name": "Кузьминский лес"}, {"name": "Жилой район «Скандинавия»"}],
         "near": [{"name": "ЖК «Дюна»"}],
     }, ensure_ascii=False)
-    grounding_known = _ux_check_response("Срок позже, чем у «Кузьминского леса», а детали по «Кузьминском лесу» уточним.", grounding_search)
+    grounding_known = _ux_check_response("Срок позже, чем у «Кузьминского леса», детали по «Кузьминском лесу» уточним, а в «Скандинавии» есть отделка.", grounding_search)
     grounding_unknown = _ux_check_response("Ещё есть «Несуществующего леса».", grounding_search)
     known_check = next(c for c in grounding_known if c["name"] == "ux_mcp_grounded_quoted_complexes")
     unknown_check = next(c for c in grounding_unknown if c["name"] == "ux_mcp_grounded_quoted_complexes")

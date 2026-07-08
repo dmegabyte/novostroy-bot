@@ -163,6 +163,10 @@ python3 scripts/nmbot_test_agent.py --suite dialog   # контрольный д
 python3 scripts/nmbot_test_agent.py --suite stateful # multi-turn: память, выбор, оператор
 python3 scripts/nmbot_test_agent.py --suite compare  # multi-turn: сравнение, рекомендация, оператор
 python3 scripts/nmbot_test_agent.py --json           # JSON для CI
+
+# Read-only health: service/env/errors/client cards/payload sizes + answer latency
+python3 scripts/nmbot_health.py
+python3 scripts/nmbot_health.py --json
 ```
 
 ## Документация

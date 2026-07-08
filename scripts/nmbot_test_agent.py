@@ -95,6 +95,7 @@ from chat_tester_bot import (  # noqa: E402
     _build_conversation_answer_prompt,
     _build_followup_expansion_query,
     _compact_option_text,
+    _compact_answer_facts_payload,
     _client_card_state_snapshot,
     _default_state,
     _fallback_client_card_summary,
@@ -1566,6 +1567,64 @@ def _run_h021_unit_tests() -> list[Result]:
         passed=pass_visible_select,
         error="" if pass_visible_select else f"visible={visible_options}; indexed={_option_by_index(state_visible, 1)}; one={intent_one}; two={intent_two_text}; budget={intent_budget_mixed}; one_exp={intent_one_but_expensive}; delta={normalized_delta}; invented={invented_budget_delta}; explicit={explicit_budget_delta}",
         response_text=f"visible={[o.get('name') for o in visible_options]}; indexed={(_option_by_index(state_visible, 1) or {}).get('name')}; one={intent_one.get('intent')}; two={intent_two_text.get('intent')}; budget={intent_budget_mixed.get('intent')}; one_exp={intent_one_but_expensive.get('intent')}; delta={normalized_delta}; invented={invented_budget_delta}; explicit={explicit_budget_delta}",
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    compact_raw_search = json.dumps({
+        "facts": [
+            {
+                "name": "ЖК «Лучи»",
+                "location": "Солнцево",
+                "price_range": "от 11 005 062 руб.",
+                "metro": "м. Солнцево, 3 минуты пешком",
+                "ready": "часть корпусов сдана",
+                "developer": "ЛСР",
+                "delivered_houses": ["Корпус 1", "Корпус 2", "Корпус 12"],
+                "under_construction_houses": ["Корпус 5-9, сдача 2027"],
+                "family_infrastructure": {"school": "2 школы", "kindergarten": "4 детских сада"},
+                "raw": {"huge": "technical dump"},
+                "debug": "internal trace",
+                "task_id": "1975535",
+                "payload_preview": "secret-ish internal payload",
+            },
+            {"name": "ЖК «Второй»", "location": "ЗАО", "price_range": "от 12 млн", "debug": "drop"},
+            {"name": "ЖК «Третий»", "location": "ЮАО", "price_range": "от 10 млн"},
+            {"name": "ЖК «Четвёртый»", "location": "ЮАО", "price_range": "от 9 млн"},
+        ],
+        "near": [
+            {"name": "ЖК «Около»", "why_close": "рядом", "trace": "drop"},
+            {"name": "ЖК «Рядом»", "why_close": "похожий бюджет"},
+            {"name": "ЖК «Лишний»", "why_close": "не должен попасть"},
+        ],
+        "missing": ["актуальное наличие"],
+        "params": {"rooms": "1", "district": "ЗАО"},
+        "metadata": {"drop": True},
+    }, ensure_ascii=False, indent=2)
+    compact_payload = _compact_answer_facts_payload(
+        compact_raw_search,
+        params={"rooms": "1"},
+        new_params={"district": "ЗАО"},
+    )
+    compact_text = json.dumps(compact_payload, ensure_ascii=False, separators=(",", ":"))
+    compact_noise = [marker for marker in ("technical dump", "internal trace", "1975535", "payload_preview", "metadata", "raw") if marker in compact_text]
+    pass_compact_payload = (
+        compact_payload.get("source_format") == "structured"
+        and len(compact_payload.get("facts") or []) == 3
+        and len(compact_payload.get("near") or []) == 2
+        and (compact_payload.get("facts") or [{}])[0].get("name") == "ЖК «Лучи»"
+        and "delivered_houses" in (compact_payload.get("facts") or [{}])[0]
+        and "under_construction_houses" in (compact_payload.get("facts") or [{}])[0]
+        and "family_infrastructure" in (compact_payload.get("facts") or [{}])[0]
+        and "актуальное наличие" in compact_text
+        and len(compact_text) < len(compact_raw_search)
+        and not compact_noise
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="main_answer_compact_payload_keeps_facts_without_technical_noise",
+        passed=pass_compact_payload,
+        error="" if pass_compact_payload else f"compact={compact_payload}; noise={compact_noise}; raw_len={len(compact_raw_search)} compact_len={len(compact_text)}",
+        response_text=f"facts={len(compact_payload.get('facts') or [])}; near={len(compact_payload.get('near') or [])}; raw_len={len(compact_raw_search)}; compact_len={len(compact_text)}; noise={compact_noise}",
         duration_ms=int((time.time() - started) * 1000),
     ))
 

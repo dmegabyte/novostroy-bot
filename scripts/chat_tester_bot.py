@@ -449,11 +449,13 @@ class OvermindClient:
 
         new_params = self._extract_params(search_result)
         effective_params = {**(params or {}), **new_params}
+        compact_facts = _compact_answer_facts_payload(search_result, params=params or {}, new_params=new_params)
+        compact_search_result = json.dumps(compact_facts, ensure_ascii=False, separators=(",", ":"))
         chat_query = (
             f"Запрос клиента: {query}\n\n"
             f"Текущие параметры: {json.dumps(params or {}, ensure_ascii=False)}\n"
             f"Обновления параметров: {json.dumps(new_params, ensure_ascii=False)}\n\n"
-            f"Найденные факты, которыми можно пользоваться:\n{search_result}"
+            f"Найденные факты, которыми можно пользоваться:\n{compact_search_result}"
         )
         chat_request_data = {
             "_payload_stage": "main_answer",
@@ -2445,6 +2447,121 @@ def _json_from_text(text: str) -> dict:
     except Exception:
         return {}
     return {}
+
+
+_ANSWER_FACT_FIELDS = (
+    "name", "title", "location", "district",
+    "price_range", "price", "prices", "cost", "min_price",
+    "area", "square", "площадь",
+    "finishing", "renovation",
+    "metro", "transport", "walk_minutes",
+    "ready", "status", "deadline", "ready_quarter", "built_year", "stage",
+    "developer", "dev", "застройщик",
+    "rooms", "room_types", "комнатность",
+    "why_close", "why_family", "why_investment", "why_invest", "why_rental", "why_mortgage",
+    "infrastructure", "family_infrastructure", "infrastructure_family",
+    "schools", "school", "школы", "школа",
+    "kindergartens", "kindergarten", "детские_сады", "детский_сад",
+    "parks", "park", "green_area", "forest", "embankment", "парки", "парк", "лес", "набережная",
+    "clinics", "clinic", "polyclinic", "pharmacies", "поликлиника", "аптеки",
+    "yards", "yard_without_cars", "playgrounds", "children_ground", "sports_ground",
+    "shops", "services", "retail", "магазины", "сервисы",
+    "link", "missing_reason",
+)
+
+
+_ANSWER_FACT_NOISE_KEYS = {
+    "raw", "debug", "trace", "metadata", "payload", "payload_preview", "task_id",
+    "request", "response", "thinking", "reasoning", "_buttons", "buttons",
+    "source_html", "html", "markdown", "logs", "error", "exception",
+}
+
+
+def _compact_answer_value(value: Any, *, list_limit: int = 12) -> Any:
+    """Компактное значение для answer-model facts payload.
+
+    Цель: убрать технический шум из MCP/search ответа, но сохранить факты,
+    которые нужны LLM для клиентского текста: корпуса, инфраструктуру, цены,
+    сроки, локацию и причины подбора.
+    """
+    if _looks_missing(value):
+        return None
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, nested in value.items():
+            if str(key) in _ANSWER_FACT_NOISE_KEYS:
+                continue
+            compact = _compact_answer_value(nested, list_limit=list_limit)
+            if compact is not None:
+                out[str(key)] = compact
+        return out or None
+    if isinstance(value, list):
+        items: list[Any] = []
+        for nested in value[:list_limit]:
+            compact = _compact_answer_value(nested, list_limit=list_limit)
+            if compact is not None:
+                items.append(compact)
+        if len(value) > list_limit:
+            items.append(f"и ещё {len(value) - list_limit}")
+        return items or None
+    if isinstance(value, str):
+        text = re.sub(r"\s+", " ", value).strip()
+        return text or None
+    return value
+
+
+def _compact_answer_fact_item(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {}
+    out: dict[str, Any] = {}
+    allowed = set(_ANSWER_FACT_FIELDS) | set(_BUILDING_STATUS_KEYS)
+    for key in allowed:
+        if key not in item:
+            continue
+        compact = _compact_answer_value(item.get(key))
+        if compact is not None:
+            out[key] = compact
+    return out
+
+
+def _compact_answer_facts_payload(
+    search_result: str,
+    *,
+    params: dict[str, Any] | None = None,
+    new_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Готовит компактный facts payload для `main_answer`.
+
+    Search/MCP остаётся источником истины, но answer-model больше не получает
+    весь сырой search_result с debug/raw/metadata. Code слой оставляет только
+    полезный материал для клиентского ответа.
+    """
+    data = _json_from_text(search_result)
+    if not data:
+        preview = re.sub(r"\s+", " ", str(search_result or "")).strip()[:1200]
+        return {
+            "source_format": "text_fallback",
+            "current_params": params or {},
+            "new_params": new_params or {},
+            "facts_text_preview": preview,
+        }
+
+    facts = data.get("facts") if isinstance(data.get("facts"), list) else []
+    near = data.get("near") if isinstance(data.get("near"), list) else []
+    compact: dict[str, Any] = {
+        "source_format": "structured",
+        "current_params": params or {},
+        "new_params": new_params or {},
+        "facts": [row for row in (_compact_answer_fact_item(item) for item in facts[:3]) if row],
+        "near": [row for row in (_compact_answer_fact_item(item) for item in near[:2]) if row],
+    }
+    missing = _compact_answer_value(data.get("missing"))
+    if missing is not None:
+        compact["missing"] = missing
+    search_params = _compact_answer_value(data.get("params"))
+    if search_params is not None:
+        compact["search_params"] = search_params
+    return compact
 
 
 def _price_min(value: Any) -> int | None:

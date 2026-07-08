@@ -1794,6 +1794,11 @@ def _run_h021_unit_tests() -> list[Result]:
         and corpus_params.get("purpose") == "fact_check"
         and corpus_params.get("selected_option_name") == "ЖК «Лучи»"
         and "building_statuses" in corpus_params.get("fact_to_check", "")
+        and "corpus_delivery_status" in corpus_params.get("fact_to_check", "")
+        and "overall ЖК/project ready date" in corpus_params.get("fact_to_check", "")
+        and "delivered_houses" in corpus_params.get("need", [])
+        and "under_construction_houses" in corpus_params.get("need", [])
+        and "project_ready_secondary" in corpus_params.get("need", [])
         and corpus_options
         and corpus_options[0].get("delivered_houses") == ["Корпус 1 (2019)", "Корпус 12 (2023)"]
         and "готовых корпусов нет" not in unknown_corpus_response

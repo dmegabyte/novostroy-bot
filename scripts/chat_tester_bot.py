@@ -2479,7 +2479,7 @@ _ANSWER_FACT_FIELDS = (
     "area", "square", "площадь",
     "finishing", "renovation",
     "metro", "transport", "walk_minutes",
-    "ready", "status", "deadline", "ready_quarter", "built_year", "stage",
+    "ready", "status", "status_info", "delivered_status", "deadline", "ready_quarter", "built_year", "stage",
     "developer", "dev", "застройщик",
     "rooms", "room_types", "комнатность",
     "why_close", "why_family", "why_investment", "why_invest", "why_rental", "why_mortgage",
@@ -2705,8 +2705,25 @@ def _building_fact_check_params(option: dict[str, Any]) -> dict[str, Any]:
     return {
         "purpose": "fact_check",
         "selected_option_name": option.get("name") or option.get("complex_name") or "",
-        "fact_to_check": "building_statuses houses delivered stage keys settlement",
-        "need": ["houses", "building_statuses", "delivered", "stage", "ready_quarter", "infrastructure"],
+        "fact_to_check": (
+            "corpus_delivery_status delivered_houses under_construction_houses "
+            "keys_handover settlement building_statuses houses stage ready_quarter; "
+            "prioritize корпус/дом status over overall ЖК/project ready date"
+        ),
+        "need": [
+            "delivered_houses",
+            "under_construction_houses",
+            "houses",
+            "building_statuses",
+            "delivered_status",
+            "status_info",
+            "keys_handover",
+            "settlement_info",
+            "stage",
+            "ready_quarter",
+            "infrastructure",
+            "project_ready_secondary",
+        ],
     }
 
 
@@ -6357,7 +6374,15 @@ def main() -> None:
                 if enriched_options:
                     state["selected_option"] = enriched_options[0]
                     state["visible_options"] = enriched_options[:1]
-                response = _prepare_response_text(_building_status_response_from_search(search_text, option))
+                has_corpus_facts = any(_has_building_status_fields(row) for row in enriched_options)
+                if has_corpus_facts:
+                    # Код отвечает только за правильный fact_check-запрос и нормализацию
+                    # корпуса в state. Клиентский текст пишет LLM по MCP-фактам.
+                    response = _prepare_response_text(response)
+                else:
+                    # Safety fallback: если MCP не вернул корпусную разбивку, нельзя
+                    # делать отрицательный вывод из общего срока ЖК.
+                    response = _prepare_response_text(_building_status_response_from_search(search_text, option))
                 _store_active_conversation_topic(state, text)
                 _remember_bot_response(state, response, offer_type="fact_check_building_statuses", answer_kind="fact_check_building_statuses")
                 _log_event({

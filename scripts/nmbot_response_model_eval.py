@@ -8,6 +8,8 @@
 Команды:
   python3 scripts/nmbot_response_model_eval.py export --limit 30
   python3 scripts/nmbot_response_model_eval.py run --cases data/response_eval/cases.jsonl --models google/gemini-2.5-flash,openai/gpt-4o-mini
+  python3 scripts/nmbot_response_model_eval.py run --cases data/response_eval/cases.jsonl --baseline-prompt prompts/chat_v1.txt --prompt prompts/chat_v1_compact.txt --models google/gemini-2.5-flash --limit 8
+  python3 scripts/nmbot_response_model_eval.py run --cases data/response_eval/cases.jsonl --baseline-prompt prompts/chat_v1.txt --prompt prompts/chat_v1.txt --limit 2 --dry-run
   python3 scripts/nmbot_response_model_eval.py score --results data/response_eval/results.jsonl
 """
 from __future__ import annotations
@@ -133,6 +135,63 @@ def _load_prompt() -> str:
     return (REPO / "prompts" / "chat_v1.txt").read_text(encoding="utf-8").strip()
 
 
+def _read_prompt(path: Path) -> str:
+    target = path if path.is_absolute() else REPO / path
+    return target.read_text(encoding="utf-8").strip()
+
+
+def _prompt_label(path: Path) -> str:
+    return str(path if path.is_absolute() else path)
+
+
+def _prompt_slug(value: Any) -> str:
+    return "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum() or ch == "_")
+
+
+def _params_from_search_response(search_response: str) -> dict[str, Any]:
+    obj = _loads_maybe(search_response)
+    params = obj.get("params") if isinstance(obj, dict) else {}
+    return params if isinstance(params, dict) else {}
+
+
+def _load_overlay(relative_path: str) -> str:
+    path = REPO / "prompts" / relative_path
+    return path.read_text(encoding="utf-8").strip() if path.exists() else ""
+
+
+def _chat_system_prompt_for_case(base_prompt: str, search_response: str) -> str:
+    """Assemble prompt like runtime: base chat prompt + scenario/facet overlays.
+
+    Replay tests must compare prompt variants on the same saved MCP facts without
+    losing the runtime split between main prompt and scenario overlays.
+    """
+    params = _params_from_search_response(search_response)
+    scenario_block = "Сценарий не задан: используй общий search/default контекст и не добавляй сценарных выгод."
+    purpose = _prompt_slug(params.get("purpose"))
+    if purpose:
+        overlay = _load_overlay(f"scenarios/{purpose}_v1.txt")
+        if overlay:
+            scenario_block = overlay
+    facet_blocks: list[str] = []
+    facets = params.get("facets") if isinstance(params.get("facets"), list) else []
+    for facet in facets:
+        slug = _prompt_slug(facet)
+        overlay = _load_overlay(f"facets/{slug}_v1.txt") if slug else ""
+        if overlay:
+            facet_blocks.append(overlay)
+    facet_block = "\n\n".join(facet_blocks) if facet_blocks else "Facet не задан: не добавляй ипотечные/скидочные/рассрочные claims без фактов."
+    prompt = base_prompt
+    if "{{SCENARIO_OVERLAY}}" in prompt:
+        prompt = prompt.replace("{{SCENARIO_OVERLAY}}", scenario_block)
+    else:
+        prompt = f"{prompt}\n\n## Сценарный модуль\n{scenario_block}"
+    if "{{FACET_OVERLAYS}}" in prompt:
+        prompt = prompt.replace("{{FACET_OVERLAYS}}", facet_block)
+    else:
+        prompt = f"{prompt}\n\n## Дополнительный facet-модуль\n{facet_block}"
+    return prompt
+
+
 async def _create_task(session: aiohttp.ClientSession, request_data: dict[str, Any], timeout: int) -> dict[str, Any]:
     token = _required_env("OVERMIND_TOKEN")
     overmind_url = _env("OVERMIND_URL", "https://overmind.aiaxel.ru").rstrip("/")
@@ -218,7 +277,29 @@ def _parse_models(raw: str | None) -> list[str]:
     return models
 
 
-async def run_eval(cases_path: Path, results_path: Path, models: list[str], limit: int, timeout: int, temperature: float) -> int:
+def _prompt_variants(prompt: Path | None, baseline_prompt: Path | None) -> list[tuple[str, str]]:
+    variants: list[tuple[str, str]] = []
+    if baseline_prompt:
+        variants.append((f"baseline:{_prompt_label(baseline_prompt)}", _read_prompt(baseline_prompt)))
+    if prompt:
+        variants.append((f"candidate:{_prompt_label(prompt)}", _read_prompt(prompt)))
+    if not variants:
+        variants.append(("current:prompts/chat_v1.txt", _load_prompt()))
+    return variants
+
+
+async def run_eval(
+    cases_path: Path,
+    results_path: Path,
+    models: list[str],
+    limit: int,
+    timeout: int,
+    temperature: float,
+    *,
+    prompt: Path | None = None,
+    baseline_prompt: Path | None = None,
+    dry_run: bool = False,
+) -> int:
     cases = _read_jsonl(cases_path)
     if limit > 0:
         cases = cases[:limit]
@@ -226,42 +307,61 @@ async def run_eval(cases_path: Path, results_path: Path, models: list[str], limi
         print(f"no cases: {cases_path}", file=sys.stderr)
         return 1
 
-    system_prompt = _load_prompt()
+    variants = _prompt_variants(prompt, baseline_prompt)
     rows: list[dict[str, Any]] = []
     async with aiohttp.ClientSession() as session:
         for case in cases:
-            for model in models:
-                started = time.monotonic()
-                error = ""
-                output = ""
-                meta: dict[str, Any] = {}
-                try:
-                    output, meta = await _ask_chat_model(
-                        session,
-                        model=model,
-                        user_text=str(case.get("user_text", "")),
-                        search_response=str(case.get("search_response", "")),
-                        system_prompt=system_prompt,
-                        temperature=temperature,
-                        timeout=timeout,
+            for prompt_variant, base_prompt in variants:
+                system_prompt = _chat_system_prompt_for_case(base_prompt, str(case.get("search_response", "")))
+                system_prompt_chars = len(system_prompt)
+                for model in models:
+                    started = time.monotonic()
+                    error = ""
+                    output = ""
+                    meta: dict[str, Any] = {}
+                    if dry_run:
+                        # Assembly-only mode: no Overmind/OpenRouter calls.
+                        # Keeps the saved response as a harmless placeholder so
+                        # JSONL/score output stays readable, but every row is
+                        # marked explicitly as dry_run and must not be treated as
+                        # a real model comparison.
+                        output = str(case.get("original_response_text") or "")
+                        meta = {"dry_run": True, "note": "prompt assembled; model was not called"}
+                    else:
+                        try:
+                            output, meta = await _ask_chat_model(
+                                session,
+                                model=model,
+                                user_text=str(case.get("user_text", "")),
+                                search_response=str(case.get("search_response", "")),
+                                system_prompt=system_prompt,
+                                temperature=temperature,
+                                timeout=timeout,
+                            )
+                        except Exception as exc:  # noqa: BLE001 — eval должен писать ошибку в results, а не падать на всей пачке
+                            error = str(exc)
+                    duration_ms = int((time.monotonic() - started) * 1000)
+                    row = {
+                        "case_id": case.get("case_id"),
+                        "model": model,
+                        "prompt_variant": prompt_variant,
+                        "system_prompt_chars": system_prompt_chars,
+                        "user_text": case.get("user_text"),
+                        "search_response": case.get("search_response"),
+                        "output": output,
+                        "duration_ms": duration_ms,
+                        "error": error,
+                        "meta": meta,
+                        "dry_run": dry_run,
+                        "ts": datetime.now(timezone.utc).isoformat(),
+                    }
+                    row["score"] = score_output(row)
+                    rows.append(row)
+                    print(
+                        f"{case.get('case_id')} | {prompt_variant} | {model} | "
+                        f"score={row['score']['score']:.2f} | sys_chars={system_prompt_chars} | "
+                        f"error={bool(error)} | dry_run={dry_run}"
                     )
-                except Exception as exc:  # noqa: BLE001 — eval должен писать ошибку в results, а не падать на всей пачке
-                    error = str(exc)
-                duration_ms = int((time.monotonic() - started) * 1000)
-                row = {
-                    "case_id": case.get("case_id"),
-                    "model": model,
-                    "user_text": case.get("user_text"),
-                    "search_response": case.get("search_response"),
-                    "output": output,
-                    "duration_ms": duration_ms,
-                    "error": error,
-                    "meta": meta,
-                    "ts": datetime.now(timezone.utc).isoformat(),
-                }
-                row["score"] = score_output(row)
-                rows.append(row)
-                print(f"{case.get('case_id')} | {model} | score={row['score']['score']:.2f} | error={bool(error)}")
 
     _write_jsonl(results_path, rows)
     print(f"results={len(rows)} path={results_path}")
@@ -351,16 +451,16 @@ def score_results(results_path: Path) -> int:
     failures: dict[str, Counter[str]] = defaultdict(Counter)
     for row in rows:
         score = score_output(row)
-        model = str(row.get("model"))
-        summary[model].append(float(score["score"]))
+        label = f"{row.get('prompt_variant') or 'prompt'} | {row.get('model')}"
+        summary[label].append(float(score["score"]))
         duration_ms = row.get("duration_ms")
         if isinstance(duration_ms, int) and duration_ms > 0:
-            durations[model].append(duration_ms)
+            durations[label].append(duration_ms)
         for name, ok in score["checks"].items():
             if not ok:
-                failures[model][name] += 1
+                failures[label][name] += 1
 
-    print("model\tcases\tavg_score\tavg_sec\tmin_sec\tmax_sec\ttop_failures")
+    print("prompt_variant_model\tcases\tavg_score\tavg_sec\tmin_sec\tmax_sec\ttop_failures")
     for model, scores in sorted(summary.items(), key=lambda item: sum(item[1]) / len(item[1]), reverse=True):
         avg = sum(scores) / len(scores)
         ds = durations.get(model, [])
@@ -388,6 +488,9 @@ def main() -> int:
     p_run.add_argument("--limit", type=int, default=0)
     p_run.add_argument("--timeout", type=int, default=180)
     p_run.add_argument("--temperature", type=float, default=0.3)
+    p_run.add_argument("--prompt", type=Path, help="Candidate chat prompt file for replay")
+    p_run.add_argument("--baseline-prompt", type=Path, help="Baseline chat prompt file for side-by-side replay")
+    p_run.add_argument("--dry-run", action="store_true", help="Assemble prompts and write metadata without calling any model")
 
     p_score = sub.add_parser("score", help="Посчитать сводку по results.jsonl")
     p_score.add_argument("--results", type=Path, default=DEFAULT_RESULTS)
@@ -396,7 +499,19 @@ def main() -> int:
     if args.cmd == "export":
         return export_cases(args.limit, args.source, args.out)
     if args.cmd == "run":
-        return asyncio.run(run_eval(args.cases, args.results, _parse_models(args.models), args.limit, args.timeout, args.temperature))
+        return asyncio.run(
+            run_eval(
+                args.cases,
+                args.results,
+                _parse_models(args.models),
+                args.limit,
+                args.timeout,
+                args.temperature,
+                prompt=args.prompt,
+                baseline_prompt=args.baseline_prompt,
+                dry_run=args.dry_run,
+            )
+        )
     if args.cmd == "score":
         return score_results(args.results)
     return 1

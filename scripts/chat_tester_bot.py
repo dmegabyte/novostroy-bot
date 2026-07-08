@@ -5170,6 +5170,8 @@ def main() -> None:
             logging.FileHandler(LOGS_DIR / "bot.log", encoding="utf-8"),
         ],
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
     client = OvermindClient()
     user_state: dict[int, dict] = {}

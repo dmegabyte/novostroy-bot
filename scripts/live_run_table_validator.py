@@ -306,6 +306,96 @@ class CaseRow:
     mcp_response: str
     warnings: str
     prompt_master_verdict: str
+    prompt_metrics: str
+    answer_latency_metrics: str
+
+
+def _file_size_metrics(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"path": str(path.relative_to(REPO) if path.is_relative_to(REPO) else path), "exists": False}
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return {
+        "path": str(path.relative_to(REPO) if path.is_relative_to(REPO) else path),
+        "exists": True,
+        "chars": len(text),
+        "lines": text.count("\n") + (1 if text else 0),
+    }
+
+
+def prompt_size_metrics() -> dict[str, Any]:
+    """Prompt-size metadata for prompt-master reports.
+
+    This is intentionally static/read-only: prompt shortening decisions should
+    compare these numbers with prompt_master verdicts and task-list latency, not
+    rely on intuition.
+    """
+    chat = _file_size_metrics(REPO / "prompts" / "chat_v1.txt")
+    prompt_master = _file_size_metrics(REPO / "prompts" / "eval" / "prompt_master_v1.txt")
+    scenario_dir = REPO / "prompts" / "scenarios"
+    scenario_files = sorted(scenario_dir.glob("*_v1.txt")) if scenario_dir.exists() else []
+    scenarios = [_file_size_metrics(path) for path in scenario_files]
+    return {
+        "chat_v1": chat,
+        "prompt_master_v1": prompt_master,
+        "scenario_overlays": {
+            "count": len(scenarios),
+            "total_chars": sum(int(row.get("chars") or 0) for row in scenarios),
+            "files": scenarios,
+        },
+    }
+
+
+def _latency_from_health(path: Path | None) -> dict[str, Any]:
+    if not path:
+        return {}
+    try:
+        health = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as exc:
+        return {"available": False, "reason": f"health_json_parse_failed:{type(exc).__name__}"}
+    checks = health.get("checks") if isinstance(health, dict) else []
+    if not isinstance(checks, list):
+        return {"available": False, "reason": "health_json_without_checks"}
+    for check in checks:
+        if isinstance(check, dict) and check.get("name") == "answer_model_task_latency":
+            data = check.get("data") if isinstance(check.get("data"), dict) else {}
+            recent = data.get("recent") if isinstance(data.get("recent"), dict) else {}
+            previous = data.get("previous") if isinstance(data.get("previous"), dict) else {}
+            return {
+                "available": bool(data.get("available")),
+                "source": str(path),
+                "recent": {
+                    "count": recent.get("count"),
+                    "avg_duration_sec": recent.get("avg_duration_sec"),
+                    "median_duration_sec": recent.get("median_duration_sec"),
+                    "avg_query_chars": recent.get("avg_query_chars"),
+                    "avg_system_prompt_chars": recent.get("avg_system_prompt_chars"),
+                },
+                "previous": {
+                    "count": previous.get("count"),
+                    "avg_duration_sec": previous.get("avg_duration_sec"),
+                    "median_duration_sec": previous.get("median_duration_sec"),
+                    "avg_query_chars": previous.get("avg_query_chars"),
+                    "avg_system_prompt_chars": previous.get("avg_system_prompt_chars"),
+                },
+                "delta_recent_minus_previous": data.get("delta_recent_minus_previous") or {},
+            }
+    return {"available": False, "reason": "answer_model_task_latency_missing"}
+
+
+def _prompt_master_console_preview(raw: str) -> str:
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return raw[:500]
+    return json.dumps(
+        {
+            "score": data.get("score"),
+            "verdict": data.get("verdict"),
+            "problem_level": data.get("problem_level"),
+            "next_fix": data.get("next_fix"),
+        },
+        ensure_ascii=False,
+    )
 
 
 def _extract_balanced_json(text: str, start: int) -> tuple[dict[str, Any] | None, int]:
@@ -729,6 +819,9 @@ def prompt_master_verdict(
     search: dict[str, Any],
     answer: dict[str, Any],
     warnings: list[str],
+    *,
+    prompt_metrics: dict[str, Any] | None = None,
+    answer_latency_metrics: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Local prompt-master style verdict.
 
@@ -1142,7 +1235,7 @@ def prompt_master_verdict(
             "search": mortgage_search_signals,
         }
 
-    return {
+    verdict_payload = {
         "score": score,
         "verdict": verdict,
         "problem_level": problem_level,
@@ -1154,9 +1247,22 @@ def prompt_master_verdict(
         "scenario": scenario,
         "command": command,
     }
+    if prompt_metrics:
+        verdict_payload["prompt_metrics"] = prompt_metrics
+    if answer_latency_metrics:
+        verdict_payload["answer_latency_metrics"] = answer_latency_metrics
+    return verdict_payload
 
 
-def parse_case(name: str, chunk: str, version: str, forbidden_words: tuple[str, ...]) -> CaseRow:
+def parse_case(
+    name: str,
+    chunk: str,
+    version: str,
+    forbidden_words: tuple[str, ...],
+    *,
+    prompt_metrics: dict[str, Any] | None = None,
+    answer_latency_metrics: dict[str, Any] | None = None,
+) -> CaseRow:
     cmd = ""
     exit_code = ""
     cmd_match = re.search(r"^\[CMD\]\s*(.+)$", chunk, flags=re.MULTILINE)
@@ -1200,7 +1306,15 @@ def parse_case(name: str, chunk: str, version: str, forbidden_words: tuple[str, 
     warnings = validate_case(search_for_validation, answer, forbidden_words, cmd)
     if exit_code and exit_code != "0":
         warnings.append(f"cli_exit_nonzero:{exit_code}")
-    pm_verdict = prompt_master_verdict(name, cmd, search_for_validation, answer, warnings)
+    pm_verdict = prompt_master_verdict(
+        name,
+        cmd,
+        search_for_validation,
+        answer,
+        warnings,
+        prompt_metrics=prompt_metrics,
+        answer_latency_metrics=answer_latency_metrics,
+    )
     response_text, _, _ = _response_payload(answer.get("response"))
     mcp_response_payload = search if _has_mcp_response_payload(search) else {}
 
@@ -1220,12 +1334,31 @@ def parse_case(name: str, chunk: str, version: str, forbidden_words: tuple[str, 
         mcp_response=json.dumps(mcp_response_payload, ensure_ascii=False),
         warnings="; ".join(warnings),
         prompt_master_verdict=json.dumps(pm_verdict, ensure_ascii=False),
+        prompt_metrics=json.dumps(prompt_metrics or {}, ensure_ascii=False),
+        answer_latency_metrics=json.dumps(answer_latency_metrics or {}, ensure_ascii=False),
     )
 
 
-def parse_live_run(path: Path, version: str, forbidden_words: tuple[str, ...]) -> list[CaseRow]:
+def parse_live_run(
+    path: Path,
+    version: str,
+    forbidden_words: tuple[str, ...],
+    *,
+    prompt_metrics: dict[str, Any] | None = None,
+    answer_latency_metrics: dict[str, Any] | None = None,
+) -> list[CaseRow]:
     raw = path.read_text(encoding="utf-8")
-    return [parse_case(name, chunk, version, forbidden_words) for name, chunk in _split_cases(raw)]
+    return [
+        parse_case(
+            name,
+            chunk,
+            version,
+            forbidden_words,
+            prompt_metrics=prompt_metrics,
+            answer_latency_metrics=answer_latency_metrics,
+        )
+        for name, chunk in _split_cases(raw)
+    ]
 
 
 def main() -> int:
@@ -1234,10 +1367,23 @@ def main() -> int:
     parser.add_argument("--version", default="v2", help="Run/prompt version to write into the table")
     parser.add_argument("--jsonl-out", type=Path, help="Optional path to write prepared rows as JSONL")
     parser.add_argument("--forbidden-word", action="append", default=[], help="Additional forbidden word")
+    parser.add_argument(
+        "--health-json",
+        type=Path,
+        help="Optional output of `scripts/nmbot_health.py --json`; adds answer latency metadata to prompt-master rows",
+    )
     args = parser.parse_args()
 
     forbidden_words = tuple(DEFAULT_FORBIDDEN_WORDS + tuple(args.forbidden_word))
-    rows = parse_live_run(args.log, args.version, forbidden_words)
+    prompt_metrics = prompt_size_metrics()
+    answer_latency_metrics = _latency_from_health(args.health_json)
+    rows = parse_live_run(
+        args.log,
+        args.version,
+        forbidden_words,
+        prompt_metrics=prompt_metrics,
+        answer_latency_metrics=answer_latency_metrics,
+    )
 
     if args.jsonl_out:
         args.jsonl_out.parent.mkdir(parents=True, exist_ok=True)
@@ -1245,12 +1391,16 @@ def main() -> int:
             for row in rows:
                 fh.write(json.dumps(asdict(row), ensure_ascii=False) + "\n")
 
-    print(f"VALIDATOR: rows={len(rows)} version={args.version}")
+    chat_chars = ((prompt_metrics.get("chat_v1") or {}).get("chars")) if prompt_metrics else None
+    latency_recent = (answer_latency_metrics.get("recent") or {}) if answer_latency_metrics else {}
+    latency_avg = latency_recent.get("avg_duration_sec")
+    latency_text = f" latency_avg={latency_avg}s" if latency_avg is not None else ""
+    print(f"VALIDATOR: rows={len(rows)} version={args.version} chat_v1_chars={chat_chars}{latency_text}")
     for row in rows:
         status = "WARN" if row.warnings else "OK"
         print(
             f"{status}: {row.case} facts={row.facts_count} visible={row.visible_count} "
-            f"warnings={row.warnings or '-'} prompt_master={row.prompt_master_verdict}"
+            f"warnings={row.warnings or '-'} prompt_master={_prompt_master_console_preview(row.prompt_master_verdict)}"
         )
     return 0
 

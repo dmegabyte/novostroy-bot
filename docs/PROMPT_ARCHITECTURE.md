@@ -40,6 +40,28 @@
 | `prompts/eval/prompt_master_v1.txt` | Prompt-master evaluator | Оценивает request/search/card/response/scenario/safety; возвращает score/verdict/problem_level/next_fix | Не используется как клиентский prompt; не переписывает ответ |
 | `prompts/text_style_v1.txt` | Стиль | Улучшает живость и читаемость уже безопасного текста | Не добавляет facts, не меняет scenario priority, не чинит контрактные ошибки |
 
+## Prompt-master и измеримое сокращение prompt'ов
+
+Сокращать `prompts/chat_v1.txt` или scenario overlays можно только через prompt-master контур, а не «на глаз».
+
+Текущий инструментальный путь:
+
+```bash
+python3 scripts/nmbot_health.py --json > /tmp/nmbot_health.json
+python3 scripts/live_run_table_validator.py \
+  logs/live_model_run_YYYY-MM-DD.txt \
+  --version prompt-shortening-baseline \
+  --health-json /tmp/nmbot_health.json \
+  --jsonl-out logs/live_model_run.rows.prompt-shortening-baseline.jsonl
+```
+
+`scripts/live_run_table_validator.py` добавляет в `prompt_master_verdict` и JSONL строки:
+
+- `prompt_metrics` — размеры `prompts/chat_v1.txt`, `prompts/eval/prompt_master_v1.txt` и scenario overlays;
+- `answer_latency_metrics` — безопасную сводку из `scripts/nmbot_health.py --json` по Overmind task-list: длительность answer-model, очередь, размер query/system prompt.
+
+Правило: новый prompt считается лучше только если prompt-master score/вердикт не ухудшился, фактические UX/gate проверки зелёные, а размер/speed метрики не регрессировали. Метрики не содержат prompt text, user text или секреты.
+
 ## Как добавлять новый prompt
 
 Перед созданием нового prompt нужно явно записать:

@@ -734,6 +734,10 @@ MCP/search отдаёт только подтверждённые факты:
 # Проверить лог и подготовить JSONL
 python3 scripts/live_run_table_validator.py logs/live_model_run_2026-07-04_rerun_115218_weak_v3.txt --version v3 --jsonl-out logs/live_model_run_2026-07-04_rerun_115218_weak_v3.rows.v3.jsonl
 
+# Если сравниваем prompt-size/speed, добавляем health snapshot
+python3 scripts/nmbot_health.py --json > /tmp/nmbot_health.json
+python3 scripts/live_run_table_validator.py logs/live_model_run_2026-07-04_rerun_115218_weak_v3.txt --version prompt-shortening-baseline --health-json /tmp/nmbot_health.json --jsonl-out logs/live_model_run_2026-07-04_rerun_115218_weak_v3.rows.prompt-shortening-baseline.jsonl
+
 # Показать, что уйдёт в лист
 python3 scripts/publish_live_run_rows_to_sheet.py logs/live_model_run_2026-07-04_rerun_115218_weak_v3.rows.v3.jsonl
 

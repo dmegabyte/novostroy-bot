@@ -162,6 +162,7 @@ from chat_tester_bot import (  # noqa: E402
     _resolve_dialog_intent,
     _remember_bot_response,
     _should_run_building_status_fact_check,
+    _selected_option_for_fact_check,
     _safe_user_error_message,
     _strip_markdown,
     _strip_rejected_options_from_response,
@@ -1754,7 +1755,22 @@ def _run_h021_unit_tests() -> list[Result]:
         "last_options": [luchi_option],
         "visible_options": [luchi_option],
     }
+    multi_luchi_state = {
+        "selected_option": None,
+        "last_options": [
+            {"name": "Город-парк «Переделкино Ближнее»", "ready": "2028 г."},
+            {"name": "Жилой район «Скандинавия»", "ready": "2027 г."},
+            luchi_option,
+        ],
+        "visible_options": [
+            {"name": "Город-парк «Переделкино Ближнее»", "ready": "2028 г."},
+            {"name": "Жилой район «Скандинавия»", "ready": "2027 г."},
+            luchi_option,
+        ],
+    }
     corpus_question = "А какие корпуса уже сданы? Мне важно заехать поскорее."
+    named_corpus_question = "А ЖК Лучи уже сдали? Мне надо прям завтра заехать."
+    matched_luchi = _selected_option_for_fact_check(multi_luchi_state, named_corpus_question)
     corpus_params = _building_fact_check_params(luchi_option)
     unknown_corpus_response = _building_status_unknown_response(luchi_option).lower()
     corpus_search = json.dumps({
@@ -1772,6 +1788,9 @@ def _run_h021_unit_tests() -> list[Result]:
     pass_corpus_fact_check = (
         _is_building_readiness_question(corpus_question)
         and _should_run_building_status_fact_check(corpus_question, luchi_state)
+        and _should_run_building_status_fact_check(named_corpus_question, multi_luchi_state)
+        and matched_luchi
+        and matched_luchi.get("name") == "ЖК «Лучи»"
         and corpus_params.get("purpose") == "fact_check"
         and corpus_params.get("selected_option_name") == "ЖК «Лучи»"
         and "building_statuses" in corpus_params.get("fact_to_check", "")

@@ -2674,20 +2674,28 @@ def _is_building_readiness_question(text: str) -> bool:
         "ключ", "ключи", "выдача", "заселен", "заселение", "заехать",
     )
     ready_markers = (
-        "сдан", "сданы", "сдана", "готов", "готовые", "строятся", "строится",
+        "сдан", "сданы", "сдана", "сдал", "готов", "готовые", "строятся", "строится",
         "стадия", "быстр", "срок сдач", "ввод", "гк",
     )
     return any(m in low for m in building_markers) and any(m in low for m in ready_markers)
 
 
-def _selected_option_for_fact_check(state: dict[str, Any]) -> dict[str, Any] | None:
+def _selected_option_for_fact_check(state: dict[str, Any], user_text: str = "") -> dict[str, Any] | None:
     selected = state.get("selected_option")
     if isinstance(selected, dict) and selected.get("name"):
         return selected
     visible = state.get("visible_options") if isinstance(state.get("visible_options"), list) else []
+    if user_text and visible:
+        matched = _match_option_from_text(user_text, [row for row in visible if isinstance(row, dict)])
+        if matched and matched.get("name"):
+            return matched
     if len(visible) == 1 and isinstance(visible[0], dict) and visible[0].get("name"):
         return visible[0]
     last = state.get("last_options") if isinstance(state.get("last_options"), list) else []
+    if user_text and last:
+        matched = _match_option_from_text(user_text, [row for row in last if isinstance(row, dict)])
+        if matched and matched.get("name"):
+            return matched
     if len(last) == 1 and isinstance(last[0], dict) and last[0].get("name"):
         return last[0]
     return None
@@ -2703,7 +2711,7 @@ def _building_fact_check_params(option: dict[str, Any]) -> dict[str, Any]:
 
 
 def _should_run_building_status_fact_check(text: str, state: dict[str, Any]) -> bool:
-    return _is_building_readiness_question(text) and _selected_option_for_fact_check(state) is not None
+    return _is_building_readiness_question(text) and _selected_option_for_fact_check(state, text) is not None
 
 
 def _short_fact_list(value: Any, limit: int = 8) -> str:
@@ -6332,7 +6340,7 @@ def main() -> None:
                 await update.message.reply_text(_to_html(response), parse_mode="HTML")
                 return
             elif followup_intent in {"consultation_answer", "conversation_answer"} and _should_run_building_status_fact_check(text, state):
-                option = _selected_option_for_fact_check(state)
+                option = _selected_option_for_fact_check(state, text)
                 fact_params = _building_fact_check_params(option or {})
                 response, new_params, search_meta, chat_meta = await client.ask(
                     query=text,

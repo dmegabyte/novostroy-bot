@@ -752,6 +752,8 @@ def _complex_name_grounding_key(name: Any) -> str:
             word = word[:-4] + "ский"
         elif len(word) > 4 and word.endswith("ии"):
             word = word[:-2] + "ия"
+        elif len(word) > 3 and word.endswith("не"):
+            word = word[:-1]
         elif len(word) > 4 and word.endswith("ом"):
             word = word[:-2] + "ый"
         elif len(word) > 4 and word.endswith("ых"):
@@ -1184,6 +1186,12 @@ async def _main(suite: str, json_mode: bool, chat_max_tokens: int) -> int:
                 for r in dialog_results:
                     mark = "✓" if r.passed else "✗"
                     print(f"  {mark} {r.suite}/{r.scenario} ({r.duration_ms}ms)")
+            stateful_results = await _run_stateful_followup_suite(client, chat_max_tokens)
+            results.extend(stateful_results)
+            if not json_mode:
+                for r in stateful_results:
+                    mark = "✓" if r.passed else "✗"
+                    print(f"  {mark} {r.suite}/{r.scenario} ({r.duration_ms}ms)")
     finally:
         await client.close()
 
@@ -1517,7 +1525,7 @@ def _run_h021_unit_tests() -> list[Result]:
         "facts": [{"name": "Кузьминский лес"}, {"name": "Жилой район «Скандинавия»"}],
         "near": [{"name": "ЖК «Дюна»"}],
     }, ensure_ascii=False)
-    grounding_known = _ux_check_response("Срок позже, чем у «Кузьминского леса», детали по «Кузьминском лесу» уточним, а в «Скандинавии» есть отделка.", grounding_search)
+    grounding_known = _ux_check_response("Срок позже, чем у «Кузьминского леса», детали по «Кузьминском лесу» уточним, в «Скандинавии» есть отделка, а по «Дюне» проверим наличие.", grounding_search)
     grounding_unknown = _ux_check_response("Ещё есть «Несуществующего леса».", grounding_search)
     known_check = next(c for c in grounding_known if c["name"] == "ux_mcp_grounded_quoted_complexes")
     unknown_check = next(c for c in grounding_unknown if c["name"] == "ux_mcp_grounded_quoted_complexes")

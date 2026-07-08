@@ -4,7 +4,7 @@
 
 ## Один источник правды
 
-Единственная актуальная продовая версия бота — `novostroy-bot.service` на VPS (`/home/neiro/novostroy-bot`, запуск `python3 -m src.bot`). Локальная папка `/home/ser/ai/projects/nmbot` — это рабочая копия для разработки и тестов, а не отдельный боевой бот.
+Единственная актуальная продовая версия бота — `novostroy-bot.service` на VPS (`/home/neiro/novostroy-bot`, фактический runtime сейчас: `python3 scripts/chat_tester_bot.py`). Локальная папка `/home/ser/ai/projects/nmbot` — это рабочая копия для разработки и тестов, а не отдельный боевой бот.
 
 Название `tsbot` в проектной доке не используется.
 
@@ -21,7 +21,8 @@
 ## Архитектура (две среды)
 
 ```
-Prod (VPS):  systemd novostroy-bot → python3 -m src.bot
+Prod (VPS):     systemd novostroy-bot → python3 scripts/chat_tester_bot.py
+Staging (VPS):  systemd novostroy-bot-staging → python3 scripts/chat_tester_bot.py
 Локальный стенд: scripts/chat_tester_bot.py
 ```
 
@@ -49,7 +50,7 @@ Prod (VPS):  systemd novostroy-bot → python3 -m src.bot
 
 Правило процесса:
 
-1. Сначала можно проверять локально: `py_compile`, `h029`, `ux_e2e`, `h028`, simulator/live probe.
+1. Сначала можно проверять локально: `py_compile`, `h029`, `ux_e2e`, `h028`, `dialog`, `stateful`, simulator/live probe.
 2. Затем обязательно сделать deploy/sync на VPS в `/home/neiro/novostroy-bot`.
 3. Перезапустить `novostroy-bot.service`.
 4. Проверить feature markers на VPS, а не только локально.
@@ -57,6 +58,26 @@ Prod (VPS):  systemd novostroy-bot → python3 -m src.bot
 6. После live/prod проверки вывести `python3 scripts/or_cost.py`.
 
 Запрещено говорить «готово», если проверена только локальная версия. Формулировка должна быть честной: «локально зелёное, prod ещё не проверен».
+
+## Staging / Git workflow
+
+Цель staging — проверять изменения в отдельном Telegram-боте и отдельном systemd-сервисе, не трогая prod-процесс.
+
+- **Prod branch**: `master`, путь `/home/neiro/novostroy-bot`, сервис `novostroy-bot.service`.
+- **Staging branch**: `staging`, путь `/home/neiro/novostroy-bot-staging`, сервис `novostroy-bot-staging.service`.
+- **Runtime одинаковый**: `python3 scripts/chat_tester_bot.py`.
+- **Различаются только окружения**: `.env`, Telegram bot token, логи, systemd-service.
+- **Нельзя** запускать staging на prod `TELEGRAM_BOT_TOKEN`: Telegram polling у двух процессов на одном токене будет конфликтовать.
+
+Текущий безопасный порядок:
+
+1. Локально внести правку и прогнать дешёвые проверки.
+2. Положить правку в `staging` / staging worktree.
+3. Запустить `novostroy-bot-staging.service` только с отдельным тестовым Telegram bot token.
+4. Проверить staging-диалог, логи и regression-сценарии.
+5. Только после этого переносить изменение в `master` и деплоить prod.
+
+Важно: если GitHub credentials на VPS не настроены, staging может существовать как локальная VPS-ветка/worktree. Для полноценного удалённого workflow нужно отдельно настроить push-доступ и создать remote branch `origin/staging`.
 
 Минимальный prod deploy checklist:
 
@@ -72,6 +93,31 @@ ssh -p 1905 neiro@193.107.155.236 \
 ```
 
 ## Диагностика (единая точка входа)
+
+### Журнал основных ошибок бота — смотреть первым при аларме
+
+Если пользователь пишет «бот не отвечает», «прод сломан», «сообщения висят», сначала проверяй свежий VPS и **журнал событий ошибок**:
+
+```bash
+ssh -p 1905 neiro@193.107.155.236 \
+  "cd /home/neiro/novostroy-bot && tail -50 logs/bot_error_events-$(date -u +%F).jsonl"
+```
+
+Файл: `/home/neiro/novostroy-bot/logs/bot_error_events-YYYY-MM-DD.jsonl`.
+
+Туда обязаны попадать все основные причины падения или некорректной работы:
+- `gateway_create_failed` — gateway task не создался;
+- `gateway_missing_task_id` — gateway не вернул task id;
+- `gateway_task_error` — gateway вернул ошибку;
+- `gateway_empty_response` — ответа нет;
+- `gateway_non_text_response` — upstream вернул объект/массив вместо текста;
+- `gateway_timeout` — задача не завершилась вовремя;
+- `chat_response_parse_failed` — chat JSON не распарсился после retry;
+- `message_ask_exception` — exception при основном запросе;
+- `handler_non_text_response` — Telegram handler получил не текст перед отправкой;
+- `telegram_unhandled_exception` — необработанное падение Telegram update.
+
+Важно: `systemctl active` и `getUpdates 200 OK` не доказывают, что бот отвечает пользователю. Если есть свежие записи в `bot_error_events-*.jsonl`, разбирать их перед выводом «бот работает».
 
 ```bash
 # всё в одном
@@ -103,10 +149,20 @@ python3 scripts/nmbot_test_agent.py --suite deploy
 - **Сервер**: `neiro@193.107.155.236:1905`
 - **Сервис**: `novostroy-bot.service` (systemd --user)
 - **Путь**: `/home/neiro/novostroy-bot`
-- **Запуск**: `python3 -m src.bot`
+- **Запуск**: `python3 scripts/chat_tester_bot.py`
 - **Репозиторий**: `github.com/dmegabyte/novostroy-bot.git` (master)
 - **Лог**: `/home/neiro/novostroy-bot/logs/bot.log`
 - **Telegram**: через Cloudflare Worker `telegram-bot-proxy.d-megabyte.workers.dev`
+
+## Staging (VPS)
+
+- **Сервер**: `neiro@193.107.155.236:1905`
+- **Сервис**: `novostroy-bot-staging.service` (systemd --user)
+- **Путь**: `/home/neiro/novostroy-bot-staging`
+- **Запуск**: `python3 scripts/chat_tester_bot.py`
+- **Ветка**: `staging`
+- **Лог**: `/home/neiro/novostroy-bot-staging/logs/bot.log`
+- **Telegram**: только отдельный тестовый bot token в `/home/neiro/novostroy-bot-staging/.env`
 
 ## Локальный стенд
 
@@ -144,10 +200,10 @@ python scripts/chat_tester_bot.py
 |--------|-----------|
 | `scripts/nmbot_diag.sh` | ★ единая диагностика prod + dev |
 | `scripts/chat_cli.py` | CLI-клиент (двухшаговый запрос: поиск → ответ) |
-| `scripts/chat_tester_bot.py` | TG бот dev (с /model /mcp /reset) |
+| `scripts/chat_tester_bot.py` | фактический runtime Telegram-бота; используется в dev и сейчас запущен в prod |
 | `scripts/nmbot_mcp_only_sim.py` | симулятор UX-гипотез на MCP-данных до правок боевого кода |
 | `scripts/nmbot_test_agent.py` | CLI-агент автотестирования (codex + dialog + deploy) |
-| `scripts/nmbot_deploy_smoke.py` | проверка live-процесса локального стенда |
+| `scripts/nmbot_deploy_smoke.py` | проверка live-процесса prod/VPS по умолчанию; local-режим через `NMBOT_DEPLOY_MODE=local` |
 | `scripts/nmbot_quality.py` | оперативная проверка логов |
 | `scripts/run_bot.sh` | запуск локального стенда |
 | `scripts/or_cost.py` | OpenRouter cost tracking |

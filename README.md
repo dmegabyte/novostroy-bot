@@ -6,7 +6,7 @@
 
 - **Прод**: `novostroy-bot.service` на VPS
 - **Путь прод-кода**: `/home/neiro/novostroy-bot`
-- **Запуск**: `python3 -m src.bot`
+- **Запуск**: `python3 scripts/chat_tester_bot.py`
 - **Локальная копия**: `/home/ser/ai/projects/nmbot` — только для разработки, тестов и документации
 - **Путаться не надо**: в этой доке не используется отдельный бот `tsbot`; ориентир один — `novostroy-bot`
 
@@ -18,7 +18,7 @@
 │  systemd: novostroy-bot.service                                │
 │  репо:  github.com/dmegabyte/novostroy-bot.git                 │
 │  путь:  /home/neiro/novostroy-bot                              │
-│  пуск:  python3 -m src.bot                                     │
+│  пуск:  python3 scripts/chat_tester_bot.py                     │
 │  хост:  neiro@193.107.155.236:1905                             │
 │                                                                │
 │  Пользователь → [Telegram Bot] → [Cloudflare Worker Proxy]     │
@@ -70,9 +70,9 @@ nmbot/
 ├── requirements.txt
 ├── scripts/
 │   ├── chat_cli.py            # CLI-клиент (двухшаговый запрос)
-│   ├── chat_tester_bot.py     # Telegram бот (dev-экземпляр)
+│   ├── chat_tester_bot.py     # runtime Telegram-бота: dev и текущий prod
 │   ├── nmbot_diag.sh          # ★ единая диагностика (единственная точка входа)
-│   ├── nmbot_deploy_smoke.py  # проверка live-процесса dev-бота
+│   ├── nmbot_deploy_smoke.py  # проверка live-процесса prod/VPS по умолчанию
 │   ├── nmbot_test_agent.py    # CLI-агент автотестирования
 │   ├── nmbot_quality.py       # оперативная проверка логов
 │   ├── or_cost.py             # OpenRouter cost tracking
@@ -93,17 +93,20 @@ nmbot/
     └── GOLDEN_DIALOGS.md
 ```
 
-## Прод (VPS) vs Dev (локально)
+## Prod / Staging / Dev
 
-| | Production (VPS) | Dev (локально) |
-|---|---|---|
-| **Где** | `neiro@193.107.155.236:1905` | `/home/ser/ai/projects/nmbot` |
-| **Запуск** | `systemctl --user start novostroy-bot` | `bash scripts/run_bot.sh` |
-| **Код** | `python3 -m src.bot` (модуль) | `python scripts/chat_tester_bot.py` |
-| **Репозиторий** | `github.com/dmegabyte/novostroy-bot.git` | локальная рабочая копия |
-| **Telegram** | через Cloudflare Worker proxy | напрямую Bot API |
-| **Лог** | `/home/neiro/novostroy-bot/logs/bot.log` | `logs/bot.log` |
-| **Диагностика** | `bash scripts/nmbot_diag.sh` | `bash scripts/nmbot_diag.sh` |
+| | Production (VPS) | Staging (VPS) | Dev (локально) |
+|---|---|---|---|
+| **Где** | `neiro@193.107.155.236:1905` | `neiro@193.107.155.236:1905` | `/home/ser/ai/projects/nmbot` |
+| **Путь** | `/home/neiro/novostroy-bot` | `/home/neiro/novostroy-bot-staging` | `/home/ser/ai/projects/nmbot` |
+| **Запуск** | `systemctl --user start novostroy-bot.service` | `systemctl --user start novostroy-bot-staging.service` | `bash scripts/run_bot.sh` |
+| **Код** | `python3 scripts/chat_tester_bot.py` | `python3 scripts/chat_tester_bot.py` | `python scripts/chat_tester_bot.py` |
+| **Git** | `master` | `staging` | рабочая копия |
+| **Telegram** | prod bot token через Cloudflare Worker proxy | отдельный тестовый bot token | dev token напрямую Bot API |
+| **Лог** | `/home/neiro/novostroy-bot/logs/bot.log` | `/home/neiro/novostroy-bot-staging/logs/bot.log` | `logs/bot.log` |
+| **Диагностика** | `bash scripts/nmbot_diag.sh` | `systemctl --user status novostroy-bot-staging.service --no-pager` | `bash scripts/nmbot_diag.sh` |
+
+Staging нужен, чтобы проверять изменения в отдельном Telegram-боте до prod. Не запускай staging на prod `TELEGRAM_BOT_TOKEN`: два poller-процесса на одном токене будут мешать друг другу.
 
 ## Быстрый старт (dev)
 
@@ -157,6 +160,7 @@ python scripts/chat_tester_bot.py
 python3 scripts/nmbot_test_agent.py
 python3 scripts/nmbot_test_agent.py --suite deploy   # + live deploy-smoke
 python3 scripts/nmbot_test_agent.py --suite dialog   # контрольный диалог
+python3 scripts/nmbot_test_agent.py --suite stateful # multi-turn: память, выбор, оператор
 python3 scripts/nmbot_test_agent.py --json           # JSON для CI
 ```
 

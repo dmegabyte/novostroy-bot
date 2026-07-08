@@ -21,6 +21,7 @@ python3 scripts/nmbot_test_agent.py --suite deploy
 
 ```bash
 python3 scripts/nmbot_test_agent.py --suite dialog
+python3 scripts/nmbot_test_agent.py --suite stateful
 ```
 
 ## Что обязан ловить `ux_e2e`
@@ -42,11 +43,26 @@ python3 scripts/nmbot_test_agent.py --suite dialog
 13. Клиентский текст не показывает `уточняется` как значение цены/отделки и не пишет “в базе” / “активные объявления”.
 14. Код напрямую выбирает вариант только при чистом `1/2/3` или `первый/второй/третий вариант`; смешанные фразы вроде `15 млн`, `1 но дорого`, `2 если с отделкой` должны уходить в follow-up router.
 
+## Что обязан ловить `stateful`
+
+Stateful-smoke проверяет не одиночную реплику, а цепочку с общей памятью диалога:
+
+```text
+двушка в Котельниках → а с отделкой? → покажи дешевле → первый вариант → позови оператора
+```
+
+Он обязан ловить:
+
+1. Потерю `last_options` / `visible_options` между ходами.
+2. Выдуманный бюджет, например `до 5 млн`, если клиент сказал только “покажи дешевле”.
+3. Выбор `первый вариант` не из видимого списка клиента, а из внутреннего полного списка.
+4. Operator handoff без выбранного ЖК и контекста последнего запроса.
+
 ## Формула готовности
 
 “Готово” по UX Ирины означает:
 
-commit + push + deploy + service active + fresh live commit + deploy smoke + UX e2e pass.
+commit + push + deploy + service active + fresh live commit + deploy smoke + UX e2e pass + dialog pass + stateful pass.
 
 Если хотя бы один пункт не пройден — нельзя отдавать результат как готовый.
 
@@ -55,4 +71,5 @@ commit + push + deploy + service active + fresh live commit + deploy smoke + UX 
 - `docs/PRODUCT_TZ.md` — сначала польза, потом уточнение, затем оператор; MCP — единственный источник фактов.
 - `docs/IRINA_FIRST_REPLY_GUIDE.md` — no-buttons UX, абзацы, один следующий вопрос.
 - `scripts/nmbot_test_agent.py --suite ux_e2e` — регрессия полного пути после no-buttons.
+- `scripts/nmbot_test_agent.py --suite stateful` — регрессия памяти диалога, выбора из видимого списка и operator handoff.
 - `followup_intent_classifier.py` — безопасный классификатор коротких ответов клиента по контексту диалога.

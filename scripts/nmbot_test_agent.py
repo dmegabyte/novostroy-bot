@@ -86,12 +86,16 @@ from chat_tester_bot import (  # noqa: E402
     _building_fact_check_params,
     _building_status_response_from_search,
     _building_status_unknown_response,
+    _build_client_card_payload,
+    _build_client_card_summary_prompt,
     _build_consultation_answer_prompt,
     _build_negation_response_prompt,
     _build_conversation_answer_prompt,
     _build_followup_expansion_query,
     _compact_option_text,
+    _client_card_state_snapshot,
     _default_state,
+    _fallback_client_card_summary,
     _format_cheaper_response,
     _format_option_response,
     _format_options_summary_response,
@@ -2234,31 +2238,91 @@ def _run_h021_unit_tests() -> list[Result]:
     empty_phone_state = {"last_options": [], "visible_options": [], "selected_option": None, "dialog_window": []}
     text_phone = _extract_phone_from_text("+7 999 123-45-67")
     plain_phone = _extract_phone_from_text("89991234567")
+    screenshot_plain_phone = _extract_phone_from_text("999999999999")
     invalid_budget = _extract_phone_from_text("до 200к")
+    phone_farewell = _phone_captured_farewell().lower()
     phone_capture_pass = (
         text_phone == "+79991234567"
         and plain_phone == "89991234567"
+        and screenshot_plain_phone == "999999999999"
         and invalid_budget == ""
         and _looks_like_phone_text("+7 999 123-45-67")
+        and _looks_like_phone_text("999999999999")
         and not _looks_like_phone_text("до 200к")
         and _has_phone_capture_context(phone_context_state)
         and _has_phone_capture_context({"awaiting_phone": True})
         and not _has_phone_capture_context(empty_phone_state)
+        and "спасибо" in phone_farewell
+        and "номер" in phone_farewell
+        and "оператор" in phone_farewell
         and "не понимаю" in _phone_needs_context_response().lower()
         and _phone_log_meta(text_phone).get("phone_len") == 11
+        and _phone_log_meta(screenshot_plain_phone) == {"phone_len": 12, "phone_last4": "9999"}
     )
     add_result(
         "ux_e2e",
         "phone_capture_is_code_level_and_requires_context",
         phone_capture_pass,
         response_text=(
-            f"text_phone={text_phone}; plain={plain_phone}; budget={invalid_budget}; "
+            f"text_phone={text_phone}; plain={plain_phone}; screenshot={screenshot_plain_phone}; budget={invalid_budget}; "
             f"context={_has_phone_capture_context(phone_context_state)}; empty={_has_phone_capture_context(empty_phone_state)}"
         ),
         error=(
-            f"text_phone={text_phone}; plain={plain_phone}; budget={invalid_budget}; "
+            f"text_phone={text_phone}; plain={plain_phone}; screenshot={screenshot_plain_phone}; budget={invalid_budget}; "
             f"context={_has_phone_capture_context(phone_context_state)}; empty={_has_phone_capture_context(empty_phone_state)}; "
-            f"ctx_response={_phone_needs_context_response()}"
+            f"farewell={_phone_captured_farewell()}; ctx_response={_phone_needs_context_response()}"
+        ),
+    )
+
+    # UX_E2E: после phone capture создаём карточку клиента для оператора.
+    # Ответ клиенту не ждёт summary; модель получает только диалоговый контекст,
+    # а полный телефон кладётся в карточку кодом.
+    card_state = dict(phone_context_state)
+    card_state["operator_context"] = {
+        "selected_option": e2e_option,
+        "client_question": "Хочу уточнить наличие и цену",
+        "reason": "operator_for_selected",
+    }
+    _append_dialog_turn(card_state, "user", "Ищу квартиру для жизни до 13 млн рядом с метро")
+    _remember_bot_response(
+        card_state,
+        "Рассматриваем ЖК «Южные Сады». Напишите номер — оператор проверит наличие и цену.",
+        offer_type="operator_for_selected",
+        answer_kind="operator_handoff",
+    )
+    card_snapshot = _client_card_state_snapshot(card_state)
+    card_prompt = _build_client_card_summary_prompt(card_snapshot)
+    fallback_summary = _fallback_client_card_summary(card_snapshot)
+    client_card = _build_client_card_payload(
+        uid=123,
+        phone=screenshot_plain_phone,
+        source="text",
+        snapshot=card_snapshot,
+        summary=fallback_summary,
+        summary_status="fallback",
+        summary_model="google/gemini-3.1-flash-lite-preview",
+        dialog_id="d-test",
+    )
+    client_card_pass = (
+        client_card.get("phone") == "999999999999"
+        and client_card.get("phone_meta") == {"phone_len": 12, "phone_last4": "9999"}
+        and client_card.get("summary", {}).get("selected_complex") == "Амурский парк"
+        and "operator_tasks" in client_card.get("summary", {})
+        and "Ищу квартиру" in card_prompt
+        and "Южные Сады" in card_prompt
+        and "999999999999" not in card_prompt
+        and bool(client_card.get("client_context", {}).get("operator_context"))
+    )
+    add_result(
+        "ux_e2e",
+        "phone_capture_creates_background_client_card",
+        client_card_pass,
+        response_text=(
+            f"phone_meta={client_card.get('phone_meta')}; summary={client_card.get('summary')}; "
+            f"prompt_has_phone={'999999999999' in card_prompt}"
+        ),
+        error=(
+            f"card={client_card}; prompt={card_prompt[:1000]}"
         ),
     )
 

@@ -607,6 +607,41 @@ class OvermindClient:
         )
         return response_text, chat_meta
 
+    async def summarize_client_card(
+        self,
+        *,
+        prompt: str,
+        model: str = SEARCH_MODEL,
+        timeout: int = 180,
+    ) -> tuple[str, dict[str, Any]]:
+        """Background summary for operator client card.
+
+        Uses the first-level model (SEARCH_MODEL) and no MCP. Phone itself is
+        saved by code into the card, but is not sent to the model prompt.
+        """
+        await self.ensure_session()
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OVERMIND_TOKEN}",
+        }
+        request_data = {
+            "query": prompt,
+            "service": "openrouter",
+            "model": model,
+            "system_prompt": (
+                "Ты делаешь краткое структурированное summary диалога для оператора отдела продаж недвижимости. "
+                "Пиши только по INPUT, не выдумывай факты, цены, сроки, корпуса, школы, метро и условия. "
+                "Если данных нет — явно пиши, что нужно уточнить. Верни строгий JSON без markdown."
+            ),
+            "parameters": {
+                "temperature": 0.1,
+                "max_tokens": 1800,
+            },
+            "external_api_key": OPENROUTER_API_KEY,
+        }
+        response_text, meta = await self._run_gateway_request(request_data, headers, timeout)
+        return _strip_markdown(response_text), {**meta, "model": model}
+
     async def comparative_reason_angles(
         self,
         payload: dict[str, Any],
@@ -2896,6 +2931,232 @@ def _phone_needs_context_response() -> str:
 def _phone_log_meta(phone: str) -> dict[str, Any]:
     digits = "".join(ch for ch in phone if ch.isdigit())
     return {"phone_len": len(digits), "phone_last4": digits[-4:] if len(digits) >= 4 else ""}
+
+
+def _client_card_safe_option(option: Any) -> dict[str, Any]:
+    if not isinstance(option, dict):
+        return {}
+    allowed = {
+        "name", "location", "price", "price_range", "area", "finishing", "ready",
+        "developer", "metro", "link", "rooms", "why_close", "delivered_houses",
+        "under_construction_houses", "houses_status", "settlement_info", "infrastructure",
+        "family_infrastructure",
+    }
+    result: dict[str, Any] = {}
+    for key, value in option.items():
+        if key not in allowed or _looks_missing(value):
+            continue
+        result[key] = value
+    return result
+
+
+def _client_card_state_snapshot(state: dict[str, Any]) -> dict[str, Any]:
+    """Compact dialog snapshot for operator card; no Telegram internals."""
+    selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
+    return {
+        "params": dict(state.get("params") or {}),
+        "selected_option": _client_card_safe_option(selected),
+        "visible_options": [
+            _client_card_safe_option(option)
+            for option in (state.get("visible_options") or [])[:5]
+            if isinstance(option, dict)
+        ],
+        "last_options": [
+            _client_card_safe_option(option)
+            for option in (state.get("last_options") or [])[:5]
+            if isinstance(option, dict)
+        ],
+        "operator_context": _compact_trace_value(state.get("operator_context") or {}, 3000),
+        "last_offer_type": state.get("last_offer_type") or "",
+        "last_answer_kind": state.get("last_answer_kind") or "",
+        "last_bot_question": state.get("last_bot_question") or "",
+        "dialog_window": list(state.get("dialog_window") or [])[-8:],
+    }
+
+
+def _build_client_card_summary_prompt(snapshot: dict[str, Any]) -> str:
+    """Prompt for first-level model. Full phone is intentionally outside INPUT."""
+    payload = {
+        "dialog_window": snapshot.get("dialog_window") or [],
+        "params": snapshot.get("params") or {},
+        "selected_option": snapshot.get("selected_option") or {},
+        "visible_options": snapshot.get("visible_options") or [],
+        "last_options": snapshot.get("last_options") or [],
+        "operator_context": snapshot.get("operator_context") or {},
+        "last_bot_question": snapshot.get("last_bot_question") or "",
+    }
+    return (
+        "Сделай грамотное summary заявки клиента для оператора по недвижимости.\n"
+        "Нужно помочь оператору быстро понять, что хочет клиент, что уже обсуждали и что надо проверить.\n\n"
+        "Правила:\n"
+        "- Используй только INPUT ниже. Ничего не выдумывай.\n"
+        "- Не пиши, что корпус/цена/метро/школа/срок подтверждены, если этого нет во входных данных.\n"
+        "- Если данных не хватает, добавь это в `operator_tasks`.\n"
+        "- Не проси клиента повторять то, что уже есть в диалоге.\n"
+        "- Верни строго JSON без markdown.\n\n"
+        "Формат JSON:\n"
+        "{\n"
+        '  "client_request_summary": "1-3 предложения по сути запроса",\n'
+        '  "client_criteria": ["критерий 1", "критерий 2"],\n'
+        '  "selected_complex": "название ЖК или пустая строка",\n'
+        '  "discussed_options": ["ЖК/вариант и короткий смысл"],\n'
+        '  "operator_tasks": ["что оператору проверить"],\n'
+        '  "important_context": ["важные детали диалога"],\n'
+        '  "unknowns": ["что неизвестно или требует проверки"]\n'
+        "}\n\n"
+        f"INPUT:\n{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def _fallback_client_card_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
+    selected = snapshot.get("selected_option") if isinstance(snapshot.get("selected_option"), dict) else {}
+    selected_name = str(selected.get("name") or "")
+    params = snapshot.get("params") if isinstance(snapshot.get("params"), dict) else {}
+    criteria = [f"{key}: {value}" for key, value in params.items() if not _looks_missing(value)]
+    dialog = snapshot.get("dialog_window") if isinstance(snapshot.get("dialog_window"), list) else []
+    last_user = ""
+    for turn in reversed(dialog):
+        if isinstance(turn, dict) and turn.get("role") == "user":
+            last_user = str(turn.get("text") or "")
+            break
+    tasks = ["Связаться с клиентом и проверить актуальные варианты, наличие и условия"]
+    if selected_name:
+        tasks.append(f"Проверить актуальность по {selected_name}")
+    return {
+        "client_request_summary": last_user or "Клиент оставил номер после диалога с Ириной.",
+        "client_criteria": criteria,
+        "selected_complex": selected_name,
+        "discussed_options": [
+            str(option.get("name") or "")
+            for option in (snapshot.get("visible_options") or snapshot.get("last_options") or [])[:5]
+            if isinstance(option, dict) and str(option.get("name") or "").strip()
+        ],
+        "operator_tasks": tasks,
+        "important_context": [str(snapshot.get("last_bot_question") or "")] if snapshot.get("last_bot_question") else [],
+        "unknowns": ["Актуальные цены, наличие и условия нужно подтвердить у оператора"],
+    }
+
+
+def _parse_client_card_summary(raw_summary: str, snapshot: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    try:
+        data = _json_from_text(raw_summary)
+        if isinstance(data, dict) and data:
+            return data, "model"
+    except Exception:
+        pass
+    return _fallback_client_card_summary(snapshot), "fallback"
+
+
+def _build_client_card_payload(
+    *,
+    uid: int,
+    phone: str,
+    source: str,
+    snapshot: dict[str, Any],
+    summary: dict[str, Any],
+    summary_status: str,
+    summary_model: str,
+    dialog_id: str = "",
+) -> dict[str, Any]:
+    return {
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "kind": "client_card",
+        "uid": uid,
+        "dialog_id": dialog_id,
+        "source": source,
+        "phone": phone,
+        "phone_meta": _phone_log_meta(phone),
+        "summary_status": summary_status,
+        "summary_model": summary_model,
+        "summary": summary,
+        "client_context": snapshot,
+    }
+
+
+def _append_client_card(card: dict[str, Any]) -> Path:
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    path = LOGS_DIR / f"client_cards-{datetime.now(timezone.utc).date().isoformat()}.jsonl"
+    existed = path.exists()
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(card, ensure_ascii=False) + "\n")
+    if not existed:
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+    return path
+
+
+async def _save_client_card_background(
+    client: OvermindClient,
+    *,
+    uid: int,
+    phone: str,
+    source: str,
+    state_snapshot: dict[str, Any],
+) -> None:
+    """Best-effort background card creation; never blocks user response."""
+    dialog_id = ""
+    try:
+        session = _dialog_session(uid)
+        dialog_id = str(session.get("dialog_id") or "")
+    except Exception:
+        dialog_id = ""
+
+    summary_model = str(state_snapshot.get("search_model") or SEARCH_MODEL)
+    snapshot = dict(state_snapshot)
+    prompt = _build_client_card_summary_prompt(snapshot)
+    raw_summary = ""
+    summary_meta: dict[str, Any] = {}
+    try:
+        raw_summary, summary_meta = await client.summarize_client_card(prompt=prompt, model=summary_model)
+        summary, summary_status = _parse_client_card_summary(raw_summary, snapshot)
+    except Exception as exc:  # pragma: no cover - background must not affect user path
+        LOGGER.exception("client card summary failed")
+        summary = _fallback_client_card_summary(snapshot)
+        summary_status = "fallback_error"
+        _log_error_event({
+            "error_type": "client_card_summary_failed",
+            "severity": "warning",
+            "stage": "client_card_summary",
+            "uid": uid,
+            "source": source,
+            "exception": repr(exc),
+            **_phone_log_meta(phone),
+        })
+    card = _build_client_card_payload(
+        uid=uid,
+        phone=phone,
+        source=source,
+        snapshot=snapshot,
+        summary=summary,
+        summary_status=summary_status,
+        summary_model=str(summary_meta.get("model") or summary_model),
+        dialog_id=dialog_id,
+    )
+    try:
+        path = _append_client_card(card)
+        _log_event({
+            "kind": "client_card_saved",
+            "uid": uid,
+            "source": source,
+            "dialog_id": dialog_id,
+            "summary_status": summary_status,
+            "summary_model": card.get("summary_model"),
+            "path": path.name,
+            **_phone_log_meta(phone),
+        })
+    except Exception as exc:  # pragma: no cover
+        LOGGER.exception("client card save failed")
+        _log_error_event({
+            "error_type": "client_card_save_failed",
+            "severity": "error",
+            "stage": "client_card_save",
+            "uid": uid,
+            "source": source,
+            "exception": repr(exc),
+            **_phone_log_meta(phone),
+        })
 
 
 def _non_text_message_type(message: Any) -> str:
@@ -5653,6 +5914,7 @@ def main() -> None:
         if phone:
             was_awaiting = bool(state.pop("awaiting_phone", None))
             had_context = was_awaiting or _has_phone_capture_context(state)
+            client_card_snapshot = _client_card_state_snapshot(state)
             _log_event({
                 "kind": "phone_captured",
                 "uid": uid,
@@ -5663,6 +5925,13 @@ def main() -> None:
                 **_phone_log_meta(phone),
             })
             await update.message.reply_text(_phone_captured_farewell(), reply_markup=ReplyKeyboardRemove())
+            asyncio.create_task(_save_client_card_background(
+                client,
+                uid=uid,
+                phone=phone,
+                source="text",
+                state_snapshot=client_card_snapshot,
+            ))
             return
 
         if state.get("awaiting_phone"):
@@ -7023,6 +7292,7 @@ def main() -> None:
         if phone:
             was_awaiting = bool(state.pop("awaiting_phone", None))
             had_context = was_awaiting or _has_phone_capture_context(state)
+            client_card_snapshot = _client_card_state_snapshot(state)
             _log_event({
                 "kind": "phone_captured",
                 "uid": uid,
@@ -7033,6 +7303,13 @@ def main() -> None:
                 **_phone_log_meta(phone),
             })
             await update.message.reply_text(_phone_captured_farewell(), reply_markup=ReplyKeyboardRemove())
+            asyncio.create_task(_save_client_card_background(
+                client,
+                uid=uid,
+                phone=phone,
+                source="contact",
+                state_snapshot=client_card_snapshot,
+            ))
             return
 
         await update.message.reply_text(

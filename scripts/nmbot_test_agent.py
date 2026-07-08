@@ -10,6 +10,7 @@
   python3 scripts/nmbot_test_agent.py --suite stateful      # multi-turn smoke: память, выбор, оператор
   python3 scripts/nmbot_test_agent.py --suite compare       # multi-turn smoke: сравнение, рекомендация, оператор
   python3 scripts/nmbot_test_agent.py --suite env           # безопасная проверка .env/service/logs без вывода секретов
+  python3 scripts/nmbot_test_agent.py --suite health        # read-only health: service/env/errors/cards/payload metrics
   python3 scripts/nmbot_test_agent.py --json                # JSON-режим
   python3 scripts/nmbot_test_agent.py --chat-max-tokens N   # дефолт 10000
 
@@ -1193,6 +1194,15 @@ async def _main(suite: str, json_mode: bool, chat_max_tokens: int) -> int:
 
     if suite == "env":
         r = _run_env_check_suite()
+        results.append(r)
+        if not json_mode:
+            mark = "✓" if r.passed else "✗"
+            print(f"  {mark} {r.suite}/{r.scenario} ({r.duration_ms}ms)")
+        _print_json(results) if json_mode else _print_human(results)
+        return 0 if r.passed else 1
+
+    if suite == "health":
+        r = _run_health_suite()
         results.append(r)
         if not json_mode:
             mark = "✓" if r.passed else "✗"
@@ -3499,6 +3509,49 @@ def _run_env_check_suite() -> Result:
     )
 
 
+def _run_health_suite() -> Result:
+    """Read-only health summary: service/env/errors/cards/payload metrics."""
+    started = time.time()
+    proc = subprocess.run(
+        [sys.executable, str(REPO / "scripts" / "nmbot_health.py"), "--json"],
+        cwd=str(REPO),
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    output = (proc.stdout or "").strip()
+    err = (proc.stderr or "").strip()
+    checks: list[dict[str, Any]] = []
+    summary: dict[str, Any] = {}
+    health_status = "unknown"
+    try:
+        parsed = json.loads(output) if output else {}
+        if isinstance(parsed, dict):
+            summary = parsed.get("summary") if isinstance(parsed.get("summary"), dict) else {}
+            health_status = str(parsed.get("status") or "unknown")
+            raw_checks = parsed.get("checks", [])
+            if isinstance(raw_checks, list):
+                checks = [
+                    {"name": str(c.get("name") or "health_check"), "passed": c.get("status") != "fail", "msg": f"status={c.get('status')}; {c.get('msg', '')}"}
+                    for c in raw_checks
+                    if isinstance(c, dict)
+                ]
+    except Exception as exc:
+        checks = [{"name": "health_json_parse", "passed": False, "msg": f"{type(exc).__name__}: {exc}"}]
+    passed = proc.returncode == 0 and health_status in {"ok", "warn"} and all(bool(c.get("passed")) for c in checks)
+    preview = output[:1800] + ("..." if len(output) > 1800 else "")
+    return Result(
+        suite="health",
+        scenario="read_only_operational_summary",
+        passed=passed,
+        checks=checks,
+        error="" if passed else (err or preview or f"exit={proc.returncode}"),
+        response_text=preview,
+        duration_ms=int((time.time() - started) * 1000),
+        system_meta={"summary": summary, "status": health_status, "exit_code": proc.returncode},
+    )
+
+
 def _run_non_text_unit_tests() -> list[Result]:
     """Audit item 5: non-text input не должен превращаться в silent return."""
     started = time.time()
@@ -4315,7 +4368,7 @@ def _run_required_deploy_gate() -> Result:
     return _run_deploy_smoke_test()
 def main() -> None:
     p = argparse.ArgumentParser(description="nmbot test agent — codex + H016 + golden")
-    p.add_argument("--suite", default="all", choices=["all", "codex", "h016", "golden", "h021", "h023", "h024", "h026", "h028", "h029", "ux_e2e", "non_text", "deploy", "env", "dialog", "stateful", "compare", "repeat"])
+    p.add_argument("--suite", default="all", choices=["all", "codex", "h016", "golden", "h021", "h023", "h024", "h026", "h028", "h029", "ux_e2e", "non_text", "deploy", "env", "health", "dialog", "stateful", "compare", "repeat"])
     p.add_argument("--json", action="store_true", help="JSON-режим для CI")
     p.add_argument("--chat-max-tokens", type=int, default=10000)
     args = p.parse_args()

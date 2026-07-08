@@ -424,6 +424,9 @@ def score_output(row: dict[str, Any]) -> dict[str, Any]:
         re.search(r"\bуважаем\w*\b|\bдорог(?:ой|ая|ие|ого|ому|им|их)?\s+(?:клиент|покупател)", response, re.IGNORECASE)
     )
     checks["no_cliche"] = not bool(re.search(r"с удовольствием|по вашему запросу|к сожалению", response, re.IGNORECASE))
+    checks["no_internal_source_noise"] = not bool(
+        re.search(r"\bв\s+(?:нашей\s+)?базе\b|\bсистема\s+активна\b|\bпредложени[яй]\s+в\s+базе\b", response, re.IGNORECASE)
+    )
     checks["no_exclamation"] = "!" not in response
     checks["max_three_options"] = len(re.findall(r"(?:^|\n)\s*[1-9][.)]", response)) <= 3
     checks["one_question_max"] = response.count("?") <= 1

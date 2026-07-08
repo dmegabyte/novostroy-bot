@@ -682,6 +682,62 @@ def _extract_quoted_names(text: str) -> list[str]:
     return [m.strip() for m in re.findall(r"«([^»\n]{2,80})»", text)]
 
 
+def _complex_name_grounding_key(name: Any) -> str:
+    """Компактный ключ имени ЖК для grounding-gate.
+
+    Ответ Ирины может естественно склонить уже найденное имя внутри фразы
+    (`у «Кузьминского леса»`), но это всё ещё тот же ЖК `Кузьминский лес`.
+    Gate остаётся строгим: принимаем только формы, которые сводятся к имени из
+    структурного MCP/search JSON, а не любые новые кавычки в ответе.
+    """
+    text = _normalise_ru_text(str(name or ""))
+    text = re.sub(r"[«»\"'`.,:;!?()\[\]{}-]", " ", text)
+    text = re.sub(r"\b(?:жк|гк|мфк|жилой|квартал|район|комплекс)\b", " ", text)
+    words: list[str] = []
+    for word in re.sub(r"\s+", " ", text).strip().split():
+        if len(word) > 6 and word.endswith("ского"):
+            word = word[:-5] + "ский"
+        elif len(word) > 5 and word.endswith("ого"):
+            word = word[:-3] + "ый"
+        elif len(word) > 5 and word.endswith("его"):
+            word = word[:-3] + "ий"
+        elif len(word) > 4 and word.endswith("ых"):
+            word = word[:-2] + "ые"
+        elif len(word) > 3 and word.endswith("а"):
+            word = word[:-1]
+        words.append(word)
+    return " ".join(words).strip()
+
+
+def _known_complex_name_keys_from_search(search_text: str) -> set[str]:
+    """Достаёт разрешённые имена ЖК из структурного MCP/search_response."""
+    keys: set[str] = set()
+    parsed = _parse_search_response(search_text)
+    for section in ("facts", "near"):
+        rows = parsed.get(section, [])
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_name = str(row.get("name") or "").strip()
+            if not raw_name:
+                continue
+            keys.add(_complex_name_grounding_key(raw_name))
+            for inner in _extract_quoted_names(raw_name):
+                keys.add(_complex_name_grounding_key(inner))
+    return {key for key in keys if key}
+
+
+def _quoted_name_is_grounded(name: str, search_text: str, known_keys: set[str] | None = None) -> bool:
+    if not str(name or "").strip() or not str(search_text or "").strip():
+        return False
+    if _normalise_ru_text(name) in _normalise_ru_text(search_text):
+        return True
+    keys = known_keys if known_keys is not None else _known_complex_name_keys_from_search(search_text)
+    return _complex_name_grounding_key(name) in keys
+
+
 def _ux_check_response(response_text: str, search_text: str) -> list[dict]:
     """H026: строгий UX-чеклист для контрольного диалога.
 
@@ -698,7 +754,8 @@ def _ux_check_response(response_text: str, search_text: str) -> list[dict]:
         checks.append({"name": name, "passed": ok, "msg": msg})
 
     quoted = _extract_quoted_names(txt)
-    missing_quotes = [name for name in quoted if _normalise_ru_text(name) not in search_low]
+    known_name_keys = _known_complex_name_keys_from_search(search_text)
+    missing_quotes = [name for name in quoted if not _quoted_name_is_grounded(name, search_text, known_name_keys)]
     add(
         "ux_mcp_grounded_quoted_complexes",
         bool(search_text.strip()) and not missing_quotes,
@@ -1283,6 +1340,26 @@ def _run_h021_unit_tests() -> list[Result]:
         passed=pass_card,
         error="" if pass_card else f"card is not sales-like enough: {card}",
         response_text=card,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    # H029: grounding-gate принимает естественную падежную форму только если
+    # она сводится к имени ЖК из структурного MCP/search JSON.
+    grounding_search = json.dumps({
+        "facts": [{"name": "Кузьминский лес"}],
+        "near": [{"name": "ЖК «Дюна»"}],
+    }, ensure_ascii=False)
+    grounding_known = _ux_check_response("Срок позже, чем у «Кузьминского леса».", grounding_search)
+    grounding_unknown = _ux_check_response("Ещё есть «Несуществующего леса».", grounding_search)
+    known_check = next(c for c in grounding_known if c["name"] == "ux_mcp_grounded_quoted_complexes")
+    unknown_check = next(c for c in grounding_unknown if c["name"] == "ux_mcp_grounded_quoted_complexes")
+    pass_grounding = known_check["passed"] and not unknown_check["passed"]
+    results.append(Result(
+        suite="h029",
+        scenario="grounding_allows_inflected_known_complex_only",
+        passed=pass_grounding,
+        error="" if pass_grounding else f"known={known_check}; unknown={unknown_check}",
+        response_text=f"known={known_check}; unknown={unknown_check}",
         duration_ms=int((time.time() - started) * 1000),
     ))
 

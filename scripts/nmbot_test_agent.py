@@ -8,6 +8,7 @@
   python3 scripts/nmbot_test_agent.py --suite golden        # только golden-эталоны
   python3 scripts/nmbot_test_agent.py --suite dialog        # контрольные живые диалоги перед отдачей пользователю
   python3 scripts/nmbot_test_agent.py --suite stateful      # multi-turn smoke: память, выбор, оператор
+  python3 scripts/nmbot_test_agent.py --suite compare       # multi-turn smoke: сравнение, рекомендация, оператор
   python3 scripts/nmbot_test_agent.py --json                # JSON-режим
   python3 scripts/nmbot_test_agent.py --chat-max-tokens N   # дефолт 10000
 
@@ -132,6 +133,7 @@ from chat_tester_bot import (  # noqa: E402
     _reject_selected_option_response,
     _render_stage_first_list,
     _render_stage_recommendation,
+    _reason_layer_scenario,
     _consultation_question_response,
     _consultation_answer_guidance,
     _selection_logic_response,
@@ -259,6 +261,26 @@ STATEFUL_FOLLOWUP_TURNS: list[StatefulDialogTurn] = [
     StatefulDialogTurn(
         name="operator_with_selected_context",
         user_text="позови оператора",
+    ),
+]
+
+
+COMPARE_DIALOG_TURNS: list[StatefulDialogTurn] = [
+    StatefulDialogTurn(
+        name="initial_two_room_kotelniki",
+        user_text="двушка в Котельниках",
+    ),
+    StatefulDialogTurn(
+        name="compare_first_second",
+        user_text="сравни первый и второй",
+    ),
+    StatefulDialogTurn(
+        name="recommend_for_fast_move",
+        user_text="что бы ты выбрала для быстрого заезда?",
+    ),
+    StatefulDialogTurn(
+        name="operator_for_recommended",
+        user_text="тогда позови оператора по лучшему варианту",
     ),
 ]
 
@@ -1156,6 +1178,21 @@ async def _main(suite: str, json_mode: bool, chat_max_tokens: int) -> int:
             results.extend(stateful_results)
             if not json_mode:
                 for r in stateful_results:
+                    mark = "✓" if r.passed else "✗"
+                    print(f"  {mark} {r.suite}/{r.scenario} ({r.duration_ms}ms)")
+        finally:
+            await client.close()
+        _print_json(results) if json_mode else _print_human(results)
+        return 0 if all(r.passed for r in results) else 1
+
+    if suite == "compare":
+        if not client.session:
+            await client.ensure_session()
+        try:
+            compare_results = await _run_compare_dialog_suite(client, chat_max_tokens)
+            results.extend(compare_results)
+            if not json_mode:
+                for r in compare_results:
                     mark = "✓" if r.passed else "✗"
                     print(f"  {mark} {r.suite}/{r.scenario} ({r.duration_ms}ms)")
         finally:
@@ -3449,6 +3486,19 @@ async def _resolve_stateful_intent(
     if intent == "operator_contact_accept":
         return {"intent": "operator_contact_accept", "source": "stateful_followup"}, followup_meta, dialog_plan
 
+    if intent in {"compare_selected", "compare_options"}:
+        compare_options = options
+        if intent == "compare_selected" and selected:
+            selected_name = _compact_option_text(selected.get("name"))
+            compare_options = [
+                option for option in options
+                if _compact_option_text(option.get("name")) != selected_name
+            ]
+        return {"intent": "compare_others", "options": compare_options[:2], "source": "stateful_followup"}, followup_meta, dialog_plan
+
+    if intent == "recommend_options":
+        return {"intent": "recommend_options", "options": options[:3], "source": "stateful_followup"}, followup_meta, dialog_plan
+
     if intent == "update_search_params":
         delta = _normalize_followup_params_delta(followup_meta.get("params_delta") or {}, user_text=text)
         if delta:
@@ -3461,6 +3511,26 @@ async def _resolve_stateful_intent(
 
     if intent in {"sort_price_asc", "filter_finish", "new_search"}:
         return {"intent": intent, "source": "stateful_followup"}, followup_meta, dialog_plan
+
+    # Детерминированные smoke-fallback'и для compare-chain: если LLM-router
+    # не распознал короткую человеческую реплику, не запускаем новый широкий
+    # поиск, а проверяем работу с уже видимым списком.
+    text_low = text.lower().replace("ё", "е")
+    if re.search(r"сравн|чем отлич", text_low) and options:
+        followup_meta.setdefault("intent", "compare_options")
+        followup_meta.setdefault("smoke_fallback", "compare_visible_options")
+        return {"intent": "compare_others", "options": options[:2], "source": "stateful_compare_fallback"}, followup_meta, dialog_plan
+
+    if re.search(r"что бы ты выбрал|что бы ты выбрала|лучше|быстр", text_low) and options:
+        followup_meta.setdefault("intent", "recommend_options")
+        followup_meta.setdefault("smoke_fallback", "recommend_visible_options")
+        return {"intent": "recommend_options", "options": options[:3], "source": "stateful_recommend_fallback"}, followup_meta, dialog_plan
+
+    if "оператор" in text_low and re.search(r"лучш|выбран|вариант", text_low) and (selected or options):
+        option = selected or options[0]
+        followup_meta.setdefault("intent", "operator_for_selected")
+        followup_meta.setdefault("smoke_fallback", "operator_for_best_visible")
+        return {"intent": "operator_for_selected", "option": option, "source": "stateful_operator_best_fallback"}, followup_meta, dialog_plan
 
     # Стабильный smoke-контракт для короткого человеческого follow-up
     # «а с отделкой?»: если LLM-orchestrator попросил уточнение, но в тексте
@@ -3546,6 +3616,24 @@ async def _run_stateful_turn(
         options = list(state.get("visible_options") or state.get("last_options") or [])
         response = _prepare_response_text(_format_options_summary_response(options, "С отделкой по последнему списку вижу", "Какой вариант раскрыть подробнее?"))
         _remember_bot_response(state, response, offer_type="choose_option", answer_kind="filter_finish")
+    elif intent == "compare_others":
+        options = list(dialog_intent.get("options") or state.get("visible_options") or state.get("last_options") or [])[:3]
+        response = _prepare_response_text(_format_options_summary_response(
+            options,
+            "Сравню первый и второй вариант из последнего списка",
+            "Какой из них раскрыть подробнее?",
+        ))
+        state["visible_options"] = options
+        _remember_bot_response(state, response, offer_type="choose_option", answer_kind="options_compare")
+    elif intent == "recommend_options":
+        options = list(dialog_intent.get("options") or state.get("visible_options") or state.get("last_options") or [])[:3]
+        response = _prepare_response_text(_render_stage_recommendation(options, _reason_layer_scenario(text, state.get("params", {}))))
+        # Recommendation is an advisory selection: keep the recommended object
+        # as selected so the next operator request can carry concrete context.
+        if options:
+            state["selected_option"] = options[0]
+        state["visible_options"] = options
+        _remember_bot_response(state, response, offer_type="selected_option_details", answer_kind="recommend_options")
     elif intent in {"expand_more_options", "new_search"}:
         query = _build_followup_expansion_query(text, state) if intent == "expand_more_options" else text
         response, new_params, search_meta, chat_meta = await client.ask(
@@ -3713,6 +3801,97 @@ async def _run_stateful_followup_suite(client: OvermindClient, chat_max_tokens: 
         return [result]
 
 
+def _check_compare_turn(turn: dict[str, Any], index: int) -> list[dict[str, Any]]:
+    checks = _check_stateful_turn(turn, index)
+
+    def add(name: str, ok: bool, msg: str = "") -> None:
+        checks.append({"name": name, "passed": ok, "msg": msg})
+
+    txt = str(turn.get("response_text") or "")
+    low = txt.lower().replace("ё", "е")
+    intent = str(turn.get("dialog_intent") or "")
+    visible_before = list(turn.get("visible_before_names") or [])
+    visible_after = list(turn.get("visible_after_names") or [])
+    selected_after = str(turn.get("selected_after_name") or "")
+    name = str(turn.get("name") or "")
+
+    if name == "compare_first_second":
+        expected = visible_before[:2]
+        add("compare_uses_visible_options", intent == "compare_others", f"intent={intent}")
+        add("compare_no_new_search", not turn.get("search_text"), "compare should not start broad MCP search")
+        for idx, opt_name in enumerate(expected, start=1):
+            words = [w for w in re.split(r"\s+", opt_name.lower()) if len(w) > 2]
+            add(f"compare_mentions_visible_{idx}", bool(words and any(w in low for w in words[:3])), f"option={opt_name}; text={txt[:220]}")
+        add("compare_keeps_visible_subset", bool(visible_after and len(visible_after) <= 3), f"visible_after={visible_after}")
+    elif name == "recommend_for_fast_move":
+        visible_pool = visible_before or visible_after
+        mentioned = []
+        for opt_name in visible_pool[:3]:
+            words = [w for w in re.split(r"\s+", str(opt_name).lower()) if len(w) > 2]
+            if words and any(w in low for w in words[:3]):
+                mentioned.append(opt_name)
+        add("recommend_intent", intent == "recommend_options", f"intent={intent}")
+        add("recommend_no_new_search", not turn.get("search_text"), "recommend should use visible options")
+        add("recommend_mentions_visible_option", bool(mentioned), f"mentioned={mentioned}; visible={visible_pool}; text={txt[:220]}")
+        add("recommend_sets_selected_context", bool(selected_after), f"selected={selected_after}")
+    elif name == "operator_for_recommended":
+        operator_context = turn.get("operator_context") if isinstance(turn.get("operator_context"), dict) else {}
+        add("operator_for_recommended_intent", intent in {"operator_for_selected", "operator_contact_accept"}, f"intent={intent}")
+        add("operator_for_recommended_has_selected", bool(operator_context.get("selected_option") or operator_context.get("selected_option_name") or selected_after), _safe_meta_preview(operator_context))
+        add("operator_for_recommended_asks_contact", any(m in low for m in ["номер", "телефон", "контакт", "связ"]), txt[:220])
+    return checks
+
+
+async def _run_compare_dialog_suite(client: OvermindClient, chat_max_tokens: int) -> list[Result]:
+    started = time.time()
+    state = _default_state()
+    turns: list[dict[str, Any]] = []
+    checks: list[dict[str, Any]] = []
+    try:
+        for idx, turn_def in enumerate(COMPARE_DIALOG_TURNS):
+            turn = await _run_stateful_turn(client, state, turn_def, chat_max_tokens)
+            turn_checks = _check_compare_turn(turn, idx)
+            turn["checks"] = turn_checks
+            turns.append(turn)
+            for c in turn_checks:
+                checks.append({"name": f"{turn_def.name}:{c['name']}", "passed": c["passed"], "msg": c.get("msg", "")})
+        passed = all(c["passed"] for c in checks)
+        transcript = "\n\n".join(
+            f"USER: {t['user_text']}\nINTENT: {t['dialog_intent']}\nBOT: {_stateful_short(t['response_text'], 700)}"
+            for t in turns
+        )
+        result = Result(
+            suite="compare",
+            scenario="compare_visible_recommend_operator",
+            passed=passed,
+            checks=checks,
+            error="" if passed else "compare smoke checks failed",
+            duration_ms=int((time.time() - started) * 1000),
+            response_text=transcript,
+            dialog_intent=turns[-1].get("dialog_intent") if turns else "",
+            system_meta={
+                "turns": len(turns),
+                "final_params": dict(state.get("params") or {}),
+                "final_selected": _stateful_option_name(state.get("selected_option")),
+                "awaiting_phone": bool(state.get("awaiting_phone")),
+            },
+        )
+        _append_stateful_dialog_review(result, turns)
+        return [result]
+    except Exception as e:
+        result = Result(
+            suite="compare",
+            scenario="compare_visible_recommend_operator",
+            passed=False,
+            checks=[{"name": "exception", "passed": False, "msg": f"{type(e).__name__}: {e}"}],
+            error=traceback.format_exc(limit=5),
+            duration_ms=int((time.time() - started) * 1000),
+            response_text="\n\n".join(f"USER: {t.get('user_text')}\nBOT: {_stateful_short(t.get('response_text'))}" for t in turns),
+        )
+        _append_stateful_dialog_review(result, turns)
+        return [result]
+
+
 async def _run_control_dialog_test(
     client: OvermindClient,
     chat_max_tokens: int,
@@ -3817,7 +3996,7 @@ def _run_required_deploy_gate() -> Result:
     return _run_deploy_smoke_test()
 def main() -> None:
     p = argparse.ArgumentParser(description="nmbot test agent — codex + H016 + golden")
-    p.add_argument("--suite", default="all", choices=["all", "codex", "h016", "golden", "h021", "h023", "h024", "h026", "h028", "h029", "ux_e2e", "non_text", "deploy", "dialog", "stateful"])
+    p.add_argument("--suite", default="all", choices=["all", "codex", "h016", "golden", "h021", "h023", "h024", "h026", "h028", "h029", "ux_e2e", "non_text", "deploy", "dialog", "stateful", "compare"])
     p.add_argument("--json", action="store_true", help="JSON-режим для CI")
     p.add_argument("--chat-max-tokens", type=int, default=10000)
     args = p.parse_args()

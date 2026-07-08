@@ -8,6 +8,7 @@ Usage:
   python3 scripts/nmbot_mcp_only_sim.py
   python3 scripts/nmbot_mcp_only_sim.py --turn "1" --turn "расскажи подробнее" --turn "можно бронь?"
   python3 scripts/nmbot_mcp_only_sim.py --search-json /tmp/search_response.json --turn "ЖК Лучи" --turn "что по нему?"
+  python3 scripts/nmbot_mcp_only_sim.py --mode new-arch
 """
 from __future__ import annotations
 
@@ -182,6 +183,8 @@ def _expected_from_diagnostic(item: dict[str, Any]) -> str:
         return "Route the request to operator handoff."
     if "selected_complex_should_progress_to_operator" in problem:
         return "After a concrete ЖК is selected and the user shows interest, progress to operator handoff instead of another open-ended clarification."
+    if "fresh_expand_more_options" in problem:
+        return "Trigger a fresh MCP search, exclude already shown ЖК, and present new similar options."
     if "non_mcp_fact_leak" in problem:
         return "Stay fully grounded in MCP/search JSON and avoid invented facts."
     if "compare" in problem:
@@ -328,6 +331,17 @@ def _diagnose_sim_turn(turn: str, intent: dict[str, Any], state: dict[str, Any])
             "fix_location": "scripts/chat_tester_bot.py::_resolve_dialog_intent + selected-option CTA policy",
             "patch_hint": "Добавить handoff_readiness_score: выбранный ЖК + показанная карточка + сигнал интереса/что дальше => operator_for_selected/operator_contact_accept; не задавать бесконечные вопросы про цену/срок.",
             "acceptance": "selected ЖК + interest/what-next turn routes to operator handoff or asks for phone, while first search still avoids early operator",
+        })
+        return base
+
+    wants_more_similar = bool(re.search(r"(похож(ие|и|их)?\s+вариант|ещё\s+вариант|еще\s+вариант|другие\s+вариант|альтернатив)", t))
+    if wants_more_similar and kind != "expand_more_options":
+        base.update({
+            "status": "needs_patch",
+            "problem": "fresh_expand_more_options: пользователь просит ещё похожие варианты, но routing не делает свежий MCP search с исключением уже показанных ЖК.",
+            "fix_location": "scripts/chat_tester_bot.py::_resolve_dialog_intent + followup handler for expand_more_options",
+            "patch_hint": "Добавить отдельный intent expand_more_options; в проде вызвать fresh MCP search и отфильтровать visible/last options из результата.",
+            "acceptance": "similar-more turns trigger a fresh search and do not repeat already shown ЖК",
         })
         return base
 
@@ -587,6 +601,12 @@ def run_simulation(search_response: dict[str, Any], turns: list[str], *, write_j
             print("BOT [compare_others, production_routing, from_saved_mcp]")
             bot_text = _format_options_summary_response(compare_options, "Можно сравнить с другими вариантами", "Какой из них разобрать подробнее?")
             print(bot_text)
+        elif kind == "expand_more_options":
+            state["last_offer_type"] = "choose_option"
+            state["last_answer_kind"] = "options_summary"
+            print("BOT [expand_more_options, production_routing, fresh_mcp_search_required]")
+            bot_text = "Продакшен делает свежий MCP search, исключая уже показанные ЖК; симулятор не исполняет новый поиск, а только подтверждает правильный маршрут."
+            print(bot_text)
         elif kind == "sort_price_asc":
             cheaper_options = intent.get("options") or []
             state["last_offer_type"] = "choose_option"
@@ -651,12 +671,29 @@ def run_simulation(search_response: dict[str, Any], turns: list[str], *, write_j
         print(f"SIM JOURNAL MD: {md_path}")
 
 
+def _run_new_arch_mode() -> None:
+    from nmbot_new_arch_sim import SAMPLE_SEARCH_RESPONSE, run_scenario, scenarios
+
+    report = [run_scenario(scenario.name, scenario.turns, SAMPLE_SEARCH_RESPONSE) for scenario in scenarios()]
+    final = {
+        "scenarios": len(report),
+        "turns": sum(item["summary"]["turns"] for item in report),
+        "passed": sum(item["summary"]["passed"] for item in report),
+        "failed": sum(item["summary"]["failed"] for item in report),
+    }
+    print("FINAL:", json.dumps(final, ensure_ascii=False))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Simulate proposed MCP-only selected-option flow")
     parser.add_argument("--search-json", help="Path to structured MCP search_response JSON")
     parser.add_argument("--turn", action="append", dest="turns", help="User follow-up turn; can be repeated")
     parser.add_argument("--no-journal", action="store_true", help="Do not append simulator diagnostics to logs/sim_journal-*.jsonl/.md")
+    parser.add_argument("--mode", choices=["mcp-only", "new-arch"], default="mcp-only", help="Simulation mode")
     args = parser.parse_args()
+    if args.mode == "new-arch":
+        _run_new_arch_mode()
+        return
     turns = args.turns or ["1", "расскажи подробнее", "можно бронь?"]
     run_simulation(_load_search_response(args.search_json), turns, write_journal=not args.no_journal)
 

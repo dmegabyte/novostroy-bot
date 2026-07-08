@@ -79,9 +79,61 @@ ANSWER_MODELS: Final[list[str]] = [
 SEARCH_SYSTEM_PROMPT = _load_prompt("search_v1")
 CHAT_SYSTEM_PROMPT = _load_prompt("chat_v1")
 
+
+def _load_prompt_path(relative_path: str) -> str:
+    """Reads prompt file relative to prompts/; missing overlays are optional."""
+    path = PROMPTS_DIR / relative_path
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").rstrip("\n")
+
+
+def _prompt_slug(value: Any) -> str:
+    return re.sub(r"[^a-z0-9_]+", "", str(value or "").strip().lower())
+
+
+def _chat_system_prompt_for_params(params: dict[str, Any] | None) -> str:
+    """Composes main chat prompt through constructor slots.
+
+    Main prompt stays a controlling frame. Scenario/facet files are inserted
+    into their reserved slots so the final prompt reads as one native document,
+    not as a detached appendix.
+    """
+    params = params if isinstance(params, dict) else {}
+    prompt = CHAT_SYSTEM_PROMPT
+    scenario_block = "Сценарий не задан: используй общий search/default контекст и не добавляй сценарных выгод."
+    purpose = _prompt_slug(params.get("purpose"))
+    if purpose:
+        overlay = _load_prompt_path(f"scenarios/{purpose}_v1.txt")
+        if overlay:
+            scenario_block = overlay
+    facet_blocks: list[str] = []
+    facets = params.get("facets") if isinstance(params.get("facets"), list) else []
+    for facet in facets:
+        slug = _prompt_slug(facet)
+        if not slug:
+            continue
+        overlay = _load_prompt_path(f"facets/{slug}_v1.txt")
+        if overlay:
+            facet_blocks.append(overlay)
+    facet_block = "\n\n".join(facet_blocks) if facet_blocks else "Facet не задан: не добавляй ипотечные/скидочные/рассрочные claims без фактов."
+    if "{{SCENARIO_OVERLAY}}" in prompt:
+        prompt = prompt.replace("{{SCENARIO_OVERLAY}}", scenario_block)
+    else:
+        prompt = f"{prompt}\n\n## Сценарный модуль\n{scenario_block}"
+    if "{{FACET_OVERLAYS}}" in prompt:
+        prompt = prompt.replace("{{FACET_OVERLAYS}}", facet_block)
+    else:
+        prompt = f"{prompt}\n\n## Дополнительный facet-модуль\n{facet_block}"
+    return prompt
+
 AVAILABLE_MODELS = ANSWER_MODELS
 SHOW_MODEL_STATS: Final[bool] = os.getenv("NMBOT_SHOW_MODEL_STATS", "1") != "0"
-STAGE_PRESENTER_ENABLED: Final[bool] = os.getenv("NMBOT_STAGE_PRESENTER", "1") == "1"
+# Legacy stage presenter is intentionally opt-in.
+# The canonical list answer must come from the chat/list presenter contract;
+# otherwise this layer overwrites live intros with canned phrases like
+# "Подобрала три варианта под инвестицию" and loses user context.
+STAGE_PRESENTER_ENABLED: Final[bool] = os.getenv("NMBOT_STAGE_PRESENTER", "0") == "1"
 SALES_PHRASE_ENABLED: Final[bool] = os.getenv("NMBOT_SALES_PHRASE", "1") == "1"
 SALES_PHRASE_MODEL: Final[str] = os.getenv("NMBOT_SALES_PHRASE_MODEL", "google/gemini-3.5-flash")
 try:
@@ -130,9 +182,142 @@ def _safe_json_preview(obj: Any, limit: int = 2000) -> str:
         return f"<json-preview-failed {type(e).__name__}: {e}>"
 
 
-def _safe_user_error_message(_error: str | None = None) -> str:
-    """H024: человекочитаемая ошибка без OpenRouter/choices/traceback/JSON для Telegram."""
-    return SAFE_UPSTREAM_ERROR_TEXT
+def _safe_user_error_message(error: str | None = None) -> str:
+    """H024: человекочитаемая upstream-ошибка без traceback/JSON/секретов.
+
+    Product decision 2026-07-06: если OpenRouter/Overmind реально вернул ошибку,
+    показываем её в чате коротко, чтобы оператор/тестировщик видел причину, а не
+    только общий fallback. Сырые JSON, traceback, `choices` и любые длинные хвосты
+    наружу не отдаём.
+    """
+    raw = str(error or "").strip()
+    if not raw:
+        return SAFE_UPSTREAM_ERROR_TEXT
+
+    status = ""
+    status_match = re.search(r"\b(4\d\d|5\d\d)\b", raw)
+    if status_match:
+        status = status_match.group(1)
+
+    provider = "upstream"
+    if re.search(r"openrouter", raw, re.IGNORECASE):
+        provider = "OpenRouter"
+    elif re.search(r"overmind", raw, re.IGNORECASE):
+        provider = "Overmind"
+
+    reason = ""
+    reason_match = re.search(r'"error"\s*:\s*"([^"]+)"', raw)
+    if reason_match:
+        reason = reason_match.group(1)
+    elif "Access denied by security policy" in raw:
+        reason = "Access denied by security policy"
+    elif "timeout" in raw.lower():
+        reason = "timeout"
+
+    headline = f"{provider} вернул ошибку"
+    if status:
+        headline += f" {status}"
+    if reason:
+        reason = reason.rstrip(". ")
+        headline += f": {reason}"
+
+    return (
+        f"Сейчас поиск не сработал: {headline}.\n\n"
+        "Это не ошибка ваших условий поиска — сломался внешний LLM/API-контур. "
+        "Попробуйте ещё раз позже или напишите номер, и оператор проверит варианты вручную."
+    )
+
+
+def _response_payload_to_text(payload: Any) -> str:
+    """Normalize gateway/chat `response` payload to client-facing text.
+
+    Prod contract: Telegram handler must never receive a dict/list as the final
+    response. Some upstream/model responses can wrap the text one level deeper;
+    if no human-facing text field exists, return an empty string so caller uses a
+    safe fallback instead of crashing or leaking JSON internals to the client.
+    """
+    if isinstance(payload, str):
+        return payload
+    if isinstance(payload, dict):
+        final_question = _response_payload_to_text(payload.get("final_question")) or _response_payload_to_text(payload.get("question"))
+        for key in ("response", "text", "message", "answer"):
+            value = payload.get(key)
+            text = _response_payload_to_text(value)
+            if text:
+                items_text = _response_items_to_text(payload.get("items"))
+                if items_text and items_text not in text:
+                    text = f"{text.rstrip()}\n\n{items_text}"
+                if final_question:
+                    return _attach_final_question(text, final_question)
+                return text
+        items_text = _response_items_to_text(payload.get("items"))
+        if items_text:
+            if final_question:
+                return _attach_final_question(items_text, final_question)
+            return items_text
+        return ""
+    return ""
+
+
+def _response_items_to_text(items: Any) -> str:
+    """Render chat_v1 `response.items[]` into the visible list answer.
+
+    After disabling the legacy stage presenter, the chat model is the canonical
+    list presenter. Its JSON contains the useful ЖК cards in `items`; dropping
+    them turns the answer into only an intro + question, so keep this renderer
+    small and data-only.
+    """
+    if not isinstance(items, list):
+        return ""
+    blocks: list[str] = []
+    for idx, raw_item in enumerate(items[:3], start=1):
+        if isinstance(raw_item, str):
+            item_text = raw_item.strip()
+            if item_text:
+                blocks.append(f"{idx}. {item_text}")
+            continue
+        if not isinstance(raw_item, dict):
+            continue
+
+        name = str(raw_item.get("name") or raw_item.get("title") or raw_item.get("complex") or raw_item.get("jk") or "").strip()
+        location = str(raw_item.get("location") or raw_item.get("district") or raw_item.get("area") or "").strip()
+        price = str(raw_item.get("price_range") or raw_item.get("price") or raw_item.get("budget") or "").strip()
+        finishing = str(raw_item.get("finishing") or raw_item.get("renovation") or "").strip()
+        ready = str(raw_item.get("ready") or raw_item.get("handover") or raw_item.get("status") or "").strip()
+        reason = str(raw_item.get("reason") or raw_item.get("why") or raw_item.get("benefit") or raw_item.get("comment") or "").strip()
+
+        lead_parts = [part for part in (name, location) if part]
+        lead = " — ".join(lead_parts) if lead_parts else "Вариант"
+        fact_parts = []
+        if price:
+            fact_parts.append(price)
+        if finishing:
+            fact_parts.append(finishing)
+        if ready:
+            fact_parts.append(ready)
+
+        line = f"{idx}. {lead}"
+        if fact_parts:
+            line += f". {', '.join(fact_parts)}"
+        if reason:
+            line += f". {reason}"
+        blocks.append(line)
+    return "\n\n".join(blocks).strip()
+
+
+def _attach_final_question(response: str, final_question: str) -> str:
+    response_text = str(response or "").strip()
+    question_text = str(final_question or "").strip()
+    if not question_text:
+        return response_text
+    if not response_text:
+        return question_text
+    if question_text in response_text:
+        return response_text
+    tail = response_text.rstrip()
+    if not tail.endswith((".", "!", "?", "…")):
+        tail += "."
+    return f"{tail}\n\n{question_text}"
 
 
 def _is_safe_upstream_fallback(text: Any) -> bool:
@@ -222,11 +407,12 @@ class OvermindClient:
         search_result, search_meta = await self._run_gateway_request(search_request_data, headers, timeout)
         search_meta = {**search_meta, "_response_text": search_result}
         if search_meta.get("_safe_fallback") or _is_safe_upstream_fallback(search_result):
-            return SAFE_UPSTREAM_ERROR_TEXT, {}, {**search_meta, "_safe_fallback": True}, {}
+            return search_result or SAFE_UPSTREAM_ERROR_TEXT, {}, {**search_meta, "_safe_fallback": True}, {}
         if search_result.startswith("❌") or search_result.startswith("⏱️"):
             return search_result, {}, search_meta, {}
 
         new_params = self._extract_params(search_result)
+        effective_params = {**(params or {}), **new_params}
         chat_query = (
             f"Запрос клиента: {query}\n\n"
             f"Текущие параметры: {json.dumps(params or {}, ensure_ascii=False)}\n"
@@ -237,7 +423,7 @@ class OvermindClient:
             "query": chat_query,
             "service": "openrouter",
             "model": chat_model,
-            "system_prompt": CHAT_SYSTEM_PROMPT,
+            "system_prompt": _chat_system_prompt_for_params(effective_params),
             "parameters": {
                 "temperature": 0.3,
                 "max_tokens": 10000,  # H003: поднят с 5000 — flash обрезал JSON в 2/3 тестов
@@ -250,6 +436,48 @@ class OvermindClient:
         response_text, chat_params, retries, chat_meta = await self._chat_with_retry(
             chat_request_data, headers, timeout, uid=0
         )
+
+        # Общий UX-контракт first_list: если MCP уже вернул несколько ЖК, первый
+        # ответ не должен оставаться общим lead'ом LLM. Рендерим карточки из
+        # фактов deterministic-слоем, чтобы Telegram handler, CLI и test-agent
+        # видели одну и ту же воронку: список ЖК → выбор ЖК → оператор.
+        if STAGE_PRESENTER_ENABLED:
+            stage_options = _extract_options(search_result)
+            if len(stage_options) >= 2:
+                stage_scenario = _reason_layer_scenario(query, effective_params)
+                response_text = _render_stage_first_list(
+                    stage_options,
+                    stage_scenario,
+                    params_context=_first_list_params_context(effective_params),
+                )
+                chat_meta = {
+                    **chat_meta,
+                    "_stage_presenter": {
+                        "enabled": True,
+                        "applied": True,
+                        "stage": "first_list",
+                        "scenario": stage_scenario,
+                        "options_count": min(len(stage_options), 3),
+                        "source": "OvermindClient.ask",
+                    },
+                    "_visible_options": stage_options[:3],
+                }
+            elif len(stage_options) == 1:
+                stage_scenario = _reason_layer_scenario(query, effective_params)
+                response_text = _render_stage_single_first_result(stage_options[0], stage_scenario)
+                chat_meta = {
+                    **chat_meta,
+                    "_stage_presenter": {
+                        "enabled": True,
+                        "applied": True,
+                        "stage": "single_first_result",
+                        "scenario": stage_scenario,
+                        "options_count": 1,
+                        "source": "OvermindClient.ask",
+                    },
+                    "_visible_options": stage_options[:1],
+                }
+
         return response_text, {**new_params, **chat_params}, search_meta, chat_meta
 
     async def explain_known_option(
@@ -307,6 +535,70 @@ class OvermindClient:
             "parameters": {
                 "temperature": 0.2,
                 "max_tokens": 1600,
+            },
+            "external_api_key": OPENROUTER_API_KEY,
+        }
+        response_text, _params, _retries, chat_meta = await self._chat_with_retry(
+            chat_request_data, headers, timeout, uid=0
+        )
+        return response_text, chat_meta
+
+    async def explain_conversation_followup(
+        self,
+        *,
+        user_text: str,
+        state: dict[str, Any],
+        dialog_plan: dict[str, Any] | None = None,
+        chat_model: str = CHAT_MODEL,
+        timeout: int = 600,
+    ) -> tuple[str, dict]:
+        """Chat-only presenter: живой ответ по контексту без нового MCP-поиска."""
+        session = await self.ensure_session()
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OVERMIND_TOKEN}",
+        }
+        chat_query = _build_conversation_answer_prompt(user_text=user_text, state=state, dialog_plan=dialog_plan or {})
+        chat_request_data = {
+            "query": chat_query,
+            "service": "openrouter",
+            "model": chat_model,
+            "system_prompt": CHAT_SYSTEM_PROMPT,
+            "parameters": {
+                "temperature": 0.2,
+                "max_tokens": 1800,
+            },
+            "external_api_key": OPENROUTER_API_KEY,
+        }
+        response_text, _params, _retries, chat_meta = await self._chat_with_retry(
+            chat_request_data, headers, timeout, uid=0
+        )
+        return response_text, chat_meta
+
+    async def explain_consultation_followup(
+        self,
+        *,
+        user_text: str,
+        state: dict[str, Any],
+        dialog_plan: dict[str, Any] | None = None,
+        chat_model: str = CHAT_MODEL,
+        timeout: int = 600,
+    ) -> tuple[str, dict]:
+        """Chat-only presenter: живой прямой ответ на консультационный вопрос."""
+        session = await self.ensure_session()
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OVERMIND_TOKEN}",
+        }
+        chat_query = _build_consultation_answer_prompt(user_text=user_text, state=state, dialog_plan=dialog_plan or {})
+        chat_request_data = {
+            "query": chat_query,
+            "service": "openrouter",
+            "model": chat_model,
+            "system_prompt": CHAT_SYSTEM_PROMPT,
+            "parameters": {
+                "temperature": 0.2,
+                "max_tokens": 1800,
             },
             "external_api_key": OPENROUTER_API_KEY,
         }
@@ -447,11 +739,24 @@ class OvermindClient:
                     resp.status,
                     _safe_json_preview(task),
                 )
+                _log_error_event({
+                    "error_type": "gateway_create_failed",
+                    "severity": "error",
+                    "stage": "gateway_create_task",
+                    "http_status": resp.status,
+                    "payload_preview": _safe_json_preview(task),
+                })
                 return _safe_user_error_message(), {"_upstream_error": True, "_safe_fallback": True}
 
         task_id = task.get("id")
         if not task_id:
             LOGGER.error("gateway create task returned no id: payload=%s", _safe_json_preview(task))
+            _log_error_event({
+                "error_type": "gateway_missing_task_id",
+                "severity": "error",
+                "stage": "gateway_create_task",
+                "payload_preview": _safe_json_preview(task),
+            })
             return _safe_user_error_message(), {"_upstream_error": True, "_safe_fallback": True}
 
         base = OVERMIND_URL.rstrip("/")
@@ -468,7 +773,7 @@ class OvermindClient:
 
                 result_obj = result.get("result") or result
                 if isinstance(result_obj, dict):
-                    response_text = result_obj.get("response", "")
+                    response_payload = result_obj.get("response", "")
                     error = result_obj.get("error", "")
                     metadata = result_obj.get("metadata", {}) or {}
                     if error:
@@ -478,20 +783,62 @@ class OvermindClient:
                             error,
                             _safe_json_preview(result_obj),
                         )
+                        _log_error_event({
+                            "error_type": "gateway_task_error",
+                            "severity": "error",
+                            "stage": "gateway_result",
+                            "task_id": task_id,
+                            "task_status": status,
+                            "exception": str(error),
+                            "payload_preview": _safe_json_preview(result_obj),
+                        })
                         return _safe_user_error_message(error), {**metadata, "_upstream_error": True, "_safe_fallback": True}
 
+                    response_text = _response_payload_to_text(response_payload)
                     if response_text:
                         return response_text, metadata
+                    if response_payload:
+                        LOGGER.error(
+                            "gateway task returned non-text response payload: task_id=%s status=%s payload=%s",
+                            task_id,
+                            status,
+                            _safe_json_preview(response_payload),
+                        )
+                        _log_error_event({
+                            "error_type": "gateway_non_text_response",
+                            "severity": "error",
+                            "stage": "gateway_result",
+                            "task_id": task_id,
+                            "task_status": status,
+                            "payload_type": type(response_payload).__name__,
+                            "payload_preview": _safe_json_preview(response_payload),
+                        })
+                        return _safe_user_error_message(), {**metadata, "_upstream_error": True, "_safe_fallback": True}
                     LOGGER.error(
                         "gateway task returned empty response: task_id=%s status=%s result=%s",
                         task_id,
                         status,
                         _safe_json_preview(result_obj),
                     )
+                    _log_error_event({
+                        "error_type": "gateway_empty_response",
+                        "severity": "error",
+                        "stage": "gateway_result",
+                        "task_id": task_id,
+                        "task_status": status,
+                        "payload_preview": _safe_json_preview(result_obj),
+                    })
                     return _safe_user_error_message(), {**metadata, "_upstream_error": True, "_safe_fallback": True}
 
             await asyncio.sleep(3)
 
+        _log_error_event({
+            "error_type": "gateway_timeout",
+            "severity": "error",
+            "stage": "gateway_status_poll",
+            "timeout_seconds": timeout,
+            "task_id": task_id,
+        })
         return "⏱️ Таймаут — задача не завершилась за отведённое время", {}
 
     @staticmethod
@@ -514,7 +861,10 @@ class OvermindClient:
             e = response_text.rfind("}") + 1
             if s >= 0 and e > s:
                 data = json.loads(response_text[s:e])
-                resp_text = data.get("response", response_text)
+                resp_text = _response_payload_to_text(data.get("response", "")) or response_text
+                final_question = _response_payload_to_text(data.get("final_question", ""))
+                if final_question:
+                    resp_text = _attach_final_question(resp_text, final_question)
                 params = data.get("params", {})
                 visible_options = data.get("visible_options", [])
                 return (
@@ -566,6 +916,16 @@ class OvermindClient:
             if parsed_ok:
                 response_text = response_text_new
             is_invalid = not parsed_ok and not response_text.startswith("❌") and not response_text.startswith("⏱️")
+        if is_invalid:
+            _log_error_event({
+                "error_type": "chat_response_parse_failed",
+                "severity": "warning",
+                "stage": "chat_parse",
+                "uid": uid,
+                "retries": retries,
+                "response_preview": _compact_trace_value(chat_result, 1800),
+                "chat_meta": _compact_trace_value(chat_meta, 1200),
+            })
         return response_text, chat_params, retries, chat_meta
 
 
@@ -625,19 +985,27 @@ def _format_numbered_list_spacing(text: str) -> str:
         return text
     lines = text.splitlines()
     out: list[str] = []
-    seen_numbered_item = False
+    seen_list_item = False
     for line in lines:
-        is_item = bool(re.match(r"^\s*\d+\.\s+", line))
+        stripped = line.strip()
+        is_numbered_item = bool(re.match(r"^\s*\d+\.\s+", line))
+        is_bullet_item = bool(re.match(r"^\s*[-•*]\s+", line))
+        looks_like_plain_item = bool(
+            stripped
+            and "?" not in stripped
+            and re.match(r"^[А-ЯЁA-Z].+\s[—-]\s.+", stripped)
+        )
+        is_item = is_numbered_item or is_bullet_item or looks_like_plain_item
         is_question = bool(line.strip().endswith("?"))
         # Перед первым пунктом списка тоже нужен отступ, а не только между 1/2/3.
         if is_item and out and out[-1] != "":
             out.append("")
         # Финальный вопрос после списка читается лучше отдельным абзацем.
-        if is_question and seen_numbered_item and out and out[-1] != "":
+        if is_question and seen_list_item and out and out[-1] != "":
             out.append("")
         out.append(line)
         if is_item:
-            seen_numbered_item = True
+            seen_list_item = True
     return "\n".join(out)
 
 
@@ -941,6 +1309,7 @@ def _remember_bot_response(state: dict[str, Any], text: str, *, offer_type: str 
 
 def _followup_state_payload(state: dict[str, Any]) -> dict[str, Any]:
     selected = state.get("selected_option") or {}
+    user_text = _last_dialog_user_text(state)
     return {
         "params": dict(state.get("params") or {}),
         "selected_option": selected.get("name") if isinstance(selected, dict) else None,
@@ -949,6 +1318,7 @@ def _followup_state_payload(state: dict[str, Any]) -> dict[str, Any]:
         "last_offer_type": state.get("last_offer_type") or "",
         "last_answer_kind": state.get("last_answer_kind") or "",
         "selected_option_card_shown_count": int(state.get("selected_option_card_shown_count") or 0),
+        "conversation_followup": _extract_conversation_followup_signals(user_text, state),
     }
 
 
@@ -962,6 +1332,7 @@ def _last_bot_text(state: dict[str, Any]) -> str:
 def _dialog_planner_state_payload(state: dict[str, Any]) -> dict[str, Any]:
     """Компактный state для LLM-orchestrator без сырых больших объектов."""
     selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
+    user_text = _last_dialog_user_text(state)
     return {
         "params": dict(state.get("params") or {}),
         "selected_option": _safe_option_payload(selected),
@@ -972,6 +1343,7 @@ def _dialog_planner_state_payload(state: dict[str, Any]) -> dict[str, Any]:
         "last_offer_type": state.get("last_offer_type") or "",
         "last_answer_kind": state.get("last_answer_kind") or "",
         "numeric_choice_policy": state.get("numeric_choice_policy") or "accept",
+        "conversation_followup": _extract_conversation_followup_signals(user_text, state),
     }
 
 
@@ -1078,6 +1450,8 @@ def _clarification_from_followup(meta: dict[str, Any], state: dict[str, Any]) ->
 
 def _local_followup_intent(text: str, state: dict[str, Any]) -> str:
     """Semantic fallback disabled: смысл follow-up определяет LLM-orchestrator."""
+    if _is_short_yes_to_contact_offer(text, state):
+        return "operator_contact_accept"
     return ""
 
 
@@ -1207,10 +1581,442 @@ def _build_negation_response_prompt(
         "- Не добавляй факты о ЖК, которых нет в SELECTED_OPTION или LAST_OPTIONS.\n"
         "- Запрещённые клиентские фразы: MCP, JSON, база, подтверждённые данные, не удалось подтвердить, чтобы не выдумывать, в режиме реального времени.\n"
         "- Не обещай звонок, бронь, скидку, наличие, этажи, корпуса или ипотеку.\n"
-        "- Ответ 1-3 коротких абзаца, в конце ровно один вопрос.\n\n"
+        "- Каждый ответ должен содержать final_question. Следующий шаг вынеси в отдельное поле final_question и задай ровно один вопрос.\n\n"
         "OUTPUT_JSON:\n"
-        "Верни валидный JSON только с полями response, params, buttons. buttons всегда []."
+        "Верни валидный JSON только с полями response, params, buttons, final_question. buttons всегда []. final_question всегда содержит ровно один вопрос."
     )
+
+
+def _build_conversation_answer_prompt(
+    *,
+    user_text: str,
+    state: dict[str, Any],
+    dialog_plan: dict[str, Any] | None = None,
+) -> str:
+    """Контракт общего live-dialog ответа без нового MCP-поиска.
+
+    Это не сценарный роутер. Planner уже решил, что клиент сейчас не ищет новую
+    квартиру, а общается по теме. LLM получает безопасный контекст и пишет ответ
+    как консультант, не повторяя shortlist без прямой просьбы клиента.
+    """
+    options = state.get("visible_options") or state.get("last_options") or []
+    payload = {
+        "user_text": user_text,
+        "params": dict(state.get("params") or {}) if isinstance(state.get("params"), dict) else {},
+        "last_bot_question": state.get("last_bot_question") or "",
+        "last_offer_type": state.get("last_offer_type") or "",
+        "last_answer_kind": state.get("last_answer_kind") or "",
+        "selected_option": _safe_option_payload(state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}),
+        "visible_options": [_safe_option_payload(option) for option in options[:5] if isinstance(option, dict)],
+        "dialog_window": (state.get("dialog_window") or [])[-6:],
+        "planner": dialog_plan or {},
+        "active_conversation_topic": _active_conversation_topic(state),
+        "conversation_topic": _normalize_conversation_topic(user_text, state),
+        "conversation_followup": _extract_conversation_followup_signals(user_text, state),
+    }
+    return (
+        "ROLE:\n"
+        "Ты Ирина, живой консультант по новостройкам. Клиент сейчас не просит новый поиск, а общается по теме.\n\n"
+        "CONTEXT:\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2, default=str)}\n\n"
+        "TASK:\n"
+        "Ответь на последнюю фразу клиента из контекста диалога. Если клиент сказал короткое «да», пойми, на что именно он согласился по last_bot_question.\n\n"
+        "RULES:\n"
+        "- Учитывай conversation_topic: если это payment_terms или financing, отвечай про первоначальный взнос, ипотеку или рассрочку, а не про аренду; если это rental, отвечай про аренду; если living, отвечай про жизнь.\n"
+        "- Учитывай conversation_followup: если subtopic_hint=family_mortgage, отвечай именно про семейную ипотеку; если subtopic_hint=down_payment, отвечай про первоначальный взнос; не превращай это в generic financing.\n"
+        "- Не запускай новый подбор и не говори, что уже ищешь.\n"
+        "- Не повторяй список ЖК и фразу «Хорошо, продолжим подбор», если клиент прямо не попросил ещё варианты.\n"
+        "- Можно ссылаться только на CONTEXT: видимые ЖК, цель клиента, последний вопрос Ирины и историю.\n"
+        "- Если клиент согласился на объяснение, объясни человечески почему/как, а не показывай новый список.\n"
+        "- Не обещай доходность, рост цены, наличие, бронь, скидки, этажи, корпуса или ипотеку. Если тема financing/payment_terms — не обещай ставку, платёж, одобрение или конкретные условия банка.\n"
+        "- Не используй слова MCP, JSON, база, подтверждённые данные, не удалось подтвердить.\n"
+        "- Каждый ответ должен содержать final_question. Следующий шаг вынеси в отдельное поле final_question и сформулируй его как один мягкий вопрос.\n\n"
+        "OUTPUT_JSON:\n"
+        "Верни валидный JSON только с полями response, params, buttons, final_question. buttons всегда []. final_question всегда содержит ровно один вопрос."
+    )
+
+
+def _consultation_answer_guidance(user_text: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
+    signals = _extract_conversation_followup_signals(user_text, state or {})
+    options = (state or {}).get("visible_options") or (state or {}).get("last_options") or []
+    selected = (state or {}).get("selected_option") if isinstance(state or {}, dict) else {}
+    selected_name = _compact_option_text(selected.get("name")) if isinstance(selected, dict) else ""
+    visible_names = [
+        _compact_option_text(option.get("name"))
+        for option in options[:3]
+        if isinstance(option, dict) and option.get("name")
+    ]
+    topic = str(signals.get("topic") or "general").strip() or "general"
+    subtopic_hint = str(signals.get("subtopic_hint") or "").strip()
+    mortgage_type = str(signals.get("mortgage_type") or "").strip()
+    payment_playbook: list[str] = []
+    focus_points: list[str]
+    avoid: list[str] = [
+        "start_with_operator",
+        "repeat_shortlist_as_primary_answer",
+        "generic_financing_when_subtopic_is_precise",
+        "promise_background_check_or_future_message",
+    ]
+
+    if subtopic_hint == "family_mortgage":
+        focus_points = [
+            "семейная ипотека как условие покупки",
+            "что из текущего ЖК важно проверить",
+            "готовность дома и отделка",
+            "локация и удобство для семьи",
+            "что уточнить у банка или оператора после прямого ответа",
+        ]
+        avoid += ["compare_current_options_by_default", "talk_only_about_payment_terms"]
+    elif subtopic_hint == "down_payment":
+        focus_points = [
+            "первоначальный взнос как ключевое условие покупки",
+            "что можно проверить по текущему ЖК",
+            "как это влияет на доступность варианта",
+            "что уточнить у банка или оператора, если цифр нет в фактах",
+        ]
+        avoid += ["compare_current_options_by_default"]
+        payment_playbook = [
+            "Сценарий: клиент спрашивает про без ПВ / первоначальный взнос.",
+            "Шаг 1 — ответь по сути: в текущих фактах нет подтверждения, что ЖК или квартиры точно доступны без первоначального взноса.",
+            "Шаг 2 — объясни границу: без ПВ — это не характеристика ЖК, а банковская или застройщицкая программа; она зависит от банка, объекта, цены и профиля клиента.",
+            "Шаг 3 — выбери реальное действие: если нужен новый подбор, можно искать варианты с пометкой/условием оплаты; если нужны точные условия, это live-check через менеджера/оператора.",
+            "Шаг 4 — после ответа клиента 'да' не говори 'я уточню' и не обещай вернуться позже; попроси выбрать ЖК для проверки или предложи оставить контакт, чтобы оператор проверил актуальные программы.",
+            "Шаг 5 — если клиент пишет 'все проверь', 'проверь все' или то же с опечатками, не проси выбрать один ЖК: предложи передать оператору все текущие ЖК и вопрос по первоначальному взносу.",
+        ]
+    elif topic == "payment_terms":
+        focus_points = [
+            "условия оплаты по текущему ЖК",
+            "первоначальный взнос или рассрочка",
+            "что можно и нельзя обещать без подтверждённых данных",
+        ]
+        payment_playbook = [
+            "Сценарий: клиент спрашивает про условия оплаты.",
+            "Шаг 1 — раздели ответ на две части: что видно в текущем контексте и что нужно проверять отдельно.",
+            "Шаг 2 — если точных условий нет, не имитируй фоновое уточнение; прямо скажи, что точные цифры проверяются по программе, банку и конкретному объекту.",
+            "Шаг 3 — следующий шаг: выбрать ЖК для проверки условий или передать текущий список оператору; не уводи клиента в абстрактное ожидание.",
+            "Шаг 4 — если клиент просит проверить все текущие варианты, не спрашивай какой один ЖК: предложи передать оператору все текущие ЖК с этим вопросом.",
+        ]
+    elif topic == "financing":
+        focus_points = [
+            "ипотека или рассрочка как условия покупки",
+            "что из текущего ЖК важно проверить",
+            "какой следующий шаг поможет понять условия",
+        ]
+        payment_playbook = [
+            "Сценарий: клиент спрашивает про ипотеку/рассрочку.",
+            "Шаг 1 — ответь по сути: новостройки обычно можно покупать в ипотеку, но конкретные условия зависят от банка, программы, ЖК и клиента.",
+            "Шаг 2 — не обещай ставку, платёж, одобрение, отсутствие ПВ или будущий ответ после проверки.",
+            "Шаг 3 — если клиент говорит 'да' на проверку условий, не изображай, что Ирина ушла проверять; попроси выбрать ЖК или предложи передать оператору текущий список и запрос.",
+            "Шаг 4 — если клиент просит 'все по ипотеке', объясни, что точные условия проверяются по каждому ЖК отдельно, и предложи начать с одного ЖК или передать все три оператору.",
+            "Шаг 5 — если клиент прямо просит 'все проверь', выбирай передачу оператору всех текущих вариантов, не спрашивай какой один ЖК.",
+        ]
+    elif topic == "rental":
+        focus_points = [
+            "критерии аренды: спрос, метро, отделка, готовность",
+            "как текущий ЖК вписывается в аренду",
+        ]
+    elif topic == "investment":
+        focus_points = [
+            "инвестиционный сценарий без обещаний доходности",
+            "что в текущем ЖК помогает для старта",
+        ]
+    else:
+        focus_points = [
+            "ответить по существу на вопрос клиента",
+            "использовать текущий ЖК или список как контекст",
+        ]
+
+    return {
+        "topic": topic,
+        "subtopic_hint": subtopic_hint,
+        "mortgage_type": mortgage_type,
+        "answer_priority": "direct_answer_first",
+        "tone": "live_sales_manager",
+        "use_current_context": bool(options or selected_name),
+        "current_jk_names": visible_names,
+        "focus_points": focus_points,
+        "payment_financing_playbook": payment_playbook,
+        "avoid": avoid,
+        "operator_policy": "optional_after_direct_answer_for_live_terms",
+        "final_question": signals.get("final_question") or "",
+        "evidence": signals.get("evidence") or [],
+    }
+
+
+def _build_consultation_answer_prompt(
+    *,
+    user_text: str,
+    state: dict[str, Any],
+    dialog_plan: dict[str, Any] | None = None,
+) -> str:
+    """Контракт живого ответа на консультационный follow-up через вторую модель."""
+    options = state.get("visible_options") or state.get("last_options") or []
+    payload = {
+        "user_text": user_text,
+        "params": dict(state.get("params") or {}) if isinstance(state.get("params"), dict) else {},
+        "last_bot_question": state.get("last_bot_question") or "",
+        "last_offer_type": state.get("last_offer_type") or "",
+        "last_answer_kind": state.get("last_answer_kind") or "",
+        "selected_option": _safe_option_payload(state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}),
+        "visible_options": [_safe_option_payload(option) for option in options[:5] if isinstance(option, dict)],
+        "dialog_window": (state.get("dialog_window") or [])[-6:],
+        "planner": dialog_plan or {},
+        "active_conversation_topic": _active_conversation_topic(state),
+        "conversation_topic": _normalize_conversation_topic(user_text, state),
+        "conversation_followup": _extract_conversation_followup_signals(user_text, state),
+        "answer_guidance": _consultation_answer_guidance(user_text, state),
+    }
+    return (
+        "ROLE:\n"
+        "Ты Ирина, живой консультант по новостройкам. Клиент сейчас не просит новый поиск, а задаёт живой вопрос по теме.\n\n"
+        "CONTEXT:\n"
+        f"{json.dumps(payload, ensure_ascii=False, indent=2, default=str)}\n\n"
+        "TASK:\n"
+        "Ответь на последнюю фразу клиента напрямую и по существу. Сначала дай полезный ответ, и только потом, если это действительно нужно, мягко предложи следующий шаг.\n\n"
+        "PAYMENT_FINANCING_PLAYBOOK:\n"
+        "Если answer_guidance.payment_financing_playbook непустой, это главный сценарий действия. Следуй ему как маршруту: ответ по сути → граница данных → реальное действие. "
+        "Реальное действие бывает только таким: новый поиск по MCP, выбор конкретного ЖК для live-check, или передача оператору/менеджеру. "
+        "Не создавай четвёртый режим 'я уточню и потом сообщу': у Ирины нет фонового ожидания и отложенных сообщений.\n\n"
+        "RULES:\n"
+        "- Используй answer_guidance: answer_priority=direct_answer_first, tone=live_sales_manager, focus_points и operator_policy.\n"
+        "- Если есть answer_guidance.payment_financing_playbook — прямо используй его как сценарий ответа по ипотеке/ПВ/условиям оплаты.\n"
+        "- Если answer_guidance.subtopic_hint=family_mortgage, отвечай именно про семейную ипотеку в контексте текущего ЖК; не превращай это в generic financing и не начинай с оператора.\n"
+        "- Если answer_guidance.subtopic_hint=down_payment, отвечай про первоначальный взнос; если payment_terms — про оплату; если rental — про аренду; если investment — про инвестиционный сценарий.\n"
+        "- Не повторяй shortlist как основной ответ и не сравнивай варианты по умолчанию, если клиент спросил о покупке/условиях.\n"
+        "- Если точных условий нет в контексте, скажи это спокойно и по-человечески, а не как системную ошибку. Оператор — только как опциональный следующий шаг после прямого ответа, если без него не обойтись.\n"
+        "- Нельзя обещать отложенное действие: не пиши 'я уточню', 'я проверю и сообщу', 'как только будет информация', 'пока я уточняю'. Вместо этого предложи конкретный следующий шаг сейчас: выбрать ЖК, запустить новый поиск или передать оператору.\n"
+        "- Не обещай ставку, одобрение, доходность, наличие, бронь, скидки, этажи или корпуса без подтверждённых данных.\n"
+        "- Не используй слова MCP, JSON, база, подтверждённые данные, не удалось подтвердить.\n"
+        "- Каждый ответ должен содержать final_question. Следующий шаг вынеси в отдельное поле final_question и сформулируй его как один мягкий вопрос.\n\n"
+        "OUTPUT_JSON:\n"
+        "Верни валидный JSON только с полями response, params, buttons, final_question. buttons всегда []. final_question всегда содержит ровно один вопрос."
+    )
+
+
+def _normalize_conversation_topic(user_text: str, state: dict[str, Any] | None = None) -> str:
+    """Возвращает короткую тему разговора до вызова LLM.
+
+    Это лёгкий слой нормализации, чтобы не раздувать промпт списками аббревиатур.
+    Он нужен только для conversation_answer/consultation_answer и не меняет сценарий.
+    """
+    text = re.sub(r"\s+", " ", (user_text or "").lower().replace("ё", "е")).strip()
+
+    def has(*patterns: str) -> bool:
+        return any(re.search(pattern, text) for pattern in patterns)
+
+    if has(r"(?<!\w)пв(?!\w)", r"без\s+первоначальн\w*\s+взноса?", r"первоначальн\w*\s+взнос", r"перв\.\s*взнос", r"перв\s+взнос"):
+        return "payment_terms"
+    if has(r"ипот", r"рассрочк", r"ежемесячн\w*\s+плат", r"платеж", r"взнос", r"аванс", r"ставк"):
+        return "financing"
+    if has(r"аренд", r"сдач", r"сдать", r"под\s+аренд"):
+        return "rental"
+    if has(r"инвест", r"инв\.?"):
+        return "investment"
+    if has(r"для\s+жизни", r"для\s+проживан", r"пмж", r"себе", r"жить"):
+        return "living"
+    if has(r"отделк", r"ремонт", r"чистов"):
+        return "finishing"
+    if has(r"метро", r"район", r"локац", r"транспорт"):
+        return "location"
+    if has(r"бюджет", r"стоим", r"цен", r"дорог", r"дешев"):
+        return "budget"
+    if has(r"студ", r"однуш", r"двуш", r"треш", r"1к", r"2к", r"3к"):
+        return "rooms"
+    if has(r"сдан", r"готов", r"ключ", r"строит", r"срок\s+сдач", r"20\d{2}"):
+        return "developer_status"
+
+    params = state.get("params") if isinstance(state, dict) and isinstance(state.get("params"), dict) else {}
+    purpose = str(params.get("purpose") or params.get("scenario") or "").strip().lower()
+    purpose_map = {
+        "rental": "rental",
+        "rent": "rental",
+        "аренда": "rental",
+        "аренду": "rental",
+        "сдача": "rental",
+        "investment": "investment",
+        "invest": "investment",
+        "инвестиция": "investment",
+        "инвестиции": "investment",
+        "life": "living",
+        "living": "living",
+        "для жизни": "living",
+        "для проживания": "living",
+        "финансирование": "financing",
+    }
+    return purpose_map.get(purpose, "general")
+
+
+def _active_conversation_topic(state: dict[str, Any] | None) -> dict[str, Any]:
+    """Последняя живая тема диалога, которую надо тащить через короткие ответы.
+
+    Пример: клиент спросил «без ПВ», потом пишет «да» / «все проверь».
+    Текущая фраза сама по себе темы не содержит, но диалог всё ещё про down_payment.
+    """
+    if not isinstance(state, dict):
+        return {}
+    topic = state.get("active_conversation_topic")
+    return dict(topic) if isinstance(topic, dict) else {}
+
+
+def _is_short_topic_continuation(text: str) -> bool:
+    compact = re.sub(r"\s+", " ", (text or "").lower().replace("ё", "е")).strip()
+    if compact in {"да", "ок", "окей", "давай", "ага", "хорошо", "конечно", "все", "всё"}:
+        return True
+    # Живой Telegram-текст часто приходит с опечатками: «првоер ьвсе» вместо «проверь все».
+    # Для короткой фразы с «все/всё» и корнем проверки держим текущую тему диалога.
+    if len(compact) <= 24 and ("все" in compact or "всё" in compact) and re.search(r"пр\w*в|прво|пров|провер|посмотр", compact):
+        return True
+    return bool(re.fullmatch(r"(все|всё)?\s*(давай\s*)?(проверь|проверить|проверьте|посмотри|смотри)\s*(все|всё)?", compact))
+
+
+def _store_active_conversation_topic(state: dict[str, Any], user_text: str) -> None:
+    """Сохраняет тему живого разговора после consultation/conversation ответа."""
+    if not isinstance(state, dict):
+        return
+    signals = _extract_conversation_followup_signals(user_text, state)
+    topic = str(signals.get("topic") or "").strip()
+    subtopic = str(signals.get("subtopic_hint") or "").strip()
+    if topic and topic != "general":
+        state["active_conversation_topic"] = {
+            "topic": topic,
+            "subtopic_hint": subtopic,
+            "target_scope": signals.get("target_scope") or "",
+            "mortgage_type": signals.get("mortgage_type") or "",
+            "final_question": signals.get("final_question") or "",
+            "source_user_text": user_text,
+        }
+
+
+def _asks_to_check_all_current_options(text: str) -> bool:
+    compact = re.sub(r"\s+", " ", (text or "").lower().replace("ё", "е")).strip()
+    has_all = "все" in compact or "всё" in compact
+    has_check = bool(re.search(r"пр\w*в|прво|пров|провер|посмотр", compact))
+    return has_all and has_check
+
+
+def _last_dialog_user_text(state: dict[str, Any] | None) -> str:
+    if not isinstance(state, dict):
+        return ""
+    for turn in reversed(state.get("dialog_window") or []):
+        if isinstance(turn, dict) and turn.get("role") == "user":
+            return str(turn.get("text") or "")
+    return ""
+
+
+def _has_mortgage_signal(text: str, params: dict[str, Any]) -> bool:
+    mortgage_type = str(params.get("mortgage_type") or "").strip().lower()
+    facets = params.get("facets") if isinstance(params.get("facets"), list) else []
+    if mortgage_type or any(str(item).strip().lower() == "mortgage" for item in facets):
+        return True
+    return any(
+        token in text
+        for token in (
+            "ипот",
+            "it-ипот",
+            "айти-ипот",
+            "it ипот",
+            "айти ипот",
+            "льготн",
+            "господдерж",
+            "семейную ипот",
+            "семейная ипот",
+            "маткапитал",
+            "материнск",
+            "первонач",
+            "первый взнос",
+            "ставк",
+            "рассроч",
+            "скидк",
+            "платеж",
+            "платёж",
+        )
+    )
+
+
+def _mortgage_type_from_text(text: str, params: dict[str, Any]) -> str | None:
+    existing = str(params.get("mortgage_type") or "").strip().lower()
+    if existing:
+        return existing
+    if any(token in text for token in ("it-ипот", "айти-ипот", "it ипот", "айти ипот")):
+        return "it_mortgage"
+    if "семейн" in text and "ипот" in text:
+        return "family_mortgage"
+    if any(token in text for token in ("льготн", "господдерж")):
+        return "subsidized_mortgage"
+    return None
+
+
+def _extract_conversation_followup_signals(user_text: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
+    text = re.sub(r"\s+", " ", (user_text or "").lower().replace("ё", "е")).strip()
+    params = state.get("params") if isinstance(state, dict) and isinstance(state.get("params"), dict) else {}
+    options = (state.get("visible_options") or state.get("last_options") or []) if isinstance(state, dict) else []
+    active_topic = _active_conversation_topic(state)
+    normalized_topic = _normalize_conversation_topic(user_text, state)
+    inherit_active = bool(active_topic and _is_short_topic_continuation(text) and normalized_topic in {"general", active_topic.get("topic")})
+    topic = str(active_topic.get("topic") or normalized_topic) if inherit_active else normalized_topic
+    signals: dict[str, Any] = {
+        "topic": topic,
+        "subtopic_hint": str(active_topic.get("subtopic_hint") or "") if inherit_active else "",
+        "target_scope": str(active_topic.get("target_scope") or "") if inherit_active else "",
+        "mortgage_type": str(active_topic.get("mortgage_type") or "") if inherit_active else "",
+        "has_enough_data": bool(options),
+        "needs_clarification": False,
+        "needs_operator": False,
+        "next_action": "answer",
+        "final_question": str(active_topic.get("final_question") or "") if inherit_active else "",
+        "evidence": ["active_conversation_topic"] if inherit_active else [],
+    }
+
+    def add_evidence(*items: str) -> None:
+        for item in items:
+            if item and item not in signals["evidence"]:
+                signals["evidence"].append(item)
+
+    if topic in {"financing", "payment_terms"} or _has_mortgage_signal(text, params):
+        if _asks_to_check_all_current_options(text):
+            signals["target_scope"] = "all_current_options"
+            signals["needs_operator"] = True
+            signals["next_action"] = "operator_live_check"
+            signals["final_question"] = "Передать оператору все текущие ЖК и вопрос по первоначальному взносу?"
+            add_evidence("all_current_options")
+        mortgage_type = _mortgage_type_from_text(text, params)
+        if mortgage_type:
+            signals["mortgage_type"] = mortgage_type
+            add_evidence(mortgage_type)
+        if "семейн" in text and "ипот" in text:
+            signals["topic"] = "financing"
+            signals["subtopic_hint"] = "family_mortgage"
+            signals["target_scope"] = "family_program"
+            signals["mortgage_type"] = signals["mortgage_type"] or "family_mortgage"
+            add_evidence("семейная ипотека")
+        elif mortgage_type == "it_mortgage":
+            signals["subtopic_hint"] = "it_mortgage"
+            signals["target_scope"] = "it_program"
+        elif mortgage_type == "subsidized_mortgage":
+            signals["subtopic_hint"] = "subsidized_mortgage"
+            signals["target_scope"] = "subsidized_program"
+
+        if re.search(r"без\s+первоначальн\w*\s+взноса|без\s+пв|первоначальн\w*\s+взнос", text):
+            signals["topic"] = "payment_terms"
+            signals["subtopic_hint"] = signals["subtopic_hint"] or "down_payment"
+            signals["target_scope"] = signals["target_scope"] or "down_payment"
+            add_evidence("первоначальный взнос")
+        if any(token in text for token in ("ставк", "платеж", "платёж", "рассроч", "срок")):
+            add_evidence("условия оплаты")
+
+    if signals["subtopic_hint"] == "family_mortgage":
+        signals["final_question"] = "Хотите, я разберу именно семейную ипотеку по этому ЖК?"
+    elif signals["subtopic_hint"] == "down_payment":
+        if signals.get("target_scope") == "all_current_options":
+            signals["final_question"] = "Передать оператору все текущие ЖК и вопрос по первоначальному взносу?"
+        else:
+            signals["final_question"] = "Передать оператору текущий ЖК и вопрос по первоначальному взносу?"
+    elif signals["topic"] == "financing":
+        signals["final_question"] = "Выбрать один ЖК для проверки условий или передать оператору все текущие варианты?"
+    elif signals["topic"] == "payment_terms":
+        signals["final_question"] = "Передать оператору текущий ЖК и вопрос по условиям оплаты?"
+
+    return signals
 
 
 def _pure_option_choice_index(text: str) -> int | None:
@@ -1337,6 +2143,142 @@ def _continue_selection_response(state: dict[str, Any]) -> str:
     return "Хорошо, продолжим подбор. Что поменять в условиях: бюджет, район, срок сдачи или количество комнат?"
 
 
+def _selection_logic_response(state: dict[str, Any]) -> str:
+    options = state.get("visible_options") or state.get("last_options") or []
+    params = state.get("params") if isinstance(state.get("params"), dict) else {}
+    bits: list[str] = []
+    purpose = str(params.get("purpose") or "").strip()
+    if purpose and purpose not in {"default", "repeat_search"}:
+        bits.append("вашу задачу")
+    if options:
+        bits.append("цену")
+        if any(not _looks_missing(option.get("location")) for option in options if isinstance(option, dict)):
+            bits.append("локацию")
+        if any(not _looks_missing(option.get("ready")) for option in options if isinstance(option, dict)):
+            bits.append("готовность дома")
+        if any(not _looks_missing(option.get("finishing")) for option in options if isinstance(option, dict)):
+            bits.append("отделку")
+    if not bits:
+        bits = ["бюджет", "локацию", "готовность дома", "отделку"]
+    criteria = ", ".join(dict.fromkeys(bits))
+    return (
+        f"Подбираю не просто по цене. Сначала смотрю на {criteria}, а потом сравниваю, какой вариант понятнее для вашего сценария.\n\n"
+        "Если важно быстрее заехать, сильнее готовый дом или отделка. Если важнее входной бюджет, смотрю, где ниже стартовая цена и какие компромиссы есть по срокам или району.\n\n"
+        "Хотите, я коротко объясню, почему в прошлой подборке показала именно эти варианты?"
+    )
+
+
+def _consultation_question_response(state: dict[str, Any], user_text: str = "") -> str:
+    """Ответ на консультационный follow-up без нового поиска.
+
+    Важно: сам класс действия выбирает LLM-planner. Здесь код только исполняет
+    выбранный `consultation_answer` и опирается на уже известный state, не пытаясь
+    regex'ами угадывать сценарий из фразы клиента.
+    """
+    options = state.get("visible_options") or state.get("last_options") or []
+    params = state.get("params") if isinstance(state.get("params"), dict) else {}
+    purpose = str(params.get("purpose") or params.get("scenario") or "").strip().lower()
+    signals = _extract_conversation_followup_signals(user_text, state)
+    topic = signals.get("topic") or _normalize_conversation_topic(user_text, state)
+    has_options = bool(options)
+    next_step = (
+        "Хотите, я сравню текущие варианты именно по этим критериям?"
+        if has_options
+        else "Хотите, я помогу подобрать варианты под эти критерии?"
+    )
+
+    if signals.get("subtopic_hint") == "family_mortgage":
+        return (
+            "Да, под семейную ипотеку этот список можно смотреть. Сначала я бы проверила, есть ли у ЖК подходящая готовность, отделка и понятная локация: это помогает быстрее выйти на сделку и снижает лишние риски на старте.\n\n"
+            "По точной ставке и одобрению уже лучше сверить условия отдельно, если понадобится — подключу оператора.\n\n"
+            "Хотите, я разберу именно эти варианты под семейную ипотеку?"
+        )
+
+    if topic == "payment_terms":
+        return (
+            "Если вы про первоначальный взнос, то это уже вопрос условий покупки, а не самого подбора. Я не буду придумывать оплату там, где её не вижу в подтверждённых фактах.\n\n"
+            "Могу ещё помочь с форматом покупки: без первоначального взноса, с минимальным взносом или в рассрочку.\n\n"
+            f"{next_step}"
+        )
+
+    if topic == "financing":
+        return (
+            "Если вы про ипотеку или рассрочку, то это уже отдельный блок условий покупки. По текущей подборке я не вижу подтверждённых параметров оплаты, поэтому не буду их выдумывать.\n\n"
+            "Могу помочь сравнить варианты по ипотеке, минимальному взносу или рассрочке, если это для вас важно.\n\n"
+            f"{next_step}"
+        )
+
+    if purpose in {"rental", "rent", "аренда", "аренду", "сдача"}:
+        return (
+            "Для аренды я бы смотрела не просто на цену. Важнее понять, насколько легко квартиру будет сдать живому человеку.\n\n"
+            "Главные критерии такие: локация и понятная точка спроса, транспорт или метро, готовность дома, отделка и формат квартиры. "
+            "Чем меньше арендатору нужно доделывать самому и чем проще объяснить, почему здесь удобно жить каждый день, тем спокойнее такой вариант под сдачу.\n\n"
+            "Ещё важно заранее понимать, кому сдаём: одному человеку, паре, студенту, сотруднику рядом с работой или семье. От этого зависит, что важнее — компактность, ремонт, метро или район.\n\n"
+            f"{next_step}"
+        )
+
+    if purpose in {"investment", "invest", "инвестиция", "инвестиции"}:
+        return (
+            "Для инвестиции я бы сначала отделяла проверяемые вещи от обещаний. Смотреть стоит на цену входа, срок готовности, локацию, формат квартиры, отделку и понятность будущего сценария: сдавать, перепродавать или держать как актив.\n\n"
+            "Я не буду обещать доходность или рост цены без подтверждённых данных, но могу помочь сравнить варианты по тому, где меньше стартовых работ, понятнее спрос и проще объяснить ценность объекта.\n\n"
+            f"{next_step}"
+        )
+
+    if purpose in {"family", "self_use", "life", "для жизни", "жизнь"}:
+        return (
+            "Для жизни я бы смотрела на то, насколько удобно будет каждый день, а не только на цену. Важны район, дорога до привычных мест, готовность дома, отделка, инфраструктура рядом и то, подходит ли формат квартиры под ваш ритм.\n\n"
+            "Если квартира нужна семье, отдельно смотрю школы, сады, дворы и спокойную среду. Если для одного человека или пары — транспорт, ремонт и понятный срок переезда часто важнее.\n\n"
+            f"{next_step}"
+        )
+
+    return (
+        "Я бы смотрела на задачу клиента, а не только на список ЖК. Обычно важны бюджет, локация, транспорт, срок готовности, отделка, формат квартиры и то, для чего покупаем: жить, сдавать или инвестировать.\n\n"
+        "Если цель понятна, подбор получается точнее: для жизни важнее ежедневное удобство, для аренды — спрос и быстрый запуск, для инвестиций — проверяемые опоры без обещаний доходности.\n\n"
+        f"{next_step}"
+    )
+
+
+def _followup_intent_from_dialog_action(
+    dialog_action: str,
+    dialog_plan: dict[str, Any],
+    *,
+    visible_policy: str = "",
+    has_options: bool = False,
+) -> str | None:
+    """Единая карта planner action → executor intent.
+
+    Главный архитектурный инвариант: `continue_from_memory` больше не означает
+    «показать ещё список». Это безопасный memory/conversation continuation.
+    Подбор продолжается только по явному `expand_more_options` или classifier
+    intent=`continue_selection`.
+    """
+    if dialog_action == "select_option":
+        return "choose_option"
+    if dialog_action == "expand_more_options" or (dialog_action == "update_search" and visible_policy == "rebuild" and has_options):
+        return "expand_more_options"
+    if dialog_action == "compare_options":
+        return "compare_options"
+    if dialog_action == "recommend_options":
+        return "recommend_options"
+    if dialog_action == "conversation_answer":
+        return "conversation_answer"
+    if dialog_action == "consultation_answer":
+        return "consultation_answer"
+    if dialog_action == "update_search":
+        return "update_search_params"
+    if dialog_action == "new_search":
+        return "new_search"
+    if dialog_action == "continue_from_memory":
+        if "explain_selection_logic" in str(dialog_plan.get("reason") or ""):
+            return "explain_selection_logic"
+        return "conversation_answer"
+    if dialog_action == "operator_live_check":
+        return "operator_for_selected"
+    if dialog_action in {"reject_offer", "reject_operator", "reject_phone", "reject_selected_option", "reject_similar_options", "clarify_negation"}:
+        return dialog_action
+    return None
+
+
 def _followup_expansion_option_names(state: dict[str, Any]) -> list[str]:
     options = state.get("visible_options") or state.get("last_options") or []
     names: list[str] = []
@@ -1448,6 +2390,13 @@ def _extract_options(search_text: str) -> list[dict[str, Any]]:
     for item in raw:
         if not isinstance(item, dict):
             continue
+        family_infra = item.get("family_infrastructure") if isinstance(item.get("family_infrastructure"), dict) else {}
+        infra_family = item.get("infrastructure_family") if isinstance(item.get("infrastructure_family"), dict) else {}
+        scenario_blocks = {
+            key: item.get(key)
+            for key in _SCENARIO_BLOCK_KEYS
+            if not _looks_missing(item.get(key))
+        }
         price_range = item.get("price_range") or item.get("prices") or ""
         price = price_range or item.get("price") or item.get("cost") or item.get("min_price")
         opt = {
@@ -1465,15 +2414,20 @@ def _extract_options(search_text: str) -> list[dict[str, Any]]:
             "transport": item.get("transport") or item.get("walk_minutes") or item.get("транспорт") or "",
             "rooms": item.get("rooms") or item.get("room_types") or item.get("комнатность") or "",
             "why_close": item.get("why_close") or "",
+            "why_family": item.get("why_family") or "",
+            "why_investment": item.get("why_investment") or item.get("why_invest") or "",
+            "why_rental": item.get("why_rental") or "",
+            "why_mortgage": item.get("why_mortgage") or "",
             "infrastructure": _join_fact_values(item.get("infrastructure"), item.get("infrastructure_family"), item.get("family_infrastructure")),
-            "schools": _join_fact_values(item.get("schools"), item.get("school"), item.get("школы"), item.get("школа")),
-            "kindergartens": _join_fact_values(item.get("kindergartens"), item.get("kindergarten"), item.get("детские_сады"), item.get("детский_сад")),
-            "parks": _join_fact_values(item.get("parks"), item.get("park"), item.get("green_area"), item.get("forest"), item.get("embankment"), item.get("парки"), item.get("парк"), item.get("лес"), item.get("набережная")),
-            "clinics": _join_fact_values(item.get("clinics"), item.get("clinic"), item.get("polyclinic"), item.get("pharmacies"), item.get("поликлиника"), item.get("аптеки")),
-            "yards": _join_fact_values(item.get("yards"), item.get("yard_without_cars"), item.get("playgrounds"), item.get("двор"), item.get("площадки")),
+            "schools": _join_fact_values(item.get("schools"), item.get("school"), item.get("школы"), item.get("школа"), family_infra.get("schools"), family_infra.get("school"), infra_family.get("schools"), infra_family.get("school")),
+            "kindergartens": _join_fact_values(item.get("kindergartens"), item.get("kindergarten"), item.get("детские_сады"), item.get("детский_сад"), family_infra.get("kindergartens"), family_infra.get("kindergarten"), infra_family.get("kindergartens"), infra_family.get("kindergarten")),
+            "parks": _join_fact_values(item.get("parks"), item.get("park"), item.get("green_area"), item.get("forest"), item.get("embankment"), item.get("парки"), item.get("парк"), item.get("лес"), item.get("набережная"), family_infra.get("parks"), family_infra.get("park"), {"park_near": family_infra.get("park_near"), "forest": family_infra.get("forest"), "embankment": family_infra.get("embankment"), "water_near": family_infra.get("water_near")}, infra_family.get("parks"), {"park_near": infra_family.get("park_near")}),
+            "clinics": _join_fact_values(item.get("clinics"), item.get("clinic"), item.get("polyclinic"), item.get("pharmacies"), item.get("поликлиника"), item.get("аптеки"), family_infra.get("clinics"), family_infra.get("clinic"), family_infra.get("pharmacies"), infra_family.get("clinics")),
+            "yards": _join_fact_values(item.get("yards"), item.get("yard_without_cars"), item.get("playgrounds"), item.get("двор"), item.get("площадки"), {"yard_without_cars": family_infra.get("yard_without_cars"), "children_ground": family_infra.get("children_ground"), "sports_ground": family_infra.get("sports_ground"), "playgrounds": family_infra.get("playgrounds")}, {"yard_without_cars": infra_family.get("yard_without_cars"), "children_ground": infra_family.get("children_ground"), "sports_ground": infra_family.get("sports_ground")}),
             "shops": _join_fact_values(item.get("shops"), item.get("services"), item.get("retail"), item.get("магазины"), item.get("сервисы")),
             "raw": item,
         }
+        opt.update(scenario_blocks)
         options.append(opt)
     return options[:8]
 
@@ -1609,6 +2563,9 @@ def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
     По правилу проекта код не распознаёт семантику regex'ами. Телефон ловится
     выше отдельным phone guard; всё остальное после памяти диалога отдаётся LLM.
     """
+    if _is_short_yes_to_contact_offer(text, state):
+        selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else None
+        return {"intent": "operator_contact_accept", "option": selected or {}}
     memory_options = state.get("last_options") or []
     visible_options = state.get("visible_options") or []
     options = visible_options or memory_options
@@ -1657,6 +2614,29 @@ def _format_operator_handoff_for_option(option: dict[str, Any]) -> str:
     )
 
 
+def _join_operator_context_names(names: list[str]) -> str:
+    clean = [str(name).strip() for name in names if str(name).strip()]
+    if len(clean) <= 1:
+        return "".join(clean)
+    if len(clean) == 2:
+        return f"{clean[0]} и {clean[1]}"
+    return f"{', '.join(clean[:-1])} и {clean[-1]}"
+
+
+def _operator_context_check_sentence(state: dict[str, Any], user_text: str) -> str:
+    signals = _extract_conversation_followup_signals(user_text, state)
+    topic = str(signals.get("topic") or "")
+    subtopic = str(signals.get("subtopic_hint") or "")
+    target_scope = str(signals.get("target_scope") or "")
+    if target_scope == "all_current_options" and subtopic == "down_payment":
+        return "Он проверит актуальные квартиры и условия по первоначальному взносу по каждому варианту."
+    if target_scope == "all_current_options" and topic in {"financing", "payment_terms"}:
+        return "Он проверит актуальные квартиры и условия оплаты по каждому варианту."
+    if topic in {"financing", "payment_terms"}:
+        return "Он проверит актуальные квартиры и условия оплаты."
+    return "Он проверит актуальные квартиры и условия."
+
+
 def _format_operator_handoff_for_context(state: dict[str, Any], user_text: str = "") -> str:
     options = (state.get("visible_options") or state.get("last_options") or [])[:3]
     names = [
@@ -1664,22 +2644,17 @@ def _format_operator_handoff_for_context(state: dict[str, Any], user_text: str =
         for option in options
         if isinstance(option, dict) and option.get("name")
     ]
-    params = state.get("params") if isinstance(state.get("params"), dict) else {}
-    context_bits: list[str] = []
+    context_parts: list[str] = []
     if names:
-        context_bits.append("варианты: " + ", ".join(names))
-    purpose = params.get("purpose") or params.get("scenario")
-    if purpose:
-        context_bits.append(f"сценарий: {purpose}")
-    if user_text:
-        context_bits.append(f"последний вопрос: {user_text}")
+        context_parts.append("текущую подборку: " + _join_operator_context_names(names))
 
-    if context_bits:
-        context = "; ".join(context_bits)
+    if context_parts:
+        context = "; ".join(context_parts)
+        check_sentence = _operator_context_check_sentence(state, user_text)
         return (
-            "Да, можно связаться с оператором. Передам ему текущий контекст подбора: "
-            f"{context}.\n\n"
-            "Напишите номер для связи — оператор посмотрит актуальные квартиры и вернётся уже с конкретикой."
+            "Да, можно. Передам оператору "
+            f"{context}. {check_sentence}\n\n"
+            "Напишите номер для связи — оператор вернётся уже с конкретикой."
         )
     return (
         "Да, можно связаться с оператором. Напишите номер для связи — передам ваш запрос, "
@@ -1829,7 +2804,7 @@ def _build_known_option_prompt(option: dict[str, Any], client_request: str) -> s
         "RESPONSE_SHAPE:\n"
         "Сформулируй новый живой ответ Ирины по этим данным: расскажи максимум полезного, что подтверждено в карточке, "
         "но человеческим языком, как консультант, а не как выгрузка из системы. Не повторяй дословно предыдущую карточку.\n"
-        "- не пиши одним плотным абзацем. Используй 2-4 коротких абзаца: что за ЖК/где; цена/срок/отделка; польза; следующий шаг. Финальный вопрос всегда отдельным абзацем;\n"
+        "- не пиши одним плотным абзацем. Используй 2-4 коротких абзаца: что за ЖК/где; цена/срок/отделка; польза. Следующий шаг вынеси в final_question как один отдельный вопрос;\n"
         "- начинай тепло и просто: «По этому ЖК картина такая...» / «Да, расскажу подробнее...» / «Если смотреть его как вариант для покупки...»;\n"
         "- объясняй пользу из фактов: цена → понятен бюджет входа; отделка → меньше ремонта на старте; "
         "готовность/срок → понятнее горизонт ожидания; локация → понятно, где находится проект;\n"
@@ -1854,7 +2829,7 @@ def _build_known_option_prompt(option: dict[str, Any], client_request: str) -> s
         "Хорошо: «По покупке важны уже живые детали — какие квартиры сейчас свободны, какие этажи есть и можно ли поставить бронь. "
         "Это лучше быстро проверить у оператора».\n\n"
         "OUTPUT_JSON:\n"
-        "Верни валидный JSON только с полями response и params. Inline-кнопки не формируй. Следующий шаг предложи живым текстом."
+        "Верни валидный JSON только с полями response, params и final_question. Inline-кнопки не формируй. Каждый ответ должен содержать final_question. final_question всегда содержит ровно один вопрос."
     )
 
 
@@ -1941,6 +2916,17 @@ def _format_price_value(value: Any, price_min: Any = None) -> str:
     if _looks_missing(text) and not price_min:
         return ""
     if text and not re.fullmatch(r"\d+(?:\.\d+)?", text.replace(" ", "")):
+        if "млн" not in text.lower():
+            match = re.search(r"\d[\d\s]{5,}(?:[.,]\d+)?", text)
+            if match:
+                try:
+                    mln = float(match.group(0).replace(" ", "").replace(",", ".")) / 1_000_000
+                    pretty = f"{mln:.1f}".replace(".", ",")
+                    if pretty.endswith(",0"):
+                        pretty = pretty[:-2]
+                    return f"от {pretty} млн рублей"
+                except ValueError:
+                    pass
         return text
     parsed = _price_min(price_min or text)
     if not parsed:
@@ -2003,6 +2989,9 @@ def _selected_option_fact_sentences(option: dict[str, Any]) -> list[str]:
 
 
 def _investment_note_from_facts(option: dict[str, Any]) -> str:
+    why_investment = str(option.get("why_investment") or "").strip()
+    if why_investment and len(why_investment) >= 25:
+        return why_investment.rstrip(".") + "."
     ready_sentence = _format_ready_sentence(option.get("ready"))
     why_close = str(option.get("why_close") or "").strip()
     if ready_sentence and any(word in ready_sentence.lower() for word in ("сдан", "готов", "должен быть сдан", "ближайший срок")):
@@ -2032,17 +3021,31 @@ def _option_benefit(option: dict[str, Any]) -> str:
 
 def _family_reason_from_facts(option: dict[str, Any]) -> str:
     """Продающая причина для family-сценария только из подтверждённых полей."""
+    why_family = str(option.get("why_family") or "").strip()
+    if why_family and len(why_family) >= 25:
+        return why_family.rstrip(".")
+
+    schools = _join_fact_values(option.get("schools"), option.get("kindergartens"))
+    parks = _join_fact_values(option.get("parks"))
+    yards = _join_fact_values(option.get("yards"))
+    clinics = _join_fact_values(option.get("clinics"))
+    infra = _infra_text(option)
+    if schools:
+        return f"для семьи это удобно: {schools} помогают закрыть ежедневную рутину рядом с домом"
+    if yards:
+        return f"для семьи это спокойно: {yards} дают детям больше пространства для прогулок рядом с домом"
+    if parks:
+        return f"для семьи это плюс: {parks} дают понятное место для прогулок с детьми"
+    if clinics:
+        return f"для семьи это практично: {clinics} рядом помогают быстрее решать бытовые вопросы"
+    if infra:
+        return f"для семьи здесь есть важные повседневные опоры: {infra}"
+
     raw_text = json.dumps(option.get("raw") or {}, ensure_ascii=False).lower()
     if "закрыт" in raw_text or "двор без машин" in raw_text:
-        return (
-            "отличный вариант для семьи: закрытый двор или двор без машин даёт ребёнку больше "
-            "пространства для прогулок, а родителям — спокойствия"
-        )
+        return "для семьи это спокойно: закрытый двор или двор без машин даёт ребёнку больше пространства для прогулок"
     if "детск" in raw_text:
-        return (
-            "хороший выбор для семьи благодаря детской инфраструктуре — "
-            "повседневные вопросы с ребёнком будет проще закрывать рядом с домом"
-        )
+        return "для семьи важна детская инфраструктура: повседневные вопросы с ребёнком проще закрывать рядом с домом"
     if "школ" in raw_text or "сад" in raw_text:
         return (
             "удобный вариант для семей с детьми: школа или детский сад помогают сделать "
@@ -2196,15 +3199,112 @@ def _client_area_fact(value: Any) -> str:
     return f"площади {text}"
 
 
+_FACT_KEY_LABELS: Final[dict[str, str]] = {
+    "school": "школы",
+    "schools": "школы",
+    "kindergarten": "детские сады",
+    "kindergartens": "детские сады",
+    "park": "парки / зелёные зоны",
+    "parks": "парки / зелёные зоны",
+    "park_near": "парк рядом",
+    "forest": "лес рядом",
+    "embankment": "набережная рядом",
+    "water_near": "вода рядом",
+    "yard_without_cars": "двор без машин",
+    "children_ground": "детские площадки",
+    "playgrounds": "детские площадки",
+    "sports_ground": "спортивные площадки",
+    "security": "охрана / безопасность",
+    "clinic": "поликлиника",
+    "clinics": "поликлиники",
+    "pharmacies": "аптеки",
+    "shops": "магазины",
+    "services": "сервисы",
+    "metro": "метро",
+    "transport": "транспорт",
+    "walk_minutes": "пешая доступность",
+    "entry_price": "цена входа",
+    "compact_lots": "компактные лоты",
+    "apartment_types": "форматы квартир",
+    "ads": "объявления",
+    "counter_novos": "активность по ЖК",
+    "count": "количество объявлений",
+    "count_ads": "количество объявлений",
+    "count_discounts": "количество скидок",
+    "egrn_top_novos": "данные сделок ЕГРН",
+    "egrn_sales": "сделки ЕГРН",
+    "sales": "сделки",
+    "mortgage_calc": "ипотечный расчёт",
+    "mortgage": "ипотека",
+    "discount": "скидки",
+    "payment_by_installments": "рассрочка",
+    "demand": "подтверждённый спрос",
+}
+
+
+_SCENARIO_BLOCK_KEYS: Final[tuple[str, ...]] = (
+    "finance",
+    "ads",
+    "apartment_types",
+    "egrn_top_novos",
+    "counter_novos",
+    "mortgage_calc",
+    "mortgage",
+    "discount",
+    "payment_by_installments",
+)
+
+
+def _fact_key_label(key: Any) -> str:
+    raw = str(key or "").strip().lower().replace("ё", "е")
+    raw = raw.split(".")[-1]
+    return _FACT_KEY_LABELS.get(raw, raw.replace("_", " "))
+
+
+def _fact_value_chunks(value: Any, key: Any = None) -> list[str]:
+    """Нормализует MCP/card facts без потери вложенных scenario-блоков.
+
+    MCP/search может вернуть семейную/инвест/арендную карточку как строку,
+    список или dict (`family_infrastructure`, `finance`, `ads`, ...). Старый
+    путь превращал dict в строку вида `{'yard_without_cars': 1}`, и дальше
+    сценарный слой не видел реальные опоры. Здесь dict раскрывается в
+    человеко-читаемые, но всё ещё проверяемые факты.
+    """
+    if _looks_missing(value):
+        return []
+    label = _fact_key_label(key) if key is not None else ""
+    if isinstance(value, bool):
+        return [label] if value and label else []
+    if isinstance(value, (int, float)) and key is not None:
+        if value == 0:
+            return []
+        return [label] if label and key in _FACT_KEY_LABELS else [f"{label}: {value}" if label else str(value)]
+    if isinstance(value, dict):
+        chunks: list[str] = []
+        for child_key, child_value in value.items():
+            chunks.extend(_fact_value_chunks(child_value, child_key))
+        return chunks
+    if isinstance(value, (list, tuple, set)):
+        chunks = []
+        for item in value:
+            chunks.extend(_fact_value_chunks(item, key))
+        return chunks
+    text = str(value).strip()
+    if not text:
+        return []
+    boolish = text.lower().replace("ё", "е").strip(" .,!;:")
+    if boolish in {"1", "true", "да", "yes", "есть", "+"} and label:
+        return [label]
+    if boolish in {"0", "false", "нет", "no", "-"}:
+        return []
+    return [text]
+
+
 def _join_fact_values(*values: Any) -> str:
     chunks: list[str] = []
     seen: set[str] = set()
     for value in values:
-        if _looks_missing(value):
-            continue
-        items = value if isinstance(value, list) else [value]
-        for item in items:
-            text = str(item).strip()
+        for text in _fact_value_chunks(value):
             if not text:
                 continue
             compact = _compact_option_text(text)
@@ -2230,6 +3330,45 @@ def _infra_text(option: dict[str, Any]) -> str:
         if text:
             chunks.append(text)
     return "; ".join(chunks)
+
+
+def _scenario_fact_text(option: dict[str, Any], *keys: str) -> str:
+    return _join_fact_values(*(option.get(key) for key in keys))
+
+
+def _split_fact_text(value: Any) -> list[str]:
+    text = _join_fact_values(value)
+    if not text:
+        return []
+    return [part.strip() for part in re.split(r"\s*;\s*", text) if part.strip()]
+
+
+def _investment_fact_text(option: dict[str, Any]) -> str:
+    return _scenario_fact_text(
+        option,
+        "price_range",
+        "ads",
+        "apartment_types",
+        "egrn_top_novos",
+        "counter_novos",
+        "mortgage_calc",
+        "mortgage",
+        "discount",
+    )
+
+
+def _rental_fact_text(option: dict[str, Any]) -> str:
+    return _scenario_fact_text(
+        option,
+        "why_rental",
+        "apartment_types",
+        "ads",
+        "finishing",
+        "metro",
+        "ready",
+        "counter_novos",
+        "egrn_top_novos",
+    )
 
 
 def _has_fact_kind(option: dict[str, Any], kind: str) -> bool:
@@ -2287,13 +3426,23 @@ def _stage_option_fact_parts(option: dict[str, Any], scenario: str = "self_use")
 
     parts: list[str] = []
     if scenario == "family":
-        for key in ("schools", "kindergartens", "parks", "clinics", "yards", "infrastructure"):
-            add_infra(parts, key)
         for key in ("location", "price", "ready", "finishing", "area", "metro"):
             if base.get(key):
                 parts.append(base[key])
+        for key in ("schools", "kindergartens", "parks", "clinics", "yards", "infrastructure"):
+            add_infra(parts, key)
     elif scenario == "investment":
+        investment = _investment_fact_text(option)
+        if investment:
+            parts.extend(_split_fact_text(investment)[:4])
         for key in ("price", "area", "ready", "finishing", "location", "metro"):
+            if base.get(key):
+                parts.append(base[key])
+    elif scenario == "rental":
+        rental = _rental_fact_text(option)
+        if rental:
+            parts.extend(_split_fact_text(rental)[:4])
+        for key in ("area", "finishing", "metro", "ready", "location", "price"):
             if base.get(key):
                 parts.append(base[key])
     elif scenario == "fast_move":
@@ -2307,7 +3456,25 @@ def _stage_option_fact_parts(option: dict[str, Any], scenario: str = "self_use")
         infra = _infra_text(option)
         if infra:
             parts.append(infra)
-    return parts
+    return _compact_stage_fact_parts(parts, limit=5 if scenario == "family" else 4)
+
+
+def _compact_stage_fact_parts(parts: list[str], limit: int = 4) -> list[str]:
+    """Короткая карточка first-list: без повторов и без простыни фактов."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in parts:
+        text = str(raw or "").strip(" ,;.")
+        if not text:
+            continue
+        key = _compact_option_text(text)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def _stage_option_benefit(option: dict[str, Any], scenario: str, used: set[str]) -> str:
@@ -2334,6 +3501,8 @@ def _stage_option_benefit(option: dict[str, Any], scenario: str, used: set[str])
             candidates.append((f"clinic_family:{_compact_option_text(clinics)}", f"{clinics} рядом — полезный плюс, когда важно быстро решать бытовые вопросы семьи."))
         if yards:
             candidates.append((f"yard_family:{_compact_option_text(yards)}", f"{yards} добавляют удобства для прогулок и игр рядом с домом."))
+        if infra:
+            candidates.append((f"infra_family:{_compact_option_text(infra)}", f"Для семьи здесь важны повседневные опоры: {infra}."))
         if ready == "дом уже сдан":
             candidates.append(("ready_family", "Готовый дом проще планировать для переезда семьи."))
         if finishing:
@@ -2343,12 +3512,31 @@ def _stage_option_benefit(option: dict[str, Any], scenario: str, used: set[str])
         if price:
             candidates.append(("price_family", "По цене сразу понятно, с какого бюджета смотреть этот вариант."))
     elif scenario == "investment":
+        why = str(option.get("why_investment") or "").strip()
+        if len(why) >= 25:
+            candidates.append((f"why_invest:{_compact_option_text(why)}", why))
+        invest = _investment_fact_text(option)
+        if invest:
+            candidates.append((f"facts_invest:{_compact_option_text(invest)}", f"Для инвестиционного сценария здесь есть проверяемые опоры: {invest}."))
         if price:
             candidates.append(("price_invest", "По цене сразу понятно, с чем сравнивать этот вариант."))
         if finishing:
             candidates.append(("finish_invest", "Отделка уменьшает объём работ и вложений после покупки."))
         if ready == "дом уже сдан":
             candidates.append(("ready_invest", "Готовый дом проще оценивать без долгого ожидания сдачи."))
+    elif scenario == "rental":
+        why = str(option.get("why_rental") or "").strip()
+        if len(why) >= 25:
+            candidates.append((f"why_rental:{_compact_option_text(why)}", why))
+        rental = _rental_fact_text(option)
+        if rental:
+            candidates.append((f"facts_rental:{_compact_option_text(rental)}", f"Под аренду здесь важны проверяемые опоры: {rental}."))
+        if finishing:
+            candidates.append(("finish_rental", "Отделка снижает стартовые работы перед заселением арендатора."))
+        if metro:
+            candidates.append(("metro_rental", "Метро рядом проще объяснить будущему арендатору как ежедневное удобство."))
+        if ready == "дом уже сдан":
+            candidates.append(("ready_rental", "Готовый дом можно рассматривать без ожидания сдачи."))
     elif scenario == "metro_access":
         if metro:
             candidates.append(("metro", "Метро рядом — это удобно для ежедневных поездок."))
@@ -2415,6 +3603,9 @@ def _stage_sales_allowed_angles(option: dict[str, Any], scenario: str) -> list[s
         if price:
             angles.append("цена даёт понятный ориентир для семейного бюджета")
     elif scenario == "investment":
+        invest = _investment_fact_text(option)
+        if invest:
+            angles.append(f"использовать только проверяемые инвестиционные факты: {invest}")
         if price:
             angles.append("цена даёт понятную точку входа для сравнения")
         if finishing:
@@ -2422,6 +3613,17 @@ def _stage_sales_allowed_angles(option: dict[str, Any], scenario: str) -> list[s
         if ready == "дом уже сдан":
             angles.append("готовый дом проще оценивать без ожидания сдачи")
         angles.append("не обещать доходность, аренду или рост цены")
+    elif scenario == "rental":
+        rental = _rental_fact_text(option)
+        if rental:
+            angles.append(f"использовать только проверяемые арендные факты: {rental}")
+        if finishing:
+            angles.append("отделка снижает стартовые работы перед заселением арендатора")
+        if metro:
+            angles.append("метро или транспорт рядом проще объяснить будущему арендатору")
+        if ready == "дом уже сдан":
+            angles.append("готовый дом можно рассматривать без ожидания сдачи")
+        angles.append("не обещать ставку аренды, доходность или окупаемость")
     elif scenario == "metro_access":
         if metro:
             angles.append("ежедневные поездки проще, когда метро рядом")
@@ -2525,18 +3727,49 @@ def _validate_sales_phrase_items(data: dict[str, Any], options_count: int, optio
 
 def _stage_lead_for_first_list(scenario: str, count: int, options: list[dict[str, Any]] | None = None) -> str:
     word = "три варианта" if count >= 3 else "несколько вариантов"
+    return _stage_lead_for_first_list_context(scenario, word, options)
+
+
+def _first_list_params_context(params: dict[str, Any] | None) -> str:
+    p = params or {}
+    parts: list[str] = []
+    rooms = str(p.get("rooms") or "").strip().lower()
+    if rooms in {"1", "one"}:
+        parts.append("однокомнатных квартир")
+    elif rooms in {"2", "two"}:
+        parts.append("двухкомнатных квартир")
+    elif rooms in {"3", "three"}:
+        parts.append("трёхкомнатных квартир")
+    elif rooms in {"s", "0", "studio", "студия"}:
+        parts.append("студий")
+
+    district = str(p.get("district") or "").strip().lower()
+    if district == "mo":
+        parts.append("в Московской области")
+    elif district == "msk":
+        parts.append("в Москве")
+    elif district == "newmsk":
+        parts.append("в Новой Москве")
+    return " ".join(parts)
+
+
+def _stage_lead_for_first_list_context(scenario: str, word: str, options: list[dict[str, Any]] | None = None, params_context: str = "") -> str:
+    context = f" {params_context}" if params_context else ""
+    count = min(len(options or []), 3) or (3 if "три" in word else 2)
     if scenario == "family":
-        return f"Подобрала {word} для семьи."
+        return f"Подобрала {word}{context} для семьи."
     if scenario == "investment":
-        return f"Подобрала {word} под инвестицию."
+        return f"Подобрала {word}{context} под инвестицию."
+    if scenario == "rental":
+        return f"Подобрала {word}{context} под аренду."
     if scenario == "metro_access":
         metro_count = sum(1 for option in (options or [])[:3] if not _looks_missing(option.get("metro")))
         if metro_count >= min(2, count):
-            return f"Нашла {word} рядом с метро."
-        return f"Нашла {word}, которые можно сравнить по цене и локации."
+            return f"Нашла {word}{context} рядом с метро."
+        return f"Нашла {word}{context}, которые можно сравнить по цене и локации."
     if scenario == "budget":
-        return f"Нашла {word} по бюджету."
-    return f"Нашла {word} для сравнения."
+        return f"Нашла {word}{context} по бюджету."
+    return f"Нашла {word}{context} для сравнения."
 
 
 async def _sales_phrases_for_stage(
@@ -2564,13 +3797,14 @@ async def _sales_phrases_for_stage(
         return {}, {"enabled": True, "applied": False, "skipped": "exception"}
 
 
-def _render_stage_first_list(options: list[dict[str, Any]], scenario: str, sales_benefits: dict[int, str] | None = None) -> str:
+def _render_stage_first_list(options: list[dict[str, Any]], scenario: str, sales_benefits: dict[int, str] | None = None, params_context: str = "") -> str:
     visible = options[:3]
     used: set[str] = set()
     sales_benefits = sales_benefits or {}
-    blocks = [_stage_lead_for_first_list(scenario, len(visible), visible)]
+    word = "три варианта" if len(visible) >= 3 else "несколько вариантов"
+    blocks = [_stage_lead_for_first_list_context(scenario, word, visible, params_context)]
     for idx, option in enumerate(visible, start=1):
-        facts = ", ".join(_stage_option_fact_parts(option, scenario)[:5])
+        facts = ", ".join(_stage_option_fact_parts(option, scenario))
         benefit = sales_benefits.get(idx) or _stage_option_benefit(option, scenario, used)
         name = option.get("name") or f"вариант {idx}"
         line = f"{idx}. {name}"
@@ -2581,6 +3815,17 @@ def _render_stage_first_list(options: list[dict[str, Any]], scenario: str, sales
         blocks.append(f"{_ensure_sentence_period(line)}\n\n{benefit}")
     blocks.append("Какой ЖК хотите рассмотреть подробнее?")
     return _format_numbered_list_spacing("\n\n".join(blocks))
+
+
+def _render_stage_single_first_result(option: dict[str, Any], scenario: str) -> str:
+    name = option.get("name") or "этот ЖК"
+    facts = ", ".join(_stage_option_fact_parts(option, scenario))
+    intro = f"Нашла один подходящий вариант: {name}"
+    if facts:
+        intro += f" — {facts}"
+    benefit = _stage_option_benefit(option, scenario, set())
+    question = "Разобрать этот ЖК подробнее?"
+    return "\n\n".join([_ensure_sentence_period(intro), benefit, question])
 
 
 def _recommendation_score(option: dict[str, Any], scenario: str) -> int:
@@ -2611,11 +3856,23 @@ def _recommendation_score(option: dict[str, Any], scenario: str) -> int:
     if scenario == "investment":
         if _client_price_fact(option):
             score += 4
+        if _investment_fact_text(option):
+            score += 4
         if _client_area_fact(option.get("area")):
             score += 2
         if _has_positive_finishing(option.get("finishing")):
             score += 1
         if not _looks_missing(option.get("metro")):
+            score += 1
+        return score
+    if scenario == "rental":
+        if _rental_fact_text(option):
+            score += 5
+        if _has_positive_finishing(option.get("finishing")):
+            score += 2
+        if not _looks_missing(option.get("metro")):
+            score += 2
+        if _client_ready_fact(option.get("ready") or option.get("status") or option.get("delivered")) == "дом уже сдан":
             score += 1
         return score
     return len(_stage_option_fact_parts(option, scenario))
@@ -2630,7 +3887,11 @@ def _render_stage_recommendation(options: list[dict[str, Any]], scenario: str) -
     best_idx, best = ranked[0]
     name = best.get("name") or f"вариант {best_idx + 1}"
     benefit = _stage_option_benefit(best, scenario, set())
-    facts = _stage_option_fact_parts(best, scenario)[:4]
+    facts = _stage_option_fact_parts(best, scenario)[:6 if scenario == "family" else 4]
+    if scenario == "family":
+        park_fact = _join_fact_values(best.get("parks"))
+        if park_fact and not any(_compact_option_text(park_fact) == _compact_option_text(fact) for fact in facts):
+            facts.append(park_fact)
     fact_text = ", ".join(facts)
     blocks = [f"Если выбирать из этих вариантов, я бы сначала смотрела {name}."]
     if fact_text:
@@ -2684,8 +3945,11 @@ def _render_stage_selected_object(option: dict[str, Any], scenario: str = "self_
     if main_facts:
         intro += f" — {main_facts}"
     intro = _ensure_sentence_period(intro)
+    full_infra = _infra_text(option)
     if sales_benefit:
         benefit = sales_benefit.strip()
+    elif scenario == "family" and full_infra:
+        benefit = _stage_option_benefit(option, scenario, used)
     elif scenario == "family" and ready == "дом уже сдан" and finishing:
         benefit = "Для семьи это удобно: готовый дом проще планировать для переезда, а отделка уменьшает ремонтные хлопоты."
     elif scenario == "family" and area:
@@ -2693,7 +3957,6 @@ def _render_stage_selected_object(option: dict[str, Any], scenario: str = "self_
     else:
         benefit = _stage_option_benefit(option, scenario, used)
     infra_parts: list[str] = []
-    full_infra = _infra_text(option)
     if full_infra:
         infra_parts.append(full_infra)
     else:
@@ -2824,6 +4087,8 @@ def _reason_layer_scenario(user_text: str, params: dict[str, Any] | None) -> str
     text = str(user_text or "").lower().replace("ё", "е")
     if purpose in {"investment", "invest", "инвестиции", "инвест", "инвестиций"} or "инвест" in text:
         return "investment"
+    if purpose in {"rental", "rent", "аренда", "аренду", "сдача"} or any(w in text for w in ("аренд", "сдавать", "сдать")):
+        return "rental"
     if purpose == "family" or any(w in text for w in ("семь", "ребен", "дет")):
         return "family"
     if "метро" in text or "пешком" in text:
@@ -2836,22 +4101,29 @@ def _reason_layer_scenario(user_text: str, params: dict[str, Any] | None) -> str
 
 
 def _reason_layer_lead_question(scenario: str) -> tuple[str, str]:
+    details_question = "Какой ЖК хотите рассмотреть подробнее?"
     if scenario == "investment":
-        return "Подобрала три понятных варианта под инвестицию", "Какой ЖК посмотреть подробнее или позвать оператора проверить актуальные квартиры?"
+        return "Подобрала три понятных варианта под инвестицию", details_question
+    if scenario == "rental":
+        return "Подобрала несколько вариантов под аренду", details_question
     if scenario == "metro_access":
-        return "Нашла несколько вариантов рядом с метро", "Какой ЖК посмотреть подробнее или позвать оператора проверить актуальные квартиры?"
+        return "Нашла несколько вариантов рядом с метро", details_question
     if scenario == "budget":
-        return "Нашла несколько вариантов по бюджету", "Какой вариант посмотреть подробнее или позвать оператора проверить актуальные квартиры?"
+        return "Нашла несколько вариантов по бюджету", "Какой вариант хотите рассмотреть подробнее?"
     if scenario == "fast_move":
-        return "Нашла варианты, где проще планировать переезд", "Какой ЖК посмотреть подробнее или позвать оператора проверить актуальные квартиры?"
+        return "Нашла варианты, где проще планировать переезд", details_question
     if scenario == "family":
-        return "Подобрала несколько вариантов для семьи", "Какой ЖК посмотреть подробнее или позвать оператора проверить актуальные квартиры?"
-    return "Нашла несколько понятных вариантов", "Какой ЖК посмотреть подробнее или позвать оператора проверить актуальные квартиры?"
+        return "Подобрала несколько вариантов для семьи", details_question
+    return "Нашла несколько понятных вариантов", details_question
 
 
 def _reason_layer_fact_payload(option: dict[str, Any]) -> dict[str, Any]:
     facts: dict[str, Any] = {}
-    for key in ("location", "price", "price_min", "finishing", "ready", "area", "metro", "why_close"):
+    for key in (
+        "location", "price", "price_min", "price_range", "finishing", "ready", "area", "metro", "why_close",
+        "why_family", "why_investment", "why_rental", "schools", "kindergartens", "parks", "yards", "infrastructure",
+        "ads", "apartment_types", "egrn_top_novos", "counter_novos", "mortgage_calc", "mortgage", "discount",
+    ):
         value = option.get(key)
         if not _looks_missing(value):
             facts[key] = value
@@ -2923,16 +4195,25 @@ def _build_reason_layer_payload(
     options: list[dict[str, Any]],
 ) -> dict[str, Any]:
     comparison = _reason_layer_comparison_facts(options)
+    allowed_fact_types = ["price", "price_min", "price_range", "metro", "finishing", "ready", "status", "delivered", "area", "location", "why_close"]
+    forbidden_claims = [
+        "доходность", "аренда", "ликвидность", "рост цены", "окупаемость",
+        "выгодная инвестиция", "инвестиционно привлекательный", "лучший", "идеальный",
+        "видовые квартиры", "скидки", "ипотека",
+    ]
+    if scenario == "family":
+        allowed_fact_types.extend([
+            "why_family", "schools", "kindergartens", "parks", "yards", "infrastructure",
+            "family_infrastructure", "children_ground", "sports_ground", "security", "transport",
+        ])
+    else:
+        forbidden_claims.extend(["школы", "парки", "дворы"])
     return {
         "scenario": scenario,
         "user_query": user_text,
-        "task": "Return comparative angle + tone only; code will render final client text.",
-        "allowed_fact_types": ["price", "price_min", "price_range", "metro", "finishing", "ready", "status", "delivered", "area", "location", "why_close"],
-        "forbidden_claims": [
-            "доходность", "аренда", "ликвидность", "рост цены", "окупаемость",
-            "выгодная инвестиция", "инвестиционно привлекательный", "лучший", "идеальный",
-            "школы", "парки", "дворы", "видовые квартиры", "скидки", "ипотека",
-        ],
+        "task": "Return comparative angle + tone only; code will render final client text. If scenario=family, choose family-first angles before finishing/ready/price.",
+        "allowed_fact_types": allowed_fact_types,
+        "forbidden_claims": forbidden_claims,
         "options": [
             {
                 "idx": i,
@@ -3000,6 +4281,7 @@ def _render_reason_from_angle(
     tone: str,
     comparison: dict[str, Any] | None = None,
     used_reason_keys: set[str] | None = None,
+    scenario: str = "self_use",
 ) -> str:
     """Render final client phrase from short model angle+tone using only option facts."""
     comparison = comparison or {}
@@ -3022,6 +4304,18 @@ def _render_reason_from_angle(
     ready_rank = str(comparison.get("ready_rank") or "")
     metro_rank = str(comparison.get("metro_rank") or "")
     finishing_rank = str(comparison.get("finishing_rank") or "")
+
+    if scenario == "family":
+        family_reason = _family_reason_from_facts(option).strip()
+        family_markers = ("школ", "сад", "дет", "парк", "лес", "двор", "площад", "сем")
+        has_family_fact = any(
+            not _looks_missing(option.get(key))
+            for key in ("why_family", "schools", "kindergartens", "parks", "yards", "infrastructure")
+        )
+        if has_family_fact and family_reason:
+            return _ensure_sentence_period(family_reason)
+        if any(marker in a for marker in family_markers) and location:
+            return f"Для семьи здесь важна локация: {location}."
 
     # First priority: objective comparison across all visible options. This avoids
     # three identical "metro nearby" / "with finishing" reasons in one answer.
@@ -3126,6 +4420,7 @@ def _format_options_summary_with_reasons(
     lead: str,
     question: str,
     reason_items: list[dict[str, str]],
+    scenario: str = "self_use",
 ) -> str:
     reasons_by_idx = {int(item["idx"]): item for item in reason_items}
     comparison = _reason_layer_comparison_facts(options)
@@ -3140,6 +4435,7 @@ def _format_options_summary_with_reasons(
             item.get("tone", "") if item else "",
             comparison=comparison.get(idx, {}),
             used_reason_keys=used_reason_keys,
+            scenario=scenario,
         )
         chunks.append(f"{line}\n   {reason}")
     return _format_numbered_list_spacing(f"{lead}.\n" + "\n\n".join(chunks) + f"\n\n{question}")
@@ -3177,7 +4473,7 @@ async def _maybe_apply_reason_layer(
                 last_meta = meta
                 continue
             lead, question = _reason_layer_lead_question(scenario)
-            response = _format_options_summary_with_reasons(options, lead, question, items)
+            response = _format_options_summary_with_reasons(options, lead, question, items, scenario=scenario)
             return response, {"enabled": True, "applied": True, "scenario": scenario, "model": model, "items": items, "meta": meta}
         return fallback_response, {"enabled": True, "skipped": "invalid_model_output", "meta": last_meta}
     except Exception:
@@ -3617,6 +4913,25 @@ def _compact_trace_value(value: Any, limit: int = 1400) -> str:
     if len(text) <= limit:
         return text
     return text[: limit - 1] + "…"
+
+
+def _log_error_event(event: dict[str, Any]) -> None:
+    """Append one operational error event to logs/bot_error_events-YYYY-MM-DD.jsonl.
+
+    This journal is for fast incident triage: every bot crash, missing response,
+    invalid parse, or unsafe upstream payload must leave a compact JSONL record.
+    Best-effort: never raises into the Telegram request path.
+    """
+    try:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+        event.setdefault("kind", "bot_error")
+        event.setdefault("ts", datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"))
+        event.setdefault("h_id", ACTIVE_H_ID)
+        path = LOGS_DIR / f"bot_error_events-{datetime.now(timezone.utc).date().isoformat()}.jsonl"
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+    except Exception as e:  # pragma: no cover - error journal must never break the bot
+        LOGGER.warning("Failed to write bot error journal: %s", e)
 
 
 def _build_dialog_trace(event: dict[str, Any]) -> dict[str, Any]:
@@ -4232,25 +5547,17 @@ def main() -> None:
                 followup_meta["orchestrator_action"] = dialog_action
                 if dialog_plan.get("selected_option_name"):
                     followup_meta["target"] = str(dialog_plan.get("selected_option_name") or "")
-                if dialog_action == "select_option":
-                    followup_intent = "choose_option"
-                elif dialog_action == "expand_more_options" or (dialog_action == "update_search" and visible_policy == "rebuild" and (state.get("visible_options") or state.get("last_options"))):
-                    followup_intent = "expand_more_options"
-                elif dialog_action == "compare_options":
-                    followup_intent = "compare_options"
-                elif dialog_action == "recommend_options":
-                    followup_intent = "recommend_options"
-                elif dialog_action == "update_search":
+                mapped_intent = _followup_intent_from_dialog_action(
+                    dialog_action,
+                    dialog_plan,
+                    visible_policy=visible_policy,
+                    has_options=bool(state.get("visible_options") or state.get("last_options")),
+                )
+                if mapped_intent:
+                    followup_intent = mapped_intent
+                if dialog_action == "update_search":
                     followup_intent = "update_search_params"
                     followup_meta["params_delta"] = dialog_plan.get("params_delta") if isinstance(dialog_plan.get("params_delta"), dict) else {}
-                elif dialog_action == "new_search":
-                    followup_intent = "new_search"
-                elif dialog_action == "continue_from_memory":
-                    followup_intent = "continue_selection"
-                elif dialog_action == "operator_live_check":
-                    followup_intent = "operator_for_selected"
-                elif dialog_action in {"reject_offer", "reject_operator", "reject_phone", "reject_selected_option", "reject_similar_options", "clarify_negation"}:
-                    followup_intent = dialog_action
                 followup_meta["intent"] = followup_intent
             selected = state.get("selected_option")
             if dialog_plan.get("dialog_action") == "ask_clarification" and dialog_plan.get("clarification_question"):
@@ -4281,6 +5588,30 @@ def main() -> None:
                 dialog_intent = {"intent": "compare_others", "options": (state.get("visible_options") or state.get("last_options") or [])[:3]}
             elif followup_intent == "recommend_options":
                 dialog_intent = {"intent": "recommend_options", "options": (state.get("visible_options") or state.get("last_options") or [])[:3]}
+            elif followup_intent == "explain_selection_logic":
+                response = _prepare_response_text(_selection_logic_response(state))
+                _remember_bot_response(state, response, offer_type="explain_selection_logic", answer_kind="selection_logic")
+                _log_event({
+                    "kind": "user_message",
+                    "uid": uid,
+                    "user_text": text,
+                    "dialog_intent": "explain_selection_logic",
+                    "search_model": state["search_model"],
+                    "chat_model": state["chat_model"],
+                    "mcp": state["mcp"],
+                    "params_before": params_before,
+                    "params_after": dict(state.get("params", {})),
+                    "params_delta": {},
+                    "response_text": response,
+                    "response_len": len(response),
+                    "buttons": [],
+                    "duration_ms": 0,
+                    "is_error": False,
+                    "error": None,
+                    "cost": {},
+                })
+                await update.message.reply_text(_to_html(response), parse_mode="HTML")
+                return
             elif followup_intent == "operator_for_selected" and selected:
                 dialog_intent = {"intent": "operator_for_selected", "option": selected}
             elif followup_intent == "operator_for_selected":
@@ -4343,6 +5674,70 @@ def main() -> None:
                     "is_error": False,
                     "error": None,
                     "cost": {},
+                })
+                await update.message.reply_text(_to_html(response), parse_mode="HTML")
+                return
+            elif followup_intent == "consultation_answer":
+                response, chat_meta = await client.explain_consultation_followup(
+                    user_text=text,
+                    state=state,
+                    dialog_plan=dialog_plan,
+                    chat_model=state["chat_model"],
+                )
+                response = _prepare_response_text(response)
+                _store_active_conversation_topic(state, text)
+                _remember_bot_response(state, response, offer_type="consultation_answer", answer_kind="consultation_answer")
+                _log_event({
+                    "kind": "user_message",
+                    "uid": uid,
+                    "user_text": text,
+                    "dialog_intent": "consultation_answer",
+                    "search_model": state["search_model"],
+                    "chat_model": state["chat_model"],
+                    "mcp": state["mcp"],
+                    "params_before": params_before,
+                    "params_after": dict(state.get("params", {})),
+                    "params_delta": {},
+                    "response_text": response,
+                    "response_len": len(response),
+                    "buttons": [],
+                    "duration_ms": 0,
+                    "is_error": False,
+                    "error": None,
+                    "cost": chat_meta.get("cost", {}) if isinstance(chat_meta, dict) else {},
+                    "dialog_plan": dialog_plan,
+                })
+                await update.message.reply_text(_to_html(response), parse_mode="HTML")
+                return
+            elif followup_intent == "conversation_answer":
+                response, chat_meta = await client.explain_conversation_followup(
+                    user_text=text,
+                    state=state,
+                    dialog_plan=dialog_plan,
+                    chat_model=state["chat_model"],
+                )
+                response = _prepare_response_text(response)
+                _store_active_conversation_topic(state, text)
+                _remember_bot_response(state, response, offer_type="conversation_answer", answer_kind="conversation_answer")
+                _log_event({
+                    "kind": "user_message",
+                    "uid": uid,
+                    "user_text": text,
+                    "dialog_intent": "conversation_answer",
+                    "search_model": state["search_model"],
+                    "chat_model": state["chat_model"],
+                    "mcp": state["mcp"],
+                    "params_before": params_before,
+                    "params_after": dict(state.get("params", {})),
+                    "params_delta": {},
+                    "response_text": response,
+                    "response_len": len(response),
+                    "buttons": [],
+                    "duration_ms": 0,
+                    "is_error": False,
+                    "error": None,
+                    "cost": chat_meta.get("cost", {}) if isinstance(chat_meta, dict) else {},
+                    "dialog_plan": dialog_plan,
                 })
                 await update.message.reply_text(_to_html(response), parse_mode="HTML")
                 return
@@ -4913,12 +6308,16 @@ def main() -> None:
         if dialog_intent.get("intent") == "expand_more_options":
             query_for_search, excluded_names = _build_followup_expansion_query(text, state)
             try:
+                repeat_params = dict(state.get("params", {}) or {})
+                if excluded_names:
+                    repeat_params["exclude"] = excluded_names
+                repeat_params["purpose"] = "repeat_search"
                 response, new_params, search_meta, chat_meta = await client.ask(
                     query=query_for_search,
                     search_model=state["search_model"],
                     chat_model=state["chat_model"],
                     use_mcp=state["mcp"],
-                    params=state.get("params", {}),
+                    params=repeat_params,
                 )
                 if new_params:
                     state["params"] = {**state.get("params", {}), **new_params}
@@ -5120,6 +6519,15 @@ def main() -> None:
         except Exception as e:
             LOGGER.exception("Error handling message")
             error_text = repr(e)
+            _log_error_event({
+                "error_type": "message_ask_exception",
+                "severity": "error",
+                "stage": "handle_message.ask",
+                "uid": uid,
+                "user_text": text,
+                "exception": repr(e),
+                "state": _compact_trace_value(_dialog_state_preview(state), 1600),
+            })
             response = f"❌ Ошибка: {e}"
 
         duration_ms = int((time.monotonic() - t0) * 1000)
@@ -5188,6 +6596,20 @@ def main() -> None:
             })
             await update.message.reply_text(_to_html(response), parse_mode="HTML", reply_markup=markup)
             return
+
+        if not isinstance(response, str):
+            _log_error_event({
+                "error_type": "handler_non_text_response",
+                "severity": "error",
+                "stage": "handle_message.preprocess",
+                "uid": uid,
+                "user_text": text,
+                "payload_type": type(response).__name__,
+                "payload_preview": _safe_json_preview(response),
+                "state": _compact_trace_value(_dialog_state_preview(state), 1600),
+            })
+            response = _response_payload_to_text(response) or SAFE_UPSTREAM_ERROR_TEXT
+            error_text = error_text or "handler_non_text_response"
 
         response = _prepare_response_text(_strip_markdown(response))
         response = _strip_unsupported_complex_claims(response)
@@ -5394,6 +6816,17 @@ def main() -> None:
             "Контакт пришёл без понятного номера. Напишите телефон текстом в формате +7XXXXXXXXXX.",
         )
 
+    async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        LOGGER.exception("Unhandled Telegram update error", exc_info=context.error)
+        update_preview = _safe_json_preview(update.to_dict() if hasattr(update, "to_dict") else str(update), 2000)
+        _log_error_event({
+            "error_type": "telegram_unhandled_exception",
+            "severity": "critical",
+            "stage": "telegram_application",
+            "exception": repr(context.error),
+            "update_preview": update_preview,
+        })
+
     builder = Application.builder().token(TELEGRAM_BOT_TOKEN)
     if TELEGRAM_API_BASE_URL:
         builder = builder.base_url(TELEGRAM_API_BASE_URL)
@@ -5408,6 +6841,7 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.CONTACT, handle_contact))
     app.add_handler(MessageHandler(~filters.COMMAND & ~filters.CONTACT, handle_message))
+    app.add_error_handler(telegram_error_handler)
 
     print("🤖 nmbot запущен. Нажми Ctrl+C для остановки.")
     LOGGER.info("nmbot started")

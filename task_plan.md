@@ -282,3 +282,36 @@ Goal: добавить во внешний NMBOT overview вкладку `Ист
 - `logs/dialogs-YYYY-MM-DD.jsonl`.
 - `scripts/build_public_overview.py`.
 - `scripts/publish_public_history.py`.
+
+---
+
+# Task Plan — 2026-07-03 Public architecture v2 tab
+
+Goal: создать подробное ТЗ новой архитектуры решений Ирины и вынести его в публичный NMBOT overview отдельной вкладкой/страницей, чтобы пользователь мог прочитать, как будет организован Planner LLM → MCP/search → Decision Context → Action Resolver → Presenter → Validator.
+
+## Phases
+
+1. Inspect existing public overview/docs and UX contracts — complete.
+2. Write detailed architecture TZ — complete.
+3. Add public overview nav/page generation — complete.
+4. Build and verify locally — complete.
+5. Sync to VPS public service and verify URL — in progress.
+
+## Verification
+
+- Local: `ARCHITECTURE_V2_LOCAL_OK`.
+- Generated files checked: `public_site/nmbot-project-7f3a9c/index.html`, `public_site/nmbot-project-7f3a9c/architecture-v2.html`.
+- Required markers present: `Новая архитектура Ирины`, `Decision Context Builder`, `Action Resolver`, `Safety Validator`, `finance_terms`, `real_estate_related_unknown`.
+
+## Constraints
+
+- Publish only docs from allow-list; no secrets/logs/backups.
+- This is documentation/public overview only; no bot runtime restart needed.
+- New architecture is a TZ/plan, not yet implemented in runtime.
+
+## Sources
+
+- NotebookLM notes `7c0bfabbe4e2`, `eb601cf0ffc3`, `ae8a061b669f`.
+- `docs/IDEAL_IRINA_UX.md`.
+- `docs/BOT_ARCHITECTURE.md`.
+- `scripts/build_public_overview.py`.

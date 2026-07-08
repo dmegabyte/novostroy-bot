@@ -1,5 +1,19 @@
 # Progress — H026 Ideal Irina UX
 
+## 2026-07-03 — Public architecture v2 made user-friendly
+
+- User попросил переписать `architecture-v2.html` так, чтобы её было легко читать человеку вне проекта: не сплошной текст, а блок‑схемы и dropdowns.
+- Обновил `scripts/build_public_overview.py`: на странице теперь есть короткое объяснение, блок‑схема, карточки блоков системы в `<details>`, типовые сценарии, примеры безопасной карточки и только затем полный текст ТЗ.
+- Локальная проверка после переписывания: `FRIENDLY_ARCHITECTURE_LOCAL_OK`.
+- Далее нужно синхронизировать обновлённую страницу на VPS public service и проверить публичный URL.
+
+## 2026-07-03 — Public architecture v2 tab
+
+- User asked to create a detailed TZ for the new LLM decision architecture and add a new tab to `http://193.107.155.236:8765/nmbot-project-7f3a9c/index.html` for reading it.
+- Added `docs/LLM_DECISION_ARCHITECTURE_TZ.md`: target chain `Client → State → Intent Planner LLM → Search Decision → MCP/search → Normalizer → Decision Context Builder → Action Resolver → Presenter → Safety Validator → Telegram`, component responsibilities, intent/action tables, unknown-question policy, safety validator checklist, rollout plan, logging schema and readiness criteria.
+- Updated `scripts/build_public_overview.py`: added the TZ to allow-listed docs, added nav link `Новая архитектура`, and generated standalone page `/nmbot-project-7f3a9c/architecture-v2.html`.
+- Local verification: `ARCHITECTURE_V2_LOCAL_OK`; generated index contains `architecture-v2.html`, generated page contains `Decision Context Builder`, `Action Resolver`, `Safety Validator`, `finance_terms`, `real_estate_related_unknown`.
+
 ## 2026-07-03 — Public history tab
 
 - User asked to add a `История` tab to `http://193.107.155.236:8765/nmbot-project-7f3a9c/index.html` so latest bot dialogs can be viewed online.

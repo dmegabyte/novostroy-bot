@@ -31,6 +31,7 @@ DOCS: tuple[SourceDoc, ...] = (
     SourceDoc("readme", "README — общий контекст", "README.md", "ТЗ проекта", "Что это за бот, где прод и как устроен dev/prod."),
     SourceDoc("product", "PRODUCT_TZ — продуктовое ТЗ", "docs/PRODUCT_TZ.md", "ТЗ проекта", "Продуктовые требования и ограничения."),
     SourceDoc("architecture", "BOT_ARCHITECTURE — архитектура", "docs/BOT_ARCHITECTURE.md", "ТЗ проекта", "Компоненты, state, модели, MCP, deploy."),
+    SourceDoc("decision_architecture", "LLM_DECISION_ARCHITECTURE_TZ — новая архитектура решений", "docs/LLM_DECISION_ARCHITECTURE_TZ.md", "ТЗ проекта", "Decision Context Builder, Action Resolver, Presenter, Validator."),
     SourceDoc("ideal", "IDEAL_IRINA_UX — эталон UX", "docs/IDEAL_IRINA_UX.md", "ТЗ проекта", "Как Ирина должна говорить с клиентом."),
     SourceDoc("dialogue", "IRINA_DIALOGUE_MAP_V1 — сценарии", "docs/IRINA_DIALOGUE_MAP_V1.md", "Сценарии", "Stage 0/1/2/3/4/4.5/5/6 и переходы."),
     SourceDoc("enrichment", "SCENARIO_COMMENT_ENRICHMENT_TZ — MCP факты", "docs/SCENARIO_COMMENT_ENRICHMENT_TZ.md", "Сценарии", "Какие MCP-поля используются для семьи, инвестиций, переезда."),
@@ -159,7 +160,7 @@ def build_nmbot_index() -> str:
   <p>Живая карта проекта: что делает бот, какие сценарии поддерживает, какие промты активны и какие MCP-поля реально используются.</p>
 </header>
 <main>
-  <nav><a href="/index.html">← Все сервисы</a><a href="#history">История</a><a href="map.html">Блок‑схема на весь экран</a>{nav}</nav>
+  <nav><a href="/index.html">← Все сервисы</a><a href="architecture-v2.html">Архитектура для новичка</a><a href="#history">История</a><a href="map.html">Блок‑схема на весь экран</a>{nav}</nav>
   <section class="card">
     <h2>Общая логика</h2>
     <p><strong>Жёсткое правило:</strong> любой запрос о квартире, новостройке, ЖК или подборе вариантов сначала проходит через инструментальный MCP/search. Ирина не имеет права отвечать по памяти модели: цены, площади, сроки, отделка, инфраструктура и варианты берутся только из результата поиска.</p>
@@ -241,15 +242,134 @@ setInterval(loadHistory, 10000);
     return shell("NMBOT / Ирина — проект целиком", body)
 
 
+def build_architecture_v2_page() -> str:
+    text = truncate(read("docs/LLM_DECISION_ARCHITECTURE_TZ.md"), limit=120_000)
+    summary_cards = "".join(
+        (
+            "<article class='card'><h3>Для чего эта схема</h3>"
+            "<p>Показать, как Ирина принимает решение без сырого хаоса в LLM: сначала смысл запроса, потом проверка данных, потом безопасный ответ.</p></article>"
+        ),
+        )
+    summary_cards += "".join(
+        [
+            "<article class='card'><h3>Что здесь главное</h3>"
+            "<p>LLM не должна сама разбирать весь MCP и помнить все запреты. Для этого есть Decision Context Builder, Action Resolver и Safety Validator.</p></article>",
+            "<article class='card'><h3>Что увидит человек</h3>"
+            "<p>Короткую схему блоков, понятные сценарии и раскрывающиеся пояснения. В конце — полный текст ТЗ, если нужен совсем глубокий разбор.</p></article>",
+        ]
+    )
+    block_cards = [
+        ("1. State / Memory", "Это память диалога. Здесь лежат параметры, выбранный ЖК, предыдущие варианты и флаги вроде <code>awaiting_phone</code>.", "State не показывается клиенту и не должен напрямую превращаться в ответ."),
+        ("2. Intent Planner LLM", "Этот слой понимает, что клиент сейчас хочет: новый поиск, широкий подбор, совет, сравнение, оператора или что-то непонятное.", "Planner не пишет ответ, а выбирает семантическое действие."),
+        ("3. Search Decision", "Здесь решается, нужен ли новый MCP/search. Для нового квартирного запроса поиск обязателен, для вопроса про критерии сравнения — нет.", "Это экономит лишние поиски и не зацикливает диалог."),
+        ("4. MCP/search novostroym", "Источник фактов. Только отсюда можно брать цену, площадь, отделку, срок, инфраструктуру и сам список ЖК.", "Если ЖК нет в structured facts/near, его нельзя показывать клиенту как факт."),
+        ("5. Normalizer", "Превращает сырой ответ поиска в безопасные карточки: exact / near_only, client_facts, why_close, missing, do_not_say.", "Так LLM не видит сырой JSON и не путает близкий вариант с точным."),
+        ("6. Decision Context Builder", "Сжимает всё в короткую карточку: что хочет клиент, что найдено, какие риски есть и что вообще разрешено делать.", "Это главный слой, который облегчает работу LLM."),
+        ("7. Action Resolver", "Проверяет, можно ли выполнить выбранное действие: показать точные варианты, объяснить различие near, предложить оператора или задать один вопрос.", "Код не придумывает смысл, а только страхует опасные переходы."),
+        ("8. Presenter", "Пишет человеческий ответ: короткий первый список, объяснение критериев сравнения, совет, операторская передача или мягкий отказ.", "Здесь важен живой язык, но без выдуманных фактов."),
+        ("9. Safety Validator", "Финальная проверка: нет ли сырого dict, лишних ЖК, раннего оператора, технических слов и неподтверждённой финтематики.", "Если проверка не прошла, ответ не выпускается как есть."),
+    ]
+    block_details = "".join(
+        f"<details><summary>{html.escape(title)}</summary><p>{html.escape(short)}</p><p class='muted'>{html.escape(extra)}</p></details>"
+        for title, short, extra in block_cards
+    )
+    scenario_details = "".join(
+        [
+            "<details><summary>Первый подбор: клиент просто хочет варианты</summary><p>Planner видит <code>new_search</code> или <code>wide_search</code>. Если факты есть — показываем 2–3 варианта. Если бюджет не назван, не мучаем его кругом одинаковых вопросов, а даём широкий стартовый список.</p></details>",
+            "<details><summary>near-only: точных вариантов нет, есть близкие</summary><p>Система честно говорит, что это не exact match. В ответе обязательно есть отличие: почему вариант только близкий и что именно не совпало.</p></details>",
+            "<details><summary>По каким критериям сравнивали?</summary><p>Это не повтор списка, а объяснение логики сравнения: цена, отделка, срок, локация, метро, инфраструктура — только если эти поля реально есть в данных.</p></details>",
+            "<details><summary>Что посоветуешь?</summary><p>Это отдельный совет из уже видимых вариантов. Система выбирает один лучший по сценарию и объясняет, почему он выглядит сильнее остальных.</p></details>",
+            "<details><summary>Как связаться с оператором?</summary><p>Если клиент просит человека, а не ещё один список, бот сохраняет контекст и просит номер для связи. Вопрос не должен превращаться в новый выбор между первым, вторым и третьим.</p></details>",
+            "<details><summary>Без ПВ / траншевая ипотека</summary><p>Это отдельный сценарий: если у данных нет подтверждения по программам, бот не выдумывает банковскую схему и честно говорит, что надо проверить у оператора или в подтверждённом MCP-источнике.</p></details>",
+            "<details><summary>Нестандартный вопрос</summary><p>Если вопрос связан с недвижимостью, но сценарий непривычный, бот не фантазирует. Он либо отвечает только по подтверждённому факту, либо честно признаёт, что факта нет, и возвращает к проекту.</p></details>",
+        ]
+    )
+    example_cards = [
+        (
+            "Как выглядит безопасная карточка",
+            {
+                "stage": "comparison_followup",
+                "search_summary": {"facts_count": 0, "near_count": 1, "has_exact": False, "has_near": True},
+                "risk_flags": ["near_only", "must_explain_difference"],
+                "allowed_actions": ["explain_comparison_criteria", "show_near_with_difference"],
+                "recommended_action": "explain_comparison_criteria",
+            },
+        ),
+        (
+            "Как выглядит обычный первый поиск",
+            {
+                "stage": "first_list",
+                "search_summary": {"facts_count": 3, "near_count": 0, "has_exact": True, "has_near": False},
+                "allowed_actions": ["show_exact_options", "ask_one_clarification"],
+                "recommended_action": "show_exact_options",
+            },
+        ),
+    ]
+    example_details = "".join(
+        f"<details><summary>{html.escape(title)}</summary><pre>{html.escape(json.dumps(payload, ensure_ascii=False, indent=2))}</pre></details>"
+        for title, payload in example_cards
+    )
+    body = f"""
+<header>
+  <h1>Новая архитектура Ирины</h1>
+  <p>Понятное ТЗ для человека, который не в проекте: сначала короткое объяснение, потом схема, потом раскрывающиеся блоки и примеры.</p>
+</header>
+<main>
+  <nav><a href="/index.html">← Все сервисы</a><a href="index.html">NMBOT overview</a><a href="map.html">Блок‑схема</a><a href="index.html#history">История</a></nav>
+  <section class="card">
+    <h2>Коротко по-человечески</h2>
+    <p>Главная идея: Ирина не должна сама разбирать сырой MCP/search и помнить все запреты в голове. Между данными и ответом стоит отдельный слой <strong>Decision Context Builder</strong>, который готовит короткую безопасную карточку ситуации: что хочет клиент, что найдено, что можно говорить и что делать дальше.</p>
+    <div class="grid">{summary_cards}</div>
+  </section>
+  <section class="card">
+    <h2>Как читать схему</h2>
+    <div class="flow">
+      <div class="node">User message</div><div class="arrow">→</div>
+      <div class="node">Planner LLM</div><div class="arrow">→</div>
+      <div class="node">MCP/search</div><div class="arrow">→</div>
+      <div class="node">Normalizer</div><div class="arrow">→</div>
+      <div class="node">Decision Context</div><div class="arrow">→</div>
+      <div class="node">Action Resolver</div><div class="arrow">→</div>
+      <div class="node">Presenter</div><div class="arrow">→</div>
+      <div class="node">Validator</div>
+    </div>
+    <p class="muted">Первые блоки думают и готовят данные. Последние блоки решают, можно ли это показывать клиенту и как сказать это по-человечески.</p>
+  </section>
+  <section class="card">
+    <h2>Что делает каждый блок</h2>
+    {block_details}
+  </section>
+  <section class="card">
+    <h2>Типовые сценарии</h2>
+    {scenario_details}
+  </section>
+  <section class="card">
+    <h2>Примеры безопасной карточки</h2>
+    {example_details}
+  </section>
+  <section class="card">
+    <h2>Полный текст ТЗ</h2>
+    <details>
+      <summary>Открыть полный технический документ</summary>
+      <pre>{html.escape(text)}</pre>
+    </details>
+  </section>
+</main>
+"""
+    return shell("NMBOT — новая архитектура решений", body)
+
+
 def main() -> None:
     OUT.mkdir(exist_ok=True)
     nmbot_dir = OUT / NMBOT_SLUG
     nmbot_dir.mkdir(parents=True, exist_ok=True)
     (OUT / "index.html").write_text(build_root_index(), encoding="utf-8")
     (nmbot_dir / "index.html").write_text(build_nmbot_index(), encoding="utf-8")
+    (nmbot_dir / "architecture-v2.html").write_text(build_architecture_v2_page(), encoding="utf-8")
     (nmbot_dir / "map.html").write_text(read("docs/BOT_SCENARIO_MAP.html"), encoding="utf-8")
     print(f"built {OUT / 'index.html'}")
     print(f"built {nmbot_dir / 'index.html'}")
+    print(f"built {nmbot_dir / 'architecture-v2.html'}")
     print(f"built {nmbot_dir / 'map.html'}")
 
 

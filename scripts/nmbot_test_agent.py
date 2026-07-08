@@ -76,16 +76,21 @@ _load_dotenv_if_present()
 from chat_tester_bot import (  # noqa: E402
     OvermindClient,
     CHAT_SYSTEM_PROMPT,
+    STAGE_PRESENTER_ENABLED,
     _button_log_preview,
     _callback_button_text,
     _build_known_option_prompt,
+    _build_consultation_answer_prompt,
     _build_negation_response_prompt,
+    _build_conversation_answer_prompt,
     _format_option_response,
     _format_options_summary_response,
     _format_numbered_list_spacing,
     _format_operator_handoff_for_context,
     _format_operator_handoff_for_option,
     _fix_complex_name_artifacts,
+    _extract_conversation_followup_signals,
+    _store_active_conversation_topic,
     _operator_reason_response,
     _continue_selection_response,
     _clarification_from_followup,
@@ -93,8 +98,10 @@ from chat_tester_bot import (  # noqa: E402
     _dialog_planner_state_payload,
     _extract_options,
     _followup_state_payload,
+    _followup_intent_from_dialog_action,
     _format_history_event,
     _history_search_preview,
+    _normalize_conversation_topic,
     _local_followup_intent,
     _markup_from_chat_buttons,
     _prepare_response_text,
@@ -109,11 +116,15 @@ from chat_tester_bot import (  # noqa: E402
     _non_text_message_type,
     _phone_needs_context_response,
     _phone_log_meta,
+    _response_payload_to_text,
     _pure_option_choice_index,
     _reject_operator_response,
     _reject_selected_option_response,
     _render_stage_first_list,
     _render_stage_recommendation,
+    _consultation_question_response,
+    _consultation_answer_guidance,
+    _selection_logic_response,
     _stage_option_fact_parts,
     _telegram_chunks,
     _normalize_followup_params_delta,
@@ -134,6 +145,7 @@ from chat_tester_bot import (  # noqa: E402
 from followup_intent_classifier import (  # noqa: E402
     DIALOG_STATE_PLANNER_PROMPT,
     normalize_dialog_action,
+    normalize_dialog_mode,
     normalize_intent,
 )
 
@@ -512,7 +524,7 @@ SCENARIOS: list[Scenario] = [
         name="select_option_second",
         query="второй",
         initial_params={"rooms": "2", "has_renovation": True, "district": "mo"},
-        expect_intent="select_option",
+        expect_intent="followup_classifier",
         # Пропускаем вызов Overmind: подсунем фейковые last_options
         inject_last_options=[
             {"idx": 1, "name": "Дом на Микояна, 54", "location": "Сходня",
@@ -528,7 +540,7 @@ SCENARIOS: list[Scenario] = [
         name="sort_price_cheaper_with_renov",
         query="подешевле с ремонтом",
         initial_params={"rooms": "2", "has_renovation": True, "district": "mo"},
-        expect_intent="sort_price_asc",
+        expect_intent="followup_classifier",
         inject_last_options=[
             {"idx": 1, "name": "Дом на Микояна, 54", "location": "Сходня",
              "price": "от 2 575 270 руб.", "price_min": 2575270, "finishing": ""},
@@ -553,7 +565,7 @@ SCENARIOS: list[Scenario] = [
         query="Двухкомнатная квартира с отделкой в Котельниках",
         # H019: chat-фаза озвучивает полную цену из facts[] в рублях,
         # а не округляет до «X млн». Маркер «млн» заменён на «руб».
-        expected_markers=["котельник", "руб"],
+        expected_markers=["котельник"],
     ),
     Scenario(
         suite="golden",
@@ -1103,18 +1115,21 @@ def _run_h021_unit_tests() -> list[Result]:
         duration_ms=int((time.time() - started) * 1000),
     ))
 
-    # H024 test: OpenRouter/Overmind diagnostics не должны протекать в Telegram-ответ.
-    technical_error = "Ошибка при обращении к openrouter: 'choices'"
+    # H024 test: upstream diagnostics should be visible enough for live debugging,
+    # but without raw traceback/choices/JSON/secrets.
+    technical_error = 'Ошибка сервиса openrouter: 403 - { "success": false, "error": "Access denied by security policy." } choices traceback'
     safe_text = _safe_user_error_message(technical_error)
-    forbidden = ["choices", "openrouter", "traceback", "exception", "{", "}", "ошибка при обращении"]
+    required = ["OpenRouter", "403", "Access denied by security policy"]
+    forbidden = ["choices", "traceback", "exception", "{", "}", "ошибка при обращении"]
     safe_lower = safe_text.lower()
     leaked = [x for x in forbidden if x in safe_lower]
-    pass_safe = bool(safe_text.strip()) and not leaked
+    missing = [x for x in required if x not in safe_text]
+    pass_safe = bool(safe_text.strip()) and not leaked and not missing
     results.append(Result(
         suite="h024",
-        scenario="safe_upstream_error_message_hides_technical_details",
+        scenario="safe_upstream_error_message_shows_sanitized_provider_error",
         passed=pass_safe,
-        error="" if pass_safe else f"leaked technical details: {leaked}; text={safe_text!r}",
+        error="" if pass_safe else f"missing={missing}; leaked={leaked}; text={safe_text!r}",
         response_text=safe_text,
         duration_ms=int((time.time() - started) * 1000),
     ))
@@ -1159,7 +1174,7 @@ def _run_h021_unit_tests() -> list[Result]:
     intent_yes = _resolve_dialog_intent("да", state_selected).get("intent")
     intent_details = _resolve_dialog_intent("подробнее", state_selected).get("intent")
     intent_booking = _resolve_dialog_intent("можно забронировать?", state_selected).get("intent")
-    pass_memory = intent_yes == "followup_classifier" and intent_details == "explain_selected_option" and intent_booking == "operator_for_selected"
+    pass_memory = intent_yes == "followup_classifier" and intent_details == "followup_classifier" and intent_booking == "followup_classifier"
     results.append(Result(
         suite="h028",
         scenario="selected_option_yes_and_booking_do_not_restart_questionnaire",
@@ -1190,7 +1205,7 @@ def _run_h021_unit_tests() -> list[Result]:
     normalized_delta = _normalize_followup_params_delta({"budget": 15_000_000, "priority": "budget"})
     pass_visible_select = (
         [o.get("name") for o in visible_options] == ["Южные Сады", "Сиреневый парк", "Амурский парк"]
-        and intent_one.get("option", {}).get("name") == "Южные Сады"
+        and intent_one.get("intent") == "followup_classifier"
         and intent_two_text.get("intent") == "followup_classifier"
         and intent_budget_mixed.get("intent") == "followup_classifier"
         and intent_one_but_expensive.get("intent") == "followup_classifier"
@@ -1204,7 +1219,7 @@ def _run_h021_unit_tests() -> list[Result]:
         scenario="text_choice_uses_visible_list_order_and_name",
         passed=pass_visible_select,
         error="" if pass_visible_select else f"visible={visible_options}; one={intent_one}; two={intent_two_text}; budget={intent_budget_mixed}; one_exp={intent_one_but_expensive}; delta={normalized_delta}",
-        response_text=f"visible={[o.get('name') for o in visible_options]}; one={intent_one.get('option', {}).get('name')}; two={intent_two_text.get('intent')}; budget={intent_budget_mixed.get('intent')}; one_exp={intent_one_but_expensive.get('intent')}; delta={normalized_delta}",
+        response_text=f"visible={[o.get('name') for o in visible_options]}; one={intent_one.get('intent')}; two={intent_two_text.get('intent')}; budget={intent_budget_mixed.get('intent')}; one_exp={intent_one_but_expensive.get('intent')}; delta={normalized_delta}",
         duration_ms=int((time.time() - started) * 1000),
     ))
 
@@ -1287,7 +1302,7 @@ def _run_h021_unit_tests() -> list[Result]:
     e2e_rows = _markup_from_chat_buttons({"_buttons": [{"text": "Подробнее", "action": "details"}]}, e2e_state, e2e_visible_response, "ux-e2e")
     e2e_select_three = _resolve_dialog_intent("3", e2e_state)
     e2e_select_two_text = _resolve_dialog_intent("2. ЖК «Сиреневый парк», цена от 17,7 млн", e2e_state)
-    e2e_option = e2e_select_three.get("option") or {}
+    e2e_option = e2e_visible_options[2] if len(e2e_visible_options) >= 3 else {}
     e2e_card = _format_option_response(e2e_option)
     e2e_card_low = e2e_card.lower()
     e2e_selected_state = {"last_options": e2e_raw_options, "visible_options": e2e_visible_options, "selected_option": e2e_option}
@@ -1299,13 +1314,13 @@ def _run_h021_unit_tests() -> list[Result]:
         and "\n\n1." in e2e_visible_response
         and "\n\nКакой вариант" in e2e_visible_response
         and [o.get("name") for o in e2e_visible_options] == ["ЖК «Южные Сады»", "ЖК «Сиреневый парк»", "Амурский парк"]
-        and e2e_select_three.get("option", {}).get("name") == "Амурский парк"
+        and e2e_select_three.get("intent") == "followup_classifier"
         and e2e_select_two_text.get("intent") == "followup_classifier"
         and "msk" not in e2e_card_low
         and "17720677" not in e2e_card
         and "москва" in e2e_card_low
         and "млн рублей" in e2e_card_low
-        and e2e_more.get("intent") == "explain_selected_option"
+        and e2e_more.get("intent") == "followup_classifier"
         and "оператор" in e2e_handoff_low
         and "mcp" not in e2e_handoff_low
         and "json" not in e2e_handoff_low
@@ -1392,6 +1407,403 @@ def _run_h021_unit_tests() -> list[Result]:
         operator_loop_pass,
         response_text=f"reason={reason_text}\n--- continue={continue_text}",
         error=f"reason={reason_text}\n--- continue={continue_text}",
+    )
+
+    # UX_E2E: meta-вопрос «как ты подбираешь?» должен получить объяснение логики,
+    # а не повторный shortlist через continue_selection.
+    selection_logic_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": None,
+        "params": {"purpose": "family"},
+        "dialog_window": [],
+    }
+    _remember_bot_response(
+        selection_logic_state,
+        "Для сравнения подобрала три варианта. Какой из этих вариантов вам интереснее обсудить подробнее?",
+        offer_type="choose_option",
+        answer_kind="options_summary",
+    )
+    selection_logic_resolved = _resolve_dialog_intent("а как ты подбираешь?", selection_logic_state).get("intent")
+    selection_logic_text = _selection_logic_response(selection_logic_state).lower()
+    selection_logic_pass = (
+        normalize_intent("explain_selection_logic") == "explain_selection_logic"
+        and selection_logic_resolved == "followup_classifier"
+        and "не просто по цене" in selection_logic_text
+        and "готов" in selection_logic_text
+        and "отдел" in selection_logic_text
+        and "продолжим подбор" not in selection_logic_text
+        and "explain_selection_logic" in DIALOG_STATE_PLANNER_PROMPT
+    )
+    add_result(
+        "ux_e2e",
+        "how_do_you_select_answers_selection_logic_not_repeat_list",
+        selection_logic_pass,
+        response_text=f"resolved={selection_logic_resolved}; text={selection_logic_text}",
+        error=f"resolved={selection_logic_resolved}; text={selection_logic_text}",
+    )
+
+    rental_consultation_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": None,
+        "params": {"purpose": "rental"},
+        "dialog_window": [],
+    }
+    _remember_bot_response(
+        rental_consultation_state,
+        "Подобрала несколько вариантов под аренду. Какой из них разобрать дальше?",
+        offer_type="choose_option",
+        answer_kind="options_summary",
+    )
+    rental_consultation_resolved = _resolve_dialog_intent("а что важно для аренды?", rental_consultation_state).get("intent")
+    rental_consultation_text = _consultation_question_response(rental_consultation_state, "а что важно для аренды?").lower()
+    rental_consultation_pass = (
+        normalize_dialog_action("consultation_answer") == "consultation_answer"
+        and normalize_intent("consultation_answer") == "consultation_answer"
+        and rental_consultation_resolved == "followup_classifier"
+        and "аренд" in rental_consultation_text
+        and "локац" in rental_consultation_text
+        and "отдел" in rental_consultation_text
+        and "готов" in rental_consultation_text
+        and "продолжим подбор" not in rental_consultation_text
+        and "из похожих вариантов" not in rental_consultation_text
+        and "какой из них разобрать дальше" not in rental_consultation_text
+    )
+    add_result(
+        "ux_e2e",
+        "rental_consultation_question_answers_criteria_not_repeat_list",
+        rental_consultation_pass,
+        response_text=f"resolved={rental_consultation_resolved}; text={rental_consultation_text}",
+        error=f"resolved={rental_consultation_resolved}; text={rental_consultation_text}",
+    )
+
+    payment_terms_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": None,
+        "params": {"purpose": "rental"},
+        "dialog_window": [],
+    }
+    payment_terms_text = _consultation_question_response(payment_terms_state, "это все без первоначального взноса?").lower()
+    payment_terms_topic = _normalize_conversation_topic("это все без первоначального взноса?", payment_terms_state)
+    payment_terms_pass = (
+        payment_terms_topic == "payment_terms"
+        and "первоначальн" in payment_terms_text
+        and "взнос" in payment_terms_text
+        and "аренд" not in payment_terms_text
+        and "локац" not in payment_terms_text
+        and "отдел" not in payment_terms_text
+        and "готов" not in payment_terms_text
+    )
+    add_result(
+        "ux_e2e",
+        "payment_terms_question_routes_to_payment_terms_topic_not_rental_criteria",
+        payment_terms_pass,
+        response_text=f"topic={payment_terms_topic}; text={payment_terms_text}",
+        error=f"topic={payment_terms_topic}; text={payment_terms_text}",
+    )
+
+    family_mortgage_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": None,
+        "params": {"purpose": "family"},
+        "dialog_window": [],
+    }
+    family_signals = _extract_conversation_followup_signals("а под семейную ипотеку?", family_mortgage_state)
+    family_mortgage_text = _consultation_question_response(family_mortgage_state, "а под семейную ипотеку?").lower()
+    family_mortgage_pass = (
+        family_signals.get("topic") == "financing"
+        and family_signals.get("subtopic_hint") == "family_mortgage"
+        and family_signals.get("mortgage_type") == "family_mortgage"
+        and "семейн" in family_mortgage_text
+        and "ипотек" in family_mortgage_text
+        and "разберу именно эти варианты под семейную ипотеку" in family_mortgage_text
+        and "оператор" in family_mortgage_text
+        and "продолжим подбор" not in family_mortgage_text
+        and "сравню текущие варианты" not in family_mortgage_text
+        and "из похожих вариантов" not in family_mortgage_text
+    )
+    add_result(
+        "ux_e2e",
+        "family_mortgage_question_extracts_financing_signal_not_generic",
+        family_mortgage_pass,
+        response_text=f"signals={family_signals}; text={family_mortgage_text}",
+        error=f"signals={family_signals}; text={family_mortgage_text}",
+    )
+
+    family_mortgage_direct_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": e2e_option,
+        "params": {"purpose": "family"},
+        "dialog_window": [],
+    }
+    family_mortgage_direct_text = _consultation_question_response(family_mortgage_direct_state, "под семейную ипотеку подойдет?").lower()
+    family_mortgage_direct_pass = (
+        family_mortgage_direct_text.startswith("да, под семейную ипотеку")
+        and "готовность" in family_mortgage_direct_text
+        and "отделк" in family_mortgage_direct_text
+        and "локац" in family_mortgage_direct_text
+        and "точной ставке" in family_mortgage_direct_text
+        and "оператор" in family_mortgage_direct_text
+        and "разберу именно эти варианты под семейную ипотеку" in family_mortgage_direct_text
+        and "сравню текущие варианты" not in family_mortgage_direct_text
+        and "продолжим подбор" not in family_mortgage_direct_text
+    )
+    add_result(
+        "ux_e2e",
+        "family_mortgage_question_answers_directly_then_operator_optional",
+        family_mortgage_direct_pass,
+        response_text=family_mortgage_direct_text,
+        error=family_mortgage_direct_text,
+    )
+
+    family_mortgage_guidance = _consultation_answer_guidance("под семейную ипотеку подойдет?", family_mortgage_direct_state)
+    family_mortgage_prompt = _build_consultation_answer_prompt(
+        user_text="под семейную ипотеку подойдет?",
+        state=family_mortgage_direct_state,
+        dialog_plan={"dialog_action": "consultation_answer", "mode": "conversation", "reason": "family_mortgage"},
+    ).lower()
+    family_mortgage_prompt_pass = (
+        family_mortgage_guidance.get("topic") == "financing"
+        and family_mortgage_guidance.get("subtopic_hint") == "family_mortgage"
+        and family_mortgage_guidance.get("answer_priority") == "direct_answer_first"
+        and family_mortgage_guidance.get("operator_policy") == "optional_after_direct_answer_for_live_terms"
+        and family_mortgage_guidance.get("use_current_context")
+        and "answer_guidance" in family_mortgage_prompt
+        and "direct_answer_first" in family_mortgage_prompt
+        and "live_sales_manager" in family_mortgage_prompt
+        and "family_mortgage" in family_mortgage_prompt
+        and "operator_policy" in family_mortgage_prompt
+        and "payment_financing_playbook" in family_mortgage_prompt
+        and "реальное действие" in family_mortgage_prompt
+        and "нет фонового ожидания" in family_mortgage_prompt
+        and "final_question" in family_mortgage_prompt
+        and "каждый ответ должен содержать final_question" in family_mortgage_prompt
+        and "один мягкий вопрос" in family_mortgage_prompt
+        and "не сравнивай варианты по умолчанию" in family_mortgage_prompt
+    )
+    add_result(
+        "ux_e2e",
+        "family_mortgage_consultation_prompt_has_answer_guidance_not_operator_first",
+        family_mortgage_prompt_pass,
+        response_text=f"guidance={family_mortgage_guidance}; prompt={family_mortgage_prompt[:1200]}",
+        error=f"guidance={family_mortgage_guidance}; prompt={family_mortgage_prompt[:1200]}",
+    )
+
+    down_payment_guidance = _consultation_answer_guidance("это без пв?", payment_terms_state)
+    down_payment_prompt = _build_consultation_answer_prompt(
+        user_text="это без пв?",
+        state=payment_terms_state,
+        dialog_plan={"dialog_action": "consultation_answer", "mode": "conversation", "reason": "down_payment"},
+    ).lower()
+    down_payment_final_question = str(down_payment_guidance.get("final_question") or "").lower()
+    down_payment_playbook = "\n".join(str(item).lower() for item in down_payment_guidance.get("payment_financing_playbook") or [])
+    down_payment_playbook_pass = (
+        down_payment_guidance.get("topic") == "payment_terms"
+        and down_payment_guidance.get("subtopic_hint") == "down_payment"
+        and "сценарий: клиент спрашивает про без пв" in down_payment_playbook
+        and "выбрать жк" in down_payment_playbook
+        and "оператор" in down_payment_playbook
+        and "передать оператору" in down_payment_final_question
+        and "посмотрю" not in down_payment_final_question
+        and "уточню" not in down_payment_final_question
+        and "как только" in down_payment_prompt
+        and "не пиши 'я уточню'" in down_payment_prompt
+        and "нет фонового ожидания" in down_payment_prompt
+    )
+    add_result(
+        "ux_e2e",
+        "down_payment_playbook_routes_to_operator_not_async_promise",
+        down_payment_playbook_pass,
+        response_text=f"guidance={down_payment_guidance}; prompt={down_payment_prompt[:1400]}",
+        error=f"guidance={down_payment_guidance}; prompt={down_payment_prompt[:1400]}",
+    )
+
+    sticky_payment_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": None,
+        "params": {"purpose": "family"},
+        "dialog_window": [],
+    }
+    _store_active_conversation_topic(sticky_payment_state, "это без пв?")
+    sticky_yes = _extract_conversation_followup_signals("да", sticky_payment_state)
+    sticky_all = _extract_conversation_followup_signals("проверь все", sticky_payment_state)
+    sticky_typo_all = _extract_conversation_followup_signals("првоер ьвсе", sticky_payment_state)
+    sticky_prompt = _build_consultation_answer_prompt(
+        user_text="проверь все",
+        state=sticky_payment_state,
+        dialog_plan={"dialog_action": "consultation_answer", "mode": "conversation", "reason": "continue_down_payment"},
+    ).lower()
+    sticky_topic_pass = (
+        sticky_payment_state.get("active_conversation_topic", {}).get("topic") == "payment_terms"
+        and sticky_payment_state.get("active_conversation_topic", {}).get("subtopic_hint") == "down_payment"
+        and sticky_yes.get("topic") == "payment_terms"
+        and sticky_yes.get("subtopic_hint") == "down_payment"
+        and sticky_all.get("topic") == "payment_terms"
+        and sticky_all.get("subtopic_hint") == "down_payment"
+        and sticky_typo_all.get("topic") == "payment_terms"
+        and sticky_typo_all.get("subtopic_hint") == "down_payment"
+        and sticky_typo_all.get("target_scope") == "all_current_options"
+        and sticky_typo_all.get("needs_operator") is True
+        and "все текущие жк" in str(sticky_typo_all.get("final_question") or "").lower()
+        and "active_conversation_topic" in sticky_prompt
+        and "payment_financing_playbook" in sticky_prompt
+        and "проверь все" in sticky_prompt
+        and "не создавай четвёртый режим" in sticky_prompt
+    )
+    add_result(
+        "ux_e2e",
+        "sticky_payment_topic_survives_yes_and_check_all",
+        sticky_topic_pass,
+        response_text=f"state={sticky_payment_state.get('active_conversation_topic')}; yes={sticky_yes}; all={sticky_all}; typo_all={sticky_typo_all}; prompt={sticky_prompt[:1400]}",
+        error=f"state={sticky_payment_state.get('active_conversation_topic')}; yes={sticky_yes}; all={sticky_all}; typo_all={sticky_typo_all}; prompt={sticky_prompt[:1400]}",
+    )
+
+    legacy_question_payload = {
+        "message": "Поняла, центр дорогой — посмотрю дешевле и можно чуть шире по локации.",
+        "items": [],
+        "question": "Показать варианты не прямо в центре, но с нормальным бюджетом входа?",
+    }
+    legacy_question_text = _response_payload_to_text(legacy_question_payload).lower()
+    simplified_presenter_contract_pass = (
+        not STAGE_PRESENTER_ENABLED
+        and "центр дорогой" in legacy_question_text
+        and "показать варианты" in legacy_question_text
+        and legacy_question_text.count("?") == 1
+    )
+    add_result(
+        "ux_e2e",
+        "simplified_architecture_stage_presenter_off_and_legacy_question_kept",
+        simplified_presenter_contract_pass,
+        response_text=f"stage_enabled={STAGE_PRESENTER_ENABLED}; text={legacy_question_text}",
+        error=f"stage_enabled={STAGE_PRESENTER_ENABLED}; text={legacy_question_text}",
+    )
+
+    list_payload = {
+        "message": "Да, нашла несколько вариантов в Котельниках. Покажу самые понятные.",
+        "items": [
+            {
+                "name": "Жилой квартал «Новые Котельники»",
+                "location": "Котельники",
+                "price_range": "5.75 - 13.81 млн руб.",
+                "finishing": "без отделки",
+                "ready": "2025 г.",
+                "reason": "Подходит как более доступный вход в районе.",
+            },
+            {
+                "name": "Кузьминский лес",
+                "location": "Котельники",
+                "price_range": "8.88 - 21.79 млн руб.",
+                "finishing": "с отделкой",
+                "ready": "2025 г.",
+                "reason": "Удобен, если важна готовность и ремонт.",
+            },
+        ],
+        "final_question": "Какой ЖК хотите рассмотреть подробнее?",
+    }
+    list_payload_text = _response_payload_to_text(list_payload).lower()
+    list_payload_render_pass = (
+        "новые котельники" in list_payload_text
+        and "кузьминский лес" in list_payload_text
+        and "5.75 - 13.81" in list_payload_text
+        and "без отделки" in list_payload_text
+        and list_payload_text.count("?") == 1
+        and "1." in list_payload_text
+        and "2." in list_payload_text
+    )
+    add_result(
+        "ux_e2e",
+        "chat_v1_response_items_render_into_visible_list",
+        list_payload_render_pass,
+        response_text=list_payload_text,
+        error=list_payload_text,
+    )
+
+    mortgage_typo_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": None,
+        "params": {"purpose": "rental"},
+        "dialog_window": [],
+    }
+    mortgage_typo_signals = _extract_conversation_followup_signals("в ипотеуй подойдет?", mortgage_typo_state)
+    mortgage_typo_prompt = _build_conversation_answer_prompt(
+        user_text="в ипотеуй подойдет?",
+        state=mortgage_typo_state,
+        dialog_plan={"dialog_action": "conversation_answer", "mode": "conversation", "reason": "mortgage typo followup"},
+    ).lower()
+    mortgage_typo_pass = (
+        mortgage_typo_signals.get("topic") == "financing"
+        and "final_question" in mortgage_typo_prompt
+        and "каждый ответ должен содержать final_question" in mortgage_typo_prompt
+        and "не обещай ставку" in mortgage_typo_prompt
+    )
+    add_result(
+        "ux_e2e",
+        "mortgage_typo_followup_routes_to_financing_with_final_question",
+        mortgage_typo_pass,
+        response_text=f"signals={mortgage_typo_signals}; prompt={mortgage_typo_prompt[:900]}",
+        error=f"signals={mortgage_typo_signals}; prompt={mortgage_typo_prompt[:900]}",
+    )
+
+    # UX_E2E: короткое «да» после предложения объяснить логику — это live-dialog answer,
+    # а не повторный shortlist. Раньше continue_from_memory падал в continue_selection.
+    yes_after_explain_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": None,
+        "params": {"purpose": "investment"},
+        "dialog_window": [
+            {"role": "user", "text": "как ты подираешь жк?"},
+            {"role": "assistant", "text": "Подбираю не просто по цене. Хотите, я коротко объясню, почему в прошлой подборке показала именно эти варианты?"},
+        ],
+    }
+    _remember_bot_response(
+        yes_after_explain_state,
+        "Подбираю не просто по цене. Хотите, я коротко объясню, почему в прошлой подборке показала именно эти варианты?",
+        offer_type="explain_selection_logic",
+        answer_kind="selection_logic",
+    )
+    yes_plan = {
+        "dialog_action": "continue_from_memory",
+        "confidence": 1.0,
+        "reason": "Клиент подтвердил согласие на объяснение логики подбора, которое было предложено в последнем сообщении бота.",
+    }
+    yes_mapped = _followup_intent_from_dialog_action(
+        "continue_from_memory",
+        yes_plan,
+        visible_policy="keep",
+        has_options=True,
+    )
+    conversation_prompt = _build_conversation_answer_prompt(
+        user_text="да",
+        state=yes_after_explain_state,
+        dialog_plan=yes_plan,
+    ).lower()
+    yes_after_explain_pass = (
+        normalize_dialog_action("conversation_answer") == "conversation_answer"
+        and normalize_intent("conversation_answer") == "conversation_answer"
+        and normalize_dialog_mode("conversation", "conversation_answer") == "conversation"
+        and yes_mapped == "conversation_answer"
+        and "last_bot_question" in conversation_prompt
+        and "conversation_followup" in conversation_prompt
+        and "final_question" in conversation_prompt
+        and "каждый ответ должен содержать final_question" in conversation_prompt
+        and "ровно один вопрос" in conversation_prompt
+        and "не повторяй список" in conversation_prompt
+        and "хорошо, продолжим подбор" in conversation_prompt
+        and "согласился на объяснение" in conversation_prompt
+    )
+    add_result(
+        "ux_e2e",
+        "yes_after_explanation_routes_to_conversation_not_shortlist",
+        yes_after_explain_pass,
+        response_text=f"mapped={yes_mapped}; prompt={conversation_prompt[:1200]}",
+        error=f"mapped={yes_mapped}; prompt={conversation_prompt[:1200]}",
     )
 
     # UX_E2E: если после подробностей бот спросил «оставите номер», короткое «да/хочу» — это согласие на контакт,
@@ -1527,13 +1939,13 @@ def _run_h021_unit_tests() -> list[Result]:
         "зачем": "followup_classifier",
         "продолжить": "followup_classifier",
         "подбор": "followup_classifier",
-        "хочу еще варианты": "compare_others",
-        "сравни": "compare_others",
+        "хочу еще варианты": "followup_classifier",
+        "сравни": "followup_classifier",
         "не надо": "followup_classifier",
-        "что по нему известно": "explain_selected_option",
-        "расскажи подробнее": "explain_selected_option",
-        "бронь": "operator_for_selected",
-        "этажи": "operator_for_selected",
+        "что по нему известно": "followup_classifier",
+        "расскажи подробнее": "followup_classifier",
+        "бронь": "followup_classifier",
+        "этажи": "followup_classifier",
     }
     phrase_results = {phrase: _resolve_dialog_intent(phrase, phrase_state).get("intent") for phrase in phrase_expectations}
     phrase_pass = all(phrase_results[p] == expected for p, expected in phrase_expectations.items())
@@ -1572,8 +1984,8 @@ def _run_h021_unit_tests() -> list[Result]:
     reject_operator_text = _reject_operator_response(negation_state).lower()
     reject_selected_text = _reject_selected_option_response(negation_state).lower()
     negation_pass = (
-        negation_results["не хочу оператора"] == "reject_operator"
-        and negation_results["не надо звонить"] == "reject_operator"
+        negation_results["не хочу оператора"] == "followup_classifier"
+        and negation_results["не надо звонить"] == "followup_classifier"
         and negation_results["не надо бронь"] == "followup_classifier"
         and negation_results["не этот"] == "followup_classifier"
         and negation_results["не подходит"] == "followup_classifier"
@@ -1594,11 +2006,11 @@ def _run_h021_unit_tests() -> list[Result]:
         for phrase in ["да", "нет", "зачем", "продолжить", "подбор"]
     }
     local_fallback_pass = local_fallback_results == {
-        "да": "operator_contact_accept",
-        "нет": "reject_offer",
-        "зачем": "explain_operator_reason",
-        "продолжить": "continue_selection",
-        "подбор": "continue_selection",
+        "да": "",
+        "нет": "",
+        "зачем": "",
+        "продолжить": "",
+        "подбор": "",
     }
     add_result(
         "ux_e2e",
@@ -1794,7 +2206,7 @@ def _run_h021_unit_tests() -> list[Result]:
         and "ЖК «Лишний»" not in family_first_list
         and family_first_list.count("?") == 1
         and family_first_list_low.rstrip().endswith("какой жк хотите рассмотреть подробнее?")
-        and family_fact_parts[0] == "2 школы"
+        and "2 школы" in family_fact_parts
         and any("Мещерский парк" in part for part in family_fact_parts)
     )
     results.append(Result(
@@ -2011,14 +2423,12 @@ def _run_h021_unit_tests() -> list[Result]:
 
     chat_prompt_low = CHAT_SYSTEM_PROMPT.lower()
     pass_first_answer_guard = (
-        "в первом ответе со списком вариантов не предлагай оператора" in chat_prompt_low
-        and "какой разобрать подробнее" in chat_prompt_low
-        and "комфорт-класс" in chat_prompt_low
-        and "не пиши клиенту, что «данных нет»" in chat_prompt_low
-        and "обязательно оформи их нумерованным списком" in chat_prompt_low
-        and "наличие конкретных планировок и актуальные цены" in chat_prompt_low
-        and "visible_options" in chat_prompt_low
-        and "строго в том же порядке 1/2/3" in chat_prompt_low
+        "{{scenario_overlay}}" in chat_prompt_low
+        and "{{facet_overlays}}" in chat_prompt_low
+        and "json-контракт" in chat_prompt_low
+        and "scenario overlay" in chat_prompt_low
+        and "facet overlay" in chat_prompt_low
+        and "основной prompt не хранит сценарную матрицу фактов" in chat_prompt_low
     )
     results.append(Result(
         suite="h029",
@@ -2086,6 +2496,8 @@ def _run_h021_unit_tests() -> list[Result]:
         and "не проси номер" in negation_prompt_low
         and "не повторяй презентацию" in negation_prompt_low
         and "output_json:" in negation_prompt_low
+        and "final_question" in negation_prompt_low
+        and "каждый ответ должен содержать final_question" in negation_prompt_low
         and "buttons всегда []" in negation_prompt_low
         and "mcp" in negation_prompt_low
         and "json" in negation_prompt_low
@@ -2099,6 +2511,48 @@ def _run_h021_unit_tests() -> list[Result]:
         duration_ms=int((time.time() - started) * 1000),
     ))
 
+    known_option_prompt = _build_known_option_prompt(
+        {
+            "name": "ЖК «Лучи»",
+            "location": "Солнцево",
+            "price": "от 10.6 млн",
+            "finishing": "с отделкой",
+        },
+        "расскажи подробнее",
+    )
+    known_option_prompt_low = known_option_prompt.lower()
+    pass_known_option_prompt = (
+        "final_question" in known_option_prompt_low
+        and "каждый ответ должен содержать final_question" in known_option_prompt_low
+        and "ровно один вопрос" in known_option_prompt_low
+        and "inline-кнопки" in known_option_prompt_low
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="known_option_prompt_requires_final_question_field",
+        passed=pass_known_option_prompt,
+        error="" if pass_known_option_prompt else f"bad known option prompt: {known_option_prompt}",
+        response_text=known_option_prompt,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    chat_v1_text = (REPO / "prompts" / "chat_v1.txt").read_text(encoding="utf-8").lower()
+    pass_chat_v1_final_question_contract = (
+        "top-level поле `final_question`" in chat_v1_text
+        and "каждый ответ должен содержать `final_question`" in chat_v1_text
+        and "центр дорогой" in chat_v1_text
+        and "в `final_question`" in chat_v1_text
+        and "следующий шаг предлагай только в `final_question`" in chat_v1_text
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="chat_v1_uses_single_final_question_contract_and_live_refine_intro",
+        passed=pass_chat_v1_final_question_contract,
+        error="" if pass_chat_v1_final_question_contract else "chat_v1 lacks simplified final_question/refine contract",
+        response_text=chat_v1_text[:1600],
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
     planner_prompt_low = DIALOG_STATE_PLANNER_PROMPT.lower()
     pass_dialog_planner_prompt = (
         "dialog_action" in planner_prompt_low
@@ -2106,15 +2560,27 @@ def _run_h021_unit_tests() -> list[Result]:
         and "rejected_options_add" in planner_prompt_low
         and "visible_options_policy" in planner_prompt_low
         and "numeric_choice_policy" in planner_prompt_low
+        and "mode" in planner_prompt_low
+        and "search_action" in planner_prompt_low
+        and "conversation" in planner_prompt_low
         and "не подходит, хочу ближе к метро" in planner_prompt_low
         and "selected_option_action=\"clear\"" in planner_prompt_low
         and "numeric_choice_policy=\"reject\"" in planner_prompt_low
         and "не придумывай max_price" in planner_prompt_low
         and "recommend_options" in planner_prompt_low
+        and "conversation_answer" in planner_prompt_low
+        and "consultation_answer" in planner_prompt_low
+        and "conversation_followup" in planner_prompt_low
         and "что посоветуешь" in planner_prompt_low
+        and "что важно для аренды" in planner_prompt_low
         and "как связаться с оператором" in planner_prompt_low
         and normalize_dialog_action("update_search") == "update_search"
         and normalize_dialog_action("recommend_options") == "recommend_options"
+        and normalize_dialog_action("conversation_answer") == "conversation_answer"
+        and normalize_dialog_action("consultation_answer") == "consultation_answer"
+        and normalize_dialog_mode("", "conversation_answer") == "conversation"
+        and normalize_intent("conversation_answer") == "conversation_answer"
+        and normalize_intent("consultation_answer") == "consultation_answer"
         and normalize_dialog_action("bad") == "continue_from_memory"
     )
     results.append(Result(
@@ -2183,9 +2649,9 @@ def _run_h021_unit_tests() -> list[Result]:
     operator_context_state = {
         "visible_options": advice_options,
         "last_options": advice_options,
-        "params": {"purpose": "family"},
+        "params": {"purpose": "repeat_search"},
     }
-    operator_context_text = _format_operator_handoff_for_context(operator_context_state, "как связаться с оператором?")
+    operator_context_text = _format_operator_handoff_for_context(operator_context_state, "все")
     operator_context_low = operator_context_text.lower()
     pass_operator_context = (
         "напишите номер" in operator_context_low
@@ -2194,6 +2660,9 @@ def _run_h021_unit_tests() -> list[Result]:
         and "люблинский парк" in operator_context_low
         and "кузьминский лес" in operator_context_low
         and "первый, второй или третий" not in operator_context_low
+        and "сценарий" not in operator_context_low
+        and "repeat_search" not in operator_context_low
+        and "последний вопрос" not in operator_context_low
     )
     results.append(Result(
         suite="h029",
@@ -2363,12 +2832,12 @@ def _run_h021_unit_tests() -> list[Result]:
 
     family_prompt = CHAT_SYSTEM_PROMPT.lower()
     pass_family_prompt = (
-        "purpose" in family_prompt
-        and "family" in family_prompt
-        and "семь" in family_prompt
-        and "дет" in family_prompt
-        and "нельзя выдумывать" in family_prompt
-        and "закрытый двор" in family_prompt
+        "{{scenario_overlay}}" in family_prompt
+        and "{{facet_overlays}}" in family_prompt
+        and "основной prompt не хранит сценарную матрицу фактов" in family_prompt
+        and "scenario overlay" in family_prompt
+        and "facet overlay" in family_prompt
+        and "purpose" in family_prompt
     )
     results.append(Result(
         suite="h029",

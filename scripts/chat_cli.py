@@ -26,6 +26,10 @@ from typing import Any
 
 import aiohttp
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 import scene_classifier
 from style_scenes import get_scene_rules
 import text_style_tool
@@ -84,11 +88,501 @@ def _extract_response_text(text: str) -> str:
         e = raw.rfind("}") + 1
         if s >= 0 and e > s:
             data = json.loads(raw[s:e])
-            if isinstance(data, dict) and isinstance(data.get("response"), str):
-                return data["response"]
+            if isinstance(data, dict):
+                response = data.get("response")
+                if isinstance(response, (dict, list)):
+                    return response
+                if isinstance(response, str):
+                    return response
     except json.JSONDecodeError:
         pass
     return raw
+
+
+def _looks_structured_json(text: str) -> bool:
+    raw = text.strip()
+    if not (raw.startswith("{") and raw.endswith("}")):
+        return False
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return False
+    return isinstance(data, dict) and isinstance(data.get("items"), list)
+
+
+def _try_parse_json(text: str) -> dict[str, Any] | list[Any] | None:
+    raw = _strip_markdown(text).strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, (dict, list)) else None
+
+
+def _has_contract_response(text: Any) -> bool:
+    if isinstance(text, dict):
+        return isinstance(text.get("items"), list)
+    if not isinstance(text, str):
+        return False
+    raw = _strip_markdown(text).strip()
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    response = parsed.get("response")
+    return isinstance(response, dict) and isinstance(response.get("items"), list)
+
+
+def _truthy_fact(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return bool(value.strip()) and value.strip().lower() not in {"нет", "false", "0", "none", "null", "nan"}
+    if isinstance(value, (list, tuple, set)):
+        return any(_truthy_fact(item) for item in value)
+    if isinstance(value, dict):
+        return any(_truthy_fact(item) for item in value.values())
+    return True
+
+
+def _scenario_compact_bits(item: dict[str, Any]) -> list[str]:
+    bits: list[str] = []
+    apartment_types = item.get("apartment_types")
+    if _truthy_fact(apartment_types):
+        bits.append("есть компактные форматы")
+    ads = item.get("ads")
+    if _truthy_fact(ads):
+        bits.append("есть объявления для проверки входа")
+    counter = item.get("counter_novos")
+    if _truthy_fact(counter):
+        bits.append("есть активность по объявлениям")
+    egrn = item.get("egrn_top_novos") or item.get("egrn_sales")
+    if _truthy_fact(egrn):
+        bits.append("есть данные сделок ЕГРН")
+    finance = item.get("mortgage_calc") or item.get("mortgage") or item.get("discount") or item.get("payment_by_installments")
+    if _truthy_fact(finance):
+        bits.append("есть финансовые условия в карточке")
+    return bits
+
+
+def _compact_reason(item: dict[str, Any]) -> str:
+    for key in ("why_family", "why_close", "why_rental", "why_investment", "reason"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    bits: list[str] = []
+    bits.extend(_scenario_compact_bits(item))
+    if item.get("finishing"):
+        bits.append(str(item["finishing"]))
+    if item.get("ready") or item.get("delivered"):
+        bits.append(str(item.get("ready") or item.get("delivered")))
+    infra = item.get("family_infrastructure") or item.get("infrastructure")
+    if isinstance(infra, dict):
+        if infra.get("schools") or infra.get("school"):
+            bits.append("есть школы")
+        if infra.get("kindergartens") or infra.get("kindergarten"):
+            bits.append("есть детские сады")
+        if infra.get("parks") or infra.get("park_near"):
+            bits.append("рядом парки")
+        if infra.get("yard_without_cars"):
+            bits.append("двор без машин")
+    return ", ".join(bits[:4]) or "подходит по подтверждённым данным MCP"
+
+
+def _coerce_chat_response_to_json(query: str, search_response: str, draft_response: Any) -> str:
+    parsed = _try_parse_json(search_response)
+    if not isinstance(parsed, dict):
+        message = str(draft_response or "").strip() or "По этому запросу нужно уточнить детали."
+        wrapped = {
+            "response": {"message": message, "items": [], "question": "Какой главный ориентир для подбора?"},
+            "params": {"purpose": "default"},
+            "visible_options": [],
+            "buttons": [],
+        }
+        return json.dumps(wrapped, ensure_ascii=False)
+
+    facts = parsed.get("facts") if isinstance(parsed.get("facts"), list) else []
+    near = parsed.get("near") if isinstance(parsed.get("near"), list) else []
+    params = parsed.get("params") if isinstance(parsed.get("params"), dict) else {}
+    request = parsed.get("mcp_request") if isinstance(parsed.get("mcp_request"), dict) else {}
+    purpose = str(request.get("purpose") or params.get("purpose") or "search")
+    source_items = [item for item in (facts + near) if isinstance(item, dict)][:3]
+
+    items: list[dict[str, Any]] = []
+    visible: list[dict[str, Any]] = []
+    for idx, item in enumerate(source_items):
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        out = {"name": name, "reason": _compact_reason(item)}
+        for key in (
+            "location",
+            "price_range",
+            "finishing",
+            "ready",
+            "metro",
+            "why_family",
+            "why_investment",
+            "why_rental",
+            "family_infrastructure",
+            "infrastructure",
+            "ads",
+            "apartment_types",
+            "counter_novos",
+            "egrn_top_novos",
+            "mortgage_calc",
+            "mortgage",
+            "discount",
+        ):
+            if item.get(key):
+                out[key] = item[key]
+        items.append(out)
+        visible.append({"idx": idx, "name": name})
+
+    if purpose == "repeat_search":
+        message = "Посмотрела другие варианты, не повторяя прошлый список."
+        question = "Какой вариант хотите рассмотреть подробнее?"
+    elif len(items) == 1:
+        message = "Нашла один подтверждённый вариант по вашему запросу."
+        question = "Хотите рассмотреть этот вариант подробнее?"
+    elif items:
+        message = "Нашла несколько подтверждённых вариантов по вашему запросу."
+        question = "Какой вариант хотите рассмотреть подробнее?"
+    else:
+        message = str(draft_response or "").strip() or "По этому запросу не нашла подтверждённых вариантов."
+        question = "Могу расширить параметры поиска?"
+
+    wrapped = {
+        "response": {"message": message, "items": items, "question": question},
+        "params": {**params, **({"purpose": purpose} if purpose else {})},
+        "visible_options": visible,
+        "buttons": [],
+    }
+    return json.dumps(wrapped, ensure_ascii=False)
+
+
+def _merge_unique(values: Any, extra: list[str]) -> list[str]:
+    result: list[str] = []
+    if isinstance(values, list):
+        for item in values:
+            if isinstance(item, str) and item and item not in result:
+                result.append(item)
+    for item in extra:
+        if item not in result:
+            result.append(item)
+    return result
+
+
+def _has_mortgage_signal(text: str, params: dict[str, Any]) -> bool:
+    mortgage_type = str(params.get("mortgage_type") or "").strip().lower()
+    facets = params.get("facets") if isinstance(params.get("facets"), list) else []
+    if mortgage_type or any(str(item).strip().lower() == "mortgage" for item in facets):
+        return True
+    return any(
+        token in text
+        for token in (
+            "ипотек",
+            "it-ипот",
+            "айти-ипот",
+            "it ипот",
+            "айти ипот",
+            "льготн",
+            "господдерж",
+            "семейную ипот",
+            "семейная ипот",
+            "маткапитал",
+            "материнск",
+            "первонач",
+            "первый взнос",
+            "ставк",
+            "рассроч",
+            "скидк",
+            "платеж",
+            "платёж",
+        )
+    )
+
+
+def _mortgage_type_from_text(text: str, params: dict[str, Any]) -> str | None:
+    existing = str(params.get("mortgage_type") or "").strip().lower()
+    if existing:
+        return existing
+    if any(token in text for token in ("it-ипот", "айти-ипот", "it ипот", "айти ипот")):
+        return "it_mortgage"
+    if "семей" in text and "ипот" in text:
+        return "family_mortgage"
+    if any(token in text for token in ("льготн", "господдерж")):
+        return "subsidized_mortgage"
+    return None
+
+
+def _ensure_min_count(values: Any, minimum: int) -> int:
+    try:
+        current = int(values)
+    except Exception:
+        current = 0
+    return max(current, minimum)
+
+
+def _is_operator_request(text: str) -> bool:
+    return any(
+        token in text
+        for token in (
+            "заброни",
+            "брон",
+            "оператор",
+            "менеджер",
+            "связаться",
+            "контакт",
+            "показ",
+            "просмотр",
+            "оставить номер",
+        )
+    )
+
+
+def _is_offtopic_request(text: str) -> bool:
+    real_estate_tokens = (
+        "жк",
+        "квартир",
+        "новостро",
+        "дом",
+        "студи",
+        "однуш",
+        "двуш",
+        "трёш",
+        "треш",
+        "ипотек",
+        "застрой",
+        "район",
+        "метро",
+        "брон",
+        "показ",
+        "покуп",
+        "сдач",
+        "отделк",
+    )
+    offtopic_tokens = ("анекдот", "шутк", "погода", "рецепт", "курс валют", "стих")
+    return any(token in text for token in offtopic_tokens) and not any(token in text for token in real_estate_tokens)
+
+
+def _is_repeat_search_request(text: str) -> bool:
+    return any(
+        token in text
+        for token in (
+            "другие варианты",
+            "другие",
+            "новые варианты",
+            "эти не подходят",
+            "найди новые",
+            "ещё варианты",
+            "еще варианты",
+        )
+    )
+
+
+def _is_explain_selection_request(text: str) -> bool:
+    return any(
+        token in text
+        for token in (
+            "почему",
+            "по какому принципу",
+            "чем лучше",
+            "почему эти",
+            "почему этот",
+        )
+    )
+
+
+def _visible_option_names(request: dict[str, Any]) -> list[str]:
+    return [
+        str(item.get("name") or "").strip()
+        for item in request.get("visible_options", [])
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    ]
+
+
+def _build_mcp_request(query: str, initial_params: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    request = dict(initial_params or {})
+    low = query.lower()
+    purpose = str(request.get("purpose") or "").strip().lower()
+
+    if purpose == "operator" or _is_operator_request(low):
+        request["purpose"] = "operator"
+        request.pop("count", None)
+    elif _is_repeat_search_request(low):
+        request["purpose"] = "repeat_search"
+        request["count"] = _ensure_min_count(request.get("count"), 3)
+        visible_names = _visible_option_names(request)
+        if visible_names:
+            request["exclude"] = _merge_unique(request.get("exclude"), visible_names)
+    elif purpose == "family" or any(token in low for token in ("для семьи", "с ребён", "с ребен", "семейн")):
+        request["purpose"] = "family"
+        request["count"] = _ensure_min_count(request.get("count"), 3)
+        request["need"] = _merge_unique(
+            request.get("need"),
+            ["schools", "kindergartens", "parks", "yard_without_cars"],
+        )
+    elif purpose == "investment" or any(token in low for token in ("под инвестиц", "инвестиц", "ликвидност", "перепродаж")):
+        request["purpose"] = "investment"
+        request["count"] = _ensure_min_count(request.get("count"), 3)
+        request["need"] = _merge_unique(
+            request.get("need"),
+            ["entry_price", "mortgage", "egrn_sales", "counter_novos", "compact_lots"],
+        )
+    elif purpose == "rental" or any(token in low for token in ("под сдачу", "для аренды", "аренд")):
+        request["purpose"] = "rental"
+        request["count"] = _ensure_min_count(request.get("count"), 3)
+        request["need"] = _merge_unique(
+            request.get("need"),
+            ["compact", "finishing", "metro", "ready", "demand"],
+        )
+    else:
+        request.setdefault("purpose", purpose or "search")
+        if request.get("purpose") == "search":
+            request["count"] = _ensure_min_count(request.get("count"), 3)
+
+    if _has_mortgage_signal(low, request):
+        request["facets"] = _merge_unique(request.get("facets"), ["mortgage"])
+        mortgage_type = _mortgage_type_from_text(low, request)
+        if mortgage_type:
+            request["mortgage_type"] = mortgage_type
+        request["need"] = _merge_unique(
+            request.get("need"),
+            [
+                "mortgage_calc",
+                "mortgage",
+                "discount",
+                "payment_by_installments",
+                "price",
+            ],
+        )
+        if request.get("purpose") in {"family", "investment", "rental", "search", "repeat_search"}:
+            request["count"] = _ensure_min_count(request.get("count"), 3)
+
+    return request, json.dumps(request, ensure_ascii=False)
+
+
+def _chat_quality_guardrail(search_response: str, query: str = "") -> str:
+    parsed = _try_parse_json(search_response)
+    if not isinstance(parsed, dict):
+        return ""
+    params = parsed.get("params") if isinstance(parsed.get("params"), dict) else {}
+    purpose = str(params.get("purpose") or "").strip().lower()
+    if not purpose:
+        low_query = (query or "").lower()
+        if any(token in low_query for token in ("под сдачу", "для аренды", "аренд")):
+            purpose = "rental"
+        elif any(token in low_query for token in ("под инвестиц", "инвестиц", "перепродаж", "ликвидност")):
+            purpose = "investment"
+        elif any(token in low_query for token in ("для семьи", "семейн", "с ребён", "с ребен")):
+            purpose = "family"
+    if purpose == "family":
+        return (
+            "Качество-ограничение: не добивай shortlist слабым near без школ/садов/парка/двора без машин. "
+            "Лучше 1-2 сильных семейных варианта, чем третий общий вариант ради количества."
+        )
+    if purpose == "rental":
+        return (
+            "Качество-ограничение: не используй слова про высокий спрос, востребованность, ликвидность или доход, "
+            "если они не подтверждены отдельными сигналами ads / counter_novos / egrn_top_novos. "
+            "Опирайся только на компактность, отделку, метро, готовность и район."
+        )
+    if purpose == "investment":
+        return (
+            "Качество-ограничение: не делай вывод 'высокая ликвидность' только из количества объявлений и не уходи в логику арендатора, если сценарий не rental. "
+            "Не упоминай сдачу, аренду, продажу дороже, арендатора или покупателя под сдачу, если пользователь не просит rental-сценарий. "
+            "Опирайся только на подтверждённые сигналы: price, compact_lots, egrn/counter, ready, metro, finishing, mortgage."
+        )
+    return ""
+
+
+def _search_reason_bits(item: dict[str, Any]) -> list[str]:
+    bits: list[str] = []
+    price = str(item.get("price_range") or item.get("price") or "").strip()
+    area = str(item.get("area") or "").strip()
+    metro = str(item.get("metro") or item.get("property_metro") or "").strip()
+    finishing = str(item.get("finishing") or "").strip()
+    ready = str(item.get("ready") or item.get("status") or "").strip()
+    if price:
+        bits.append(f"вход {price}")
+    if area:
+        bits.append(f"компактный формат {area}")
+    if finishing:
+        bits.append(f"{finishing}")
+    if ready:
+        bits.append(f"готовность {ready}")
+    if metro:
+        bits.append(f"метро {metro}")
+    return bits
+
+
+def _normalize_search_response_for_chat(search_response: str, query: str = "") -> str:
+    parsed = _try_parse_json(search_response)
+    if not isinstance(parsed, dict):
+        return search_response
+    params = parsed.get("params") if isinstance(parsed.get("params"), dict) else {}
+    purpose = str(params.get("purpose") or "").strip().lower()
+    if not purpose:
+        low_query = (query or "").lower()
+        if any(token in low_query for token in ("под сдачу", "для аренды", "аренд")):
+            purpose = "rental"
+        elif any(token in low_query for token in ("под инвестиц", "инвестиц", "перепродаж", "ликвидност")):
+            purpose = "investment"
+        elif any(token in low_query for token in ("для семьи", "семейн", "с ребён", "с ребен")):
+            purpose = "family"
+    if purpose not in {"rental", "investment"}:
+        return search_response
+    for section, key in (("facts", f"why_{purpose}"), ("near", f"why_{purpose}")):
+        items = parsed.get(section) if isinstance(parsed.get(section), list) else []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            bits = _search_reason_bits(item)
+            if purpose == "rental":
+                # Никакого demand-language: только компактность/отделка/готовность/метро/цена.
+                reason_bits = []
+                if bits:
+                    reason_bits.append("; ".join(bits[:3]))
+                if item.get("area") or item.get("apartment_types"):
+                    reason_bits.append("удобная база для аренды")
+                item[key] = ". ".join(reason_bits).strip() or "удобная база для аренды"
+            else:
+                # Никакой ликвидности/спроса из объявлений: только вход/компактность/готовность/метро/отделка.
+                reason_bits = []
+                if bits:
+                    reason_bits.append("; ".join(bits[:3]))
+                if item.get("price_range") or item.get("area"):
+                    reason_bits.append("понятный инвестиционный вход")
+                item[key] = ". ".join(reason_bits).strip() or "понятный инвестиционный вход"
+    return json.dumps(parsed, ensure_ascii=False)
+
+
+def _followup_search_hint(query: str, request: dict[str, Any]) -> str:
+    low = query.lower()
+    visible_names = _visible_option_names(request)
+    if not visible_names:
+        return ""
+    names = ", ".join(visible_names)
+    if request.get("purpose") == "repeat_search" or _is_repeat_search_request(low):
+        return (
+            "Задача поиска: это repeat_search. Не повторяй visible_options; "
+            f"исключи {names} и верни до 3 других вариантов в facts или near."
+        )
+    if _is_explain_selection_request(low):
+        return (
+            "Задача поиска: это explain_selection. Верни подтверждённые факты именно по visible_options "
+            f"({names}) в facts/near, чтобы можно было объяснить выбор без выдумок."
+        )
+    return ""
 
 
 async def _maybe_style_text(
@@ -136,6 +630,45 @@ def _load_prompt(name: str) -> str:
 
 SEARCH_SYSTEM_PROMPT = _load_prompt("search_v1.txt")
 CHAT_SYSTEM_PROMPT = _load_prompt("chat_v1.txt")
+
+
+def _load_prompt_path(relative_path: str) -> str:
+    path = _PROMPTS_DIR / relative_path
+    if not path.exists():
+        return ""
+    return path.read_text(encoding="utf-8").strip()
+
+
+def _prompt_slug(value: Any) -> str:
+    return "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum() or ch == "_")
+
+
+def _chat_system_prompt_for_params(params: dict[str, Any] | None) -> str:
+    params = params if isinstance(params, dict) else {}
+    prompt = CHAT_SYSTEM_PROMPT
+    scenario_block = "Сценарий не задан: используй общий search/default контекст и не добавляй сценарных выгод."
+    purpose = _prompt_slug(params.get("purpose"))
+    if purpose:
+        overlay = _load_prompt_path(f"scenarios/{purpose}_v1.txt")
+        if overlay:
+            scenario_block = overlay
+    facet_blocks: list[str] = []
+    facets = params.get("facets") if isinstance(params.get("facets"), list) else []
+    for facet in facets:
+        slug = _prompt_slug(facet)
+        overlay = _load_prompt_path(f"facets/{slug}_v1.txt") if slug else ""
+        if overlay:
+            facet_blocks.append(overlay)
+    facet_block = "\n\n".join(facet_blocks) if facet_blocks else "Facet не задан: не добавляй ипотечные/скидочные/рассрочные claims без фактов."
+    if "{{SCENARIO_OVERLAY}}" in prompt:
+        prompt = prompt.replace("{{SCENARIO_OVERLAY}}", scenario_block)
+    else:
+        prompt = f"{prompt}\n\n## Сценарный модуль\n{scenario_block}"
+    if "{{FACET_OVERLAYS}}" in prompt:
+        prompt = prompt.replace("{{FACET_OVERLAYS}}", facet_block)
+    else:
+        prompt = f"{prompt}\n\n## Дополнительный facet-модуль\n{facet_block}"
+    return prompt
 
 # ── Overmind API ─────────────────────────────────────────────
 
@@ -204,7 +737,10 @@ def print_result(result: dict) -> None:
             print(f"Ошибка: {error}")
         if response_text:
             print()
-            print(response_text)
+            if isinstance(response_text, (dict, list)):
+                print(json.dumps(response_text, ensure_ascii=False, indent=2))
+            else:
+                print(response_text)
         if metadata:
             print()
             print("Метаданные:")
@@ -258,8 +794,8 @@ async def ask_two_stage(
     timeout: int,
     search_max_tokens: int = 5000,
     chat_max_tokens: int = 5000,
-) -> tuple[str, str, dict, dict]:
-    """Возвращает (search_text, chat_text, search_metadata, chat_metadata)."""
+) -> tuple[str, str, dict, dict, int]:
+    """Возвращает (search_text, chat_text, search_metadata, chat_metadata, chat_retries)."""
     search_response, search_meta = await ask_overmind(
         session=session,
         query=query,
@@ -270,39 +806,46 @@ async def ask_two_stage(
         max_tokens=search_max_tokens,
     )
     if not search_response:
-        return "", "", search_meta, {}
+        return "", "", search_meta, {}, 0
 
+    search_response = _normalize_search_response_for_chat(search_response, query=query)
+    parsed_search = _try_parse_json(search_response)
+    search_params = parsed_search.get("params") if isinstance(parsed_search, dict) and isinstance(parsed_search.get("params"), dict) else {}
+    guardrail = _chat_quality_guardrail(search_response, query=query)
+    guardrail_block = f"\n\n{guardrail}" if guardrail else ""
     chat_query = (
         f"Запрос клиента: {query}\n\n"
+        f"{guardrail_block}\n"
         f"Найденные факты, которыми можно пользоваться:\n{search_response}"
     )
     chat_response, chat_meta = await ask_overmind(
         session=session,
         query=chat_query,
         model=chat_model,
-        system_prompt=CHAT_SYSTEM_PROMPT,
+        system_prompt=_chat_system_prompt_for_params(search_params),
         use_mcp=False,
         timeout=timeout,
         max_tokens=chat_max_tokens,
     )
     # H007-A: strip markdown-обёртку ДО парсинга/печати/логирования.
     chat_response = _extract_response_text(chat_response)
-    scene_meta = await scene_classifier.classify_scene(
-        session,
-        user_text=query,
-        search_response=search_response,
-        memory={},
-        draft_response=chat_response,
-    )
-    scene = str(scene_meta.get("scene") or "default_safe_reply")
-    chat_response = await _maybe_style_text(
-        session,
-        chat_response,
-        context=search_response,
-        intent="chat_response",
-        scene=scene,
-        scene_rules=get_scene_rules(scene),
-    )
+    if not isinstance(chat_response, (dict, list)) and not _looks_structured_json(chat_response):
+        scene_meta = await scene_classifier.classify_scene(
+            session,
+            user_text=query,
+            search_response=search_response,
+            memory={},
+            draft_response=chat_response,
+        )
+        scene = str(scene_meta.get("scene") or "default_safe_reply")
+        chat_response = await _maybe_style_text(
+            session,
+            chat_response,
+            context=search_response,
+            intent="chat_response",
+            scene=scene,
+            scene_rules=get_scene_rules(scene),
+        )
     # H004: retry на пустой/мусорный chat-ответ (≤2 повтора)
     retries = 0
     while retries < 2 and (not chat_response or "{" not in chat_response):
@@ -394,6 +937,36 @@ async def main():
 
     query = " ".join(query_parts)
 
+    if _is_offtopic_request(query.lower()):
+        response = {
+            "response": {
+                "message": "Я консультирую только по недвижимости.",
+                "items": [],
+                "question": "Могу помочь с подбором новостройки в Москве или Московской области?",
+            },
+            "params": {"purpose": "off_topic"},
+            "visible_options": [],
+            "buttons": [],
+        }
+        print(f"Поиск:        {search_model}", file=sys.stderr)
+        print(f"Общение:      {chat_model}", file=sys.stderr)
+        print("MCP поиск:    False", file=sys.stderr)
+        print(f"chat_max_tok: {chat_max_tokens}", file=sys.stderr)
+        print(f"Таймаут:      {timeout}с", file=sys.stderr)
+        print(f"Запрос:       {query}", file=sys.stderr)
+        print(file=sys.stderr)
+        print("MCP-запрос:   {}", file=sys.stderr)
+        print()
+        print("─" * 60)
+        print("Поисковые факты:")
+        print(json.dumps({"facts": [], "near": [], "missing": [], "params": {"purpose": "off_topic"}}, ensure_ascii=False, indent=2))
+        print()
+        print("Ответ клиенту:")
+        print(json.dumps(response, ensure_ascii=False))
+        print()
+        print("─" * 60)
+        return
+
     # Вывод информации
     print(f"Поиск:        {search_model}", file=sys.stderr)
     print(f"Общение:      {chat_model}", file=sys.stderr)
@@ -405,9 +978,13 @@ async def main():
         print(f"Начальные params: {json.dumps(initial_params, ensure_ascii=False)}", file=sys.stderr)
     print(file=sys.stderr)
 
-    # H008: подмешиваем initial_params в query (как делает бот — chat_tester_bot.py:92,115-116)
-    if initial_params:
-        query = f"Текущие параметры: {json.dumps(initial_params, ensure_ascii=False)}\n\nКлиент: {query}"
+    # H008: подмешиваем initial_params и сценарные MCP-опоры в query
+    mcp_request, mcp_request_text = _build_mcp_request(query, initial_params)
+    if mcp_request:
+        print(f"MCP-запрос:   {mcp_request_text}", file=sys.stderr)
+        hint = _followup_search_hint(query, mcp_request)
+        hint_block = f"\n\n{hint}" if hint else ""
+        query = f"Текущие параметры: {mcp_request_text}{hint_block}\n\nКлиент: {query}"
 
     # Запуск
     t0 = time.monotonic()
@@ -454,17 +1031,32 @@ async def main():
             v for v in [search_cost.get("tokens_used"), chat_cost.get("tokens_used")] if isinstance(v, (int, float))
         )
 
+        if isinstance(chat_response, (dict, list)):
+            response_text_for_log = json.dumps(chat_response, ensure_ascii=False)
+        else:
+            response_text_for_log = _strip_markdown(chat_response)
+
         # Логируем в JSONL
+        search_response_json = _try_parse_json(search_response)
+        chat_response_json = _try_parse_json(chat_response) if isinstance(chat_response, str) else chat_response
+
         _log_event({
             "kind": "user_message",
             "user_text": query,
+            "initial_params": initial_params or {},
+            "effective_query": query,
+            "mcp_request": mcp_request,
             "search_model": search_model,
             "chat_model": chat_model,
             "mcp": use_mcp,
             "search_response": search_response,
+            "search_response_json": search_response_json,
             "search_response_len": len(search_response) if search_response else 0,
-            "response_text": _strip_markdown(chat_response),
-            "response_len": len(chat_response) if chat_response else 0,
+            "search_meta": search_meta,
+            "response_text": response_text_for_log,
+            "response_json": chat_response_json,
+            "response_len": len(response_text_for_log) if response_text_for_log else 0,
+            "chat_meta": chat_meta,
             "duration_ms": duration_ms,
             "chat_retries": chat_retries,
             "is_error": is_error,

@@ -550,6 +550,7 @@ scripts/build_public_overview.py
 
 - общий список сервисов `/index.html`;
 - раздел NMBOT `/nmbot-project-7f3a9c/index.html`;
+- вкладку новой архитектуры `/nmbot-project-7f3a9c/architecture-v2.html` по ТЗ `docs/LLM_DECISION_ARCHITECTURE_TZ.md`;
 - встроенную блок‑схему `/nmbot-project-7f3a9c/map.html`.
 - вкладку истории `/nmbot-project-7f3a9c/index.html#history`, которая читает `/nmbot-project-7f3a9c/history.json` и обновляется в браузере каждые 10 секунд.
 

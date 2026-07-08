@@ -15,6 +15,9 @@ ALLOWED_INTENTS = {
     "compare_selected",
     "operator_for_selected",
     "recommend_options",
+    "conversation_answer",
+    "consultation_answer",
+    "explain_selection_logic",
     "explain_operator_reason",
     "continue_selection",
     "update_search_params",
@@ -37,6 +40,8 @@ ALLOWED_DIALOG_ACTIONS = {
     "ask_clarification",
     "operator_live_check",
     "recommend_options",
+    "conversation_answer",
+    "consultation_answer",
     "reject_offer",
     "reject_operator",
     "reject_phone",
@@ -72,6 +77,9 @@ FOLLOWUP_INTENT_PROMPT = """
 - compare_selected — клиент согласился сравнить выбранный ЖК с похожими;
 - operator_for_selected — клиент хочет оператора/актуальное наличие/бронь/этаж/показ/детали, которых нет в карточке;
 - recommend_options — клиент просит совет/рекомендацию по текущему списку: "что посоветуешь", "какой лучше", "что бы ты выбрала";
+- conversation_answer — клиент общается по теме недвижимости/подбора, задаёт уточнение или подтверждает предложенное объяснение, но НЕ просит новый список, новый поиск или действие с ЖК;
+- consultation_answer — клиент задаёт консультационный вопрос по недвижимости/сценарию, а не просит новый список: "что важно для аренды", "на что смотреть под инвестицию", "что значит отделка", "почему это важно";
+- explain_selection_logic — клиент спрашивает, как/по какому принципу Ирина подбирает варианты: "как ты подбираешь", "почему эти варианты", "по каким критериям";
 - operator_for_selected — клиент хочет оператора/актуальное наличие/бронь/этаж/показ/детали, которых нет в карточке, или прямо спрашивает как связаться с оператором/менеджером;
 - explain_operator_reason — клиент спрашивает зачем нужен оператор / почему нельзя ответить здесь;
 - continue_selection — клиент хочет продолжить подбор здесь, посмотреть другие варианты или вернуться к списку;
@@ -101,6 +109,9 @@ FOLLOWUP_INTENT_PROMPT = """
 - Отрицания и отказы не должны автоматически запускать новый поиск.
 - Если клиент пишет "не хочу оператора", "без оператора", "не надо звонить" — reject_operator.
 - Если клиент спрашивает "что посоветуешь", "твой совет", "какой лучше выбрать" по текущему списку — intent=recommend_options. Не превращай это в compare_selected/compare_options.
+- Если клиент задаёт консультационный вопрос, а не просит действие со списком: "что важно для аренды", "на что смотреть под сдачу", "что важно для инвестиций", "что значит с отделкой", "почему это влияет на выбор" — intent=consultation_answer. Сначала ответь на вопрос; не выбирай continue_selection и не запускай новый список.
+- Если клиент спрашивает "как ты подбираешь", "по какому принципу", "почему эти варианты", "по каким критериям" — intent=explain_selection_logic. Это вопрос о методе подбора: сначала объясни логику, не показывай новый список и не выбирай continue_selection.
+- Если клиент просто общается по теме, уточняет смысл прошлого ответа или отвечает "да" на предложение Ирины объяснить логику/причины — intent=conversation_answer. Не выбирай continue_selection, если клиент прямо не просит "ещё варианты", "продолжить подбор", "покажи другие".
 - Если клиент прямо спрашивает "как связаться с оператором", "как связаться с менеджером", "хочу оператора", "позови менеджера" — intent=operator_for_selected даже если selected_option пустой: код передаст оператору текущий список/критерии.
 - Если клиент пишет "не оставлю номер", "номер не дам", "не хочу оставлять контакт" — reject_phone.
 - Если клиент пишет "не этот", "не подходит", "этот не нравится" про выбранный ЖК — reject_selected_option.
@@ -122,7 +133,8 @@ DIALOG_STATE_PLANNER_PROMPT = """
 
 Верни строго JSON:
 {
-  "dialog_action": "new_search | update_search | expand_more_options | compare_options | recommend_options | continue_from_memory | select_option | ask_clarification | operator_live_check | reject_offer | reject_operator | reject_phone | reject_selected_option | reject_similar_options | clarify_negation",
+  "mode": "search_action | conversation",
+  "dialog_action": "new_search | update_search | expand_more_options | compare_options | recommend_options | conversation_answer | consultation_answer | continue_from_memory | select_option | ask_clarification | operator_live_check | reject_offer | reject_operator | reject_phone | reject_selected_option | reject_similar_options | clarify_negation",
   "confidence": 0.0,
   "params_delta": {},
   "selected_option_action": "keep | clear | set",
@@ -130,17 +142,23 @@ DIALOG_STATE_PLANNER_PROMPT = """
   "rejected_options_add": [],
   "visible_options_policy": "keep | rebuild | clear",
   "numeric_choice_policy": "accept | reject",
+  "conversation_followup": {},
   "clarification_question": "",
   "reason": "коротко почему"
 }
 
 Ключевые правила:
 - Ты — единственный слой, который понимает смысл фразы клиента. Код ниже только исполняет твой dialog_action.
+- Сначала раздели режим: search_action = клиент просит подбор/поиск/сравнение/выбор/оператора; conversation = клиент просто общается по теме, уточняет, спрашивает "почему/как/что важно" или отвечает на предложенное объяснение.
 - Если клиент после списка просит ещё/похожие/другие варианты: "подбери похожие", "найди похожие",
   "покажи ещё", "ещё такие", "другие варианты" — dialog_action="expand_more_options",
   visible_options_policy="rebuild", numeric_choice_policy="reject". Не выбирай continue_from_memory.
 - Если клиент просит сравнить текущие варианты: "сравни", "чем отличаются", "в чем разница" — dialog_action="compare_options".
 - Если клиент просит совет/рекомендацию по текущим вариантам: "что посоветуешь", "твой совет", "какой лучше выбрать" — dialog_action="recommend_options". Не выбирай compare_options: нужен один приоритетный совет по фактам.
+- Если клиент задаёт консультационный вопрос внутри диалога — "что важно для аренды", "на что смотреть под сдачу", "что важно для инвестиций", "что важно для жизни", "что значит отделка", "почему это влияет на выбор" — dialog_action="consultation_answer". Это вопрос, а не просьба продолжить подбор: не выбирай expand_more_options, continue_from_memory или new_search, если клиент прямо не просит новые варианты.
+- Если клиент спрашивает, как Ирина подбирает варианты: "как ты подбираешь", "по какому принципу", "почему эти варианты", "по каким критериям" — dialog_action="conversation_answer", mode="conversation". Это legacy-смысл explain_selection_logic, но исполняется как живой conversation_answer. Не запускай expand_more_options и не продолжай список.
+- Если клиент отвечает "да" на последний вопрос Ирины вида "объяснить почему/как/логику/почему эти варианты" — dialog_action="conversation_answer", mode="conversation". Это согласие на объяснение, а не просьба продолжить подбор.
+- Учитывай conversation_followup: если он содержит subtopic_hint=family_mortgage, отвечай именно про семейную ипотеку; если subtopic_hint=down_payment, отвечай про первоначальный взнос. Не своди такой follow-up к generic financing, если в conversation_followup есть более точный сигнал.
 - Если клиент прямо спрашивает "как связаться с оператором" или просит связаться с оператором/менеджером — dialog_action="operator_live_check". Если selected_option пустой, всё равно выбирай operator_live_check: код передаст оператору текущий список и критерии.
 - Если клиент выбирает вариант номером или названием из visible_options — dialog_action="select_option",
   selected_option_action="set", selected_option_name=точное name из visible_options. Даже для "1"/"2" верни name, а не цифру.
@@ -228,6 +246,13 @@ def normalize_intent(intent: str) -> str:
 def normalize_dialog_action(action: str) -> str:
     value = str(action or "").strip()
     return value if value in ALLOWED_DIALOG_ACTIONS else DEFAULT_DIALOG_ACTION
+
+
+def normalize_dialog_mode(mode: str, action: str = "") -> str:
+    value = str(mode or "").strip()
+    if value in {"search_action", "conversation"}:
+        return value
+    return "conversation" if normalize_dialog_action(action) == "conversation_answer" else "search_action"
 
 
 def _normalize_choice(value: Any, allowed: set[str], default: str) -> str:
@@ -338,6 +363,7 @@ async def plan_dialog_state(
     if _env("NMBOT_DIALOG_PLANNER", "1") == "0":
         return {
             "dialog_action": DEFAULT_DIALOG_ACTION,
+            "mode": "conversation",
             "confidence": 0.0,
             "params_delta": {},
             "selected_option_action": "keep",
@@ -368,6 +394,7 @@ async def plan_dialog_state(
 
     fallback = {
         "dialog_action": DEFAULT_DIALOG_ACTION,
+        "mode": "conversation",
         "confidence": 0.0,
         "params_delta": {},
         "selected_option_action": "keep",
@@ -412,6 +439,7 @@ async def plan_dialog_state(
                 rejected = data.get("rejected_options_add") if isinstance(data.get("rejected_options_add"), list) else []
                 return {
                     "dialog_action": normalize_dialog_action(str(data.get("dialog_action") or "")),
+                    "mode": normalize_dialog_mode(str(data.get("mode") or ""), str(data.get("dialog_action") or "")),
                     "confidence": float(data.get("confidence") or 0.0),
                     "params_delta": params_delta,
                     "selected_option_action": _normalize_choice(data.get("selected_option_action"), ALLOWED_SELECTED_OPTION_ACTIONS, "keep"),

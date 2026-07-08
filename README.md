@@ -161,6 +161,7 @@ python3 scripts/nmbot_test_agent.py
 python3 scripts/nmbot_test_agent.py --suite deploy   # + live deploy-smoke
 python3 scripts/nmbot_test_agent.py --suite dialog   # контрольный диалог
 python3 scripts/nmbot_test_agent.py --suite stateful # multi-turn: память, выбор, оператор
+python3 scripts/nmbot_test_agent.py --suite compare  # multi-turn: сравнение, рекомендация, оператор
 python3 scripts/nmbot_test_agent.py --json           # JSON для CI
 ```
 

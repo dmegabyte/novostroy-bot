@@ -50,7 +50,7 @@ Staging (VPS):  systemd novostroy-bot-staging → python3 scripts/chat_tester_bo
 
 Правило процесса:
 
-1. Сначала можно проверять локально: `py_compile`, `h029`, `ux_e2e`, `h028`, `dialog`, `stateful`, simulator/live probe.
+1. Сначала можно проверять локально: `py_compile`, `h029`, `ux_e2e`, `h028`, `dialog`, `stateful`, `compare`, simulator/live probe.
 2. Затем обязательно сделать deploy/sync на VPS в `/home/neiro/novostroy-bot`.
 3. Перезапустить `novostroy-bot.service`.
 4. Проверить feature markers на VPS, а не только локально.

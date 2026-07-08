@@ -1229,6 +1229,12 @@ async def _main(suite: str, json_mode: bool, chat_max_tokens: int) -> int:
                 for r in stateful_results:
                     mark = "✓" if r.passed else "✗"
                     print(f"  {mark} {r.suite}/{r.scenario} ({r.duration_ms}ms)")
+            compare_results = await _run_compare_dialog_suite(client, chat_max_tokens)
+            results.extend(compare_results)
+            if not json_mode:
+                for r in compare_results:
+                    mark = "✓" if r.passed else "✗"
+                    print(f"  {mark} {r.suite}/{r.scenario} ({r.duration_ms}ms)")
     finally:
         await client.close()
 

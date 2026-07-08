@@ -2376,8 +2376,12 @@ def _followup_intent_from_dialog_action(
 
 
 def _followup_expansion_option_names(state: dict[str, Any]) -> list[str]:
-    options = state.get("visible_options") or state.get("last_options") or []
     names: list[str] = []
+    for name in state.get("shown_option_names") or []:
+        compact = _compact_option_text(name)
+        if compact and compact not in names:
+            names.append(compact)
+    options = state.get("visible_options") or state.get("last_options") or []
     for option in options[:3]:
         name = _compact_option_text(option.get("name"))
         if name and name not in names:
@@ -2388,6 +2392,20 @@ def _followup_expansion_option_names(state: dict[str, Any]) -> list[str]:
         if selected_name and selected_name not in names:
             names.append(selected_name)
     return names
+
+
+def _remember_shown_options(state: dict[str, Any], options: list[dict[str, Any]] | None) -> None:
+    """Запоминает ЖК, которые уже реально показывали клиенту в видимом списке."""
+    if not options:
+        return
+    names = list(state.get("shown_option_names") or [])
+    for option in options[:3]:
+        if not isinstance(option, dict):
+            continue
+        name = _compact_option_text(option.get("name"))
+        if name and name not in names:
+            names.append(name)
+    state["shown_option_names"] = names[-20:]
 
 
 def _build_followup_expansion_query(text: str, state: dict[str, Any]) -> tuple[str, list[str]]:
@@ -5920,6 +5938,7 @@ def main() -> None:
             )
             _refresh_search_state(state, search_meta)
             state["visible_options"] = _visible_options_from_chat_or_response(chat_meta, response, state.get("last_options") or [])
+            _remember_shown_options(state, state.get("visible_options") or [])
             state["numeric_choice_policy"] = _numeric_choice_policy_from_response(response, state.get("visible_options") or [])
             scenario = _infer_scenario(state, search_meta)
             kb_rows = _markup_from_chat_buttons(chat_meta, state, response, scenario)
@@ -6872,6 +6891,7 @@ def main() -> None:
                     sales_benefits, sales_meta = await _sales_phrases_for_stage(client, stage_options, stage_scenario)
                     response = _render_stage_first_list(stage_options, stage_scenario, sales_benefits)
                     state["visible_options"] = stage_options[:3]
+                    _remember_shown_options(state, state.get("visible_options") or [])
                     state["numeric_choice_policy"] = _numeric_choice_policy_from_response(response, state.get("visible_options") or [])
                     if OPTION_ENRICHMENT_ENABLED:
                         asyncio.create_task(_prefetch_options_enrichment(client, state, stage_options[:3], stage_scenario))
@@ -7191,6 +7211,7 @@ def main() -> None:
         # H013/H028: заполним last_result/options, затем берём buttons[] из chat-контракта.
         _refresh_search_state(state, search_meta)
         state["visible_options"] = _visible_options_from_chat_or_response(chat_meta, response, state.get("last_options") or [])
+        _remember_shown_options(state, state.get("visible_options") or [])
         state["numeric_choice_policy"] = _numeric_choice_policy_from_response(response, state.get("visible_options") or [])
         if state.get("last_result", {}).get("found"):
             state["turns_after_results"] = int(state.get("turns_after_results") or 0) + 1
@@ -7204,6 +7225,7 @@ def main() -> None:
                 sales_benefits, sales_meta = await _sales_phrases_for_stage(client, stage_options, stage_scenario)
                 response = _render_stage_first_list(stage_options, stage_scenario, sales_benefits)
                 state["visible_options"] = stage_options[:3]
+                _remember_shown_options(state, state.get("visible_options") or [])
                 state["numeric_choice_policy"] = _numeric_choice_policy_from_response(response, state.get("visible_options") or [])
                 if OPTION_ENRICHMENT_ENABLED:
                     asyncio.create_task(_prefetch_options_enrichment(client, state, stage_options[:3], stage_scenario))
@@ -7255,6 +7277,7 @@ def main() -> None:
             )
             if reason_layer_meta.get("applied"):
                 state["visible_options"] = state.get("last_options", [])[:3]
+                _remember_shown_options(state, state.get("visible_options") or [])
                 state["numeric_choice_policy"] = _numeric_choice_policy_from_response(response, state.get("visible_options") or [])
 
         duration_ms = int((time.monotonic() - t0) * 1000)

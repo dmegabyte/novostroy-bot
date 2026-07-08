@@ -111,8 +111,10 @@ from chat_tester_bot import (  # noqa: E402
     _apply_dialog_plan_to_state,
     _dialog_planner_state_payload,
     _extract_options,
+    _filter_rejected_options,
     _followup_state_payload,
     _followup_intent_from_dialog_action,
+    _remember_shown_options,
     _format_history_event,
     _history_search_preview,
     _normalize_conversation_topic,
@@ -290,6 +292,30 @@ COMPARE_DIALOG_TURNS: list[StatefulDialogTurn] = [
     StatefulDialogTurn(
         name="operator_for_recommended",
         user_text="тогда позови оператора по лучшему варианту",
+    ),
+]
+
+
+REPEAT_DIALOG_TURNS: list[StatefulDialogTurn] = [
+    StatefulDialogTurn(
+        name="initial_two_room_kotelniki",
+        user_text="двушка в Котельниках",
+    ),
+    StatefulDialogTurn(
+        name="show_more_similar",
+        user_text="покажи ещё похожие",
+    ),
+    StatefulDialogTurn(
+        name="show_more_without_repeats",
+        user_text="а ещё без повторов?",
+    ),
+    StatefulDialogTurn(
+        name="select_first_option",
+        user_text="первый вариант",
+    ),
+    StatefulDialogTurn(
+        name="operator_with_new_selected_context",
+        user_text="позови оператора",
     ),
 ]
 
@@ -1202,6 +1228,21 @@ async def _main(suite: str, json_mode: bool, chat_max_tokens: int) -> int:
             results.extend(compare_results)
             if not json_mode:
                 for r in compare_results:
+                    mark = "✓" if r.passed else "✗"
+                    print(f"  {mark} {r.suite}/{r.scenario} ({r.duration_ms}ms)")
+        finally:
+            await client.close()
+        _print_json(results) if json_mode else _print_human(results)
+        return 0 if all(r.passed for r in results) else 1
+
+    if suite == "repeat":
+        if not client.session:
+            await client.ensure_session()
+        try:
+            repeat_results = await _run_repeat_dialog_suite(client, chat_max_tokens)
+            results.extend(repeat_results)
+            if not json_mode:
+                for r in repeat_results:
                     mark = "✓" if r.passed else "✗"
                     print(f"  {mark} {r.suite}/{r.scenario} ({r.duration_ms}ms)")
         finally:
@@ -3642,6 +3683,11 @@ async def _resolve_stateful_intent(
         followup_meta.setdefault("smoke_fallback", "compare_visible_options")
         return {"intent": "compare_others", "options": options[:2], "source": "stateful_compare_fallback"}, followup_meta, dialog_plan
 
+    if re.search(r"\b(еще|ещё|другие|похож|без повтор)", text_low) and options:
+        followup_meta.setdefault("intent", "expand_more_options")
+        followup_meta.setdefault("smoke_fallback", "repeat_search_visible_options")
+        return {"intent": "expand_more_options", "source": "stateful_repeat_fallback"}, followup_meta, dialog_plan
+
     if re.search(r"что бы ты выбрал|что бы ты выбрала|лучше|быстр", text_low) and options:
         followup_meta.setdefault("intent", "recommend_options")
         followup_meta.setdefault("smoke_fallback", "recommend_visible_options")
@@ -3756,13 +3802,21 @@ async def _run_stateful_turn(
         state["visible_options"] = options
         _remember_bot_response(state, response, offer_type="selected_option_details", answer_kind="recommend_options")
     elif intent in {"expand_more_options", "new_search"}:
-        query = _build_followup_expansion_query(text, state) if intent == "expand_more_options" else text
+        excluded_names: list[str] = []
+        params_for_search = dict(state.get("params") or {})
+        if intent == "expand_more_options":
+            query, excluded_names = _build_followup_expansion_query(text, state)
+            if excluded_names:
+                params_for_search["exclude"] = excluded_names
+            params_for_search["purpose"] = "repeat_search"
+        else:
+            query = text
         response, new_params, search_meta, chat_meta = await client.ask(
             query=query,
             search_model=state.get("search_model", "google/gemini-3.1-flash-lite-preview"),
             chat_model=state.get("chat_model", "google/gemini-2.5-flash"),
             use_mcp=bool(state.get("mcp", True)),
-            params=state.get("params", {}),
+            params=params_for_search,
         )
         if isinstance(new_params, dict) and new_params:
             state["params"] = {**state.get("params", {}), **new_params}
@@ -3773,6 +3827,10 @@ async def _run_stateful_turn(
         response = _soften_layout_overclaim(response)
         response = _strip_rejected_options_from_response(response, state)
         _refresh_search_state(state, search_meta if isinstance(search_meta, dict) else {})
+        if excluded_names:
+            temp_state = dict(state)
+            temp_state["rejected_option_names"] = excluded_names
+            state["last_options"] = _filter_rejected_options(state.get("last_options") or [], temp_state)
         state["visible_options"] = _visible_options_from_chat_or_response(
             chat_meta if isinstance(chat_meta, dict) else {},
             response,
@@ -3786,6 +3844,7 @@ async def _run_stateful_turn(
         _remember_bot_response(state, response, offer_type="clarify", answer_kind="clarification")
 
     visible_after = list(state.get("visible_options") or [])
+    _remember_shown_options(state, visible_after)
     last_after = list(state.get("last_options") or [])
     selected_after = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
     return {
@@ -4013,6 +4072,99 @@ async def _run_compare_dialog_suite(client: OvermindClient, chat_max_tokens: int
         return [result]
 
 
+def _check_repeat_turn(turn: dict[str, Any], index: int, previous_visible: set[str]) -> list[dict[str, Any]]:
+    checks = _check_stateful_turn(turn, index)
+
+    def add(name: str, ok: bool, msg: str = "") -> None:
+        checks.append({"name": name, "passed": ok, "msg": msg})
+
+    txt = str(turn.get("response_text") or "")
+    low = txt.lower().replace("ё", "е")
+    intent = str(turn.get("dialog_intent") or "")
+    name = str(turn.get("name") or "")
+    visible_before = list(turn.get("visible_before_names") or [])
+    visible_after = list(turn.get("visible_after_names") or [])
+    last_after = list(turn.get("last_after_names") or [])
+    params_after = turn.get("params_after") if isinstance(turn.get("params_after"), dict) else {}
+    selected_after = str(turn.get("selected_after_name") or "")
+
+    if name in {"show_more_similar", "show_more_without_repeats"}:
+        new_names = set(visible_after or last_after)
+        overlap = previous_visible & new_names
+        add("repeat_intent_expand_more", intent == "expand_more_options", f"intent={intent}")
+        add("repeat_has_new_options", bool(new_names), f"visible={visible_after}; last={last_after}")
+        add("repeat_excludes_previous_visible", not overlap, f"overlap={sorted(overlap)}; previous={sorted(previous_visible)}; new={sorted(new_names)}")
+        add("repeat_keeps_search_context", params_after.get("rooms") in {"2", 2} or "котельник" in low or "котельник" in str(turn.get("search_text") or "").lower(), f"params={params_after}")
+        add("repeat_not_operator_handoff", "оператор" not in intent, f"intent={intent}")
+    elif name == "select_first_option":
+        first_before = str(turn.get("first_before_name") or "")
+        add("repeat_first_option_selected", intent == "select_option", f"intent={intent}")
+        add("repeat_selected_from_new_visible", bool(first_before and selected_after and first_before == selected_after), f"first={first_before}; selected={selected_after}; before={visible_before}")
+    elif name == "operator_with_new_selected_context":
+        operator_context = turn.get("operator_context") if isinstance(turn.get("operator_context"), dict) else {}
+        add("repeat_operator_intent", intent in {"operator_for_selected", "operator_contact_accept", "operator_for_context"}, f"intent={intent}")
+        add("repeat_operator_has_selected", bool(operator_context.get("selected_option") or operator_context.get("selected_option_name") or selected_after), _safe_meta_preview(operator_context))
+        add("repeat_operator_asks_contact", any(m in low for m in ["номер", "телефон", "контакт", "связ"]), txt[:220])
+    return checks
+
+
+async def _run_repeat_dialog_suite(client: OvermindClient, chat_max_tokens: int) -> list[Result]:
+    started = time.time()
+    state = _default_state()
+    turns: list[dict[str, Any]] = []
+    checks: list[dict[str, Any]] = []
+    previously_seen: set[str] = set()
+    try:
+        for idx, turn_def in enumerate(REPEAT_DIALOG_TURNS):
+            before_seen = set(previously_seen)
+            turn = await _run_stateful_turn(client, state, turn_def, chat_max_tokens)
+            turn_checks = _check_repeat_turn(turn, idx, before_seen)
+            turn["checks"] = turn_checks
+            turns.append(turn)
+            if turn_def.name in {"initial_two_room_kotelniki", "show_more_similar", "show_more_without_repeats"}:
+                for opt_name in turn.get("visible_after_names") or turn.get("last_after_names") or []:
+                    if opt_name:
+                        previously_seen.add(str(opt_name))
+            for c in turn_checks:
+                checks.append({"name": f"{turn_def.name}:{c['name']}", "passed": c["passed"], "msg": c.get("msg", "")})
+        passed = all(c["passed"] for c in checks)
+        transcript = "\n\n".join(
+            f"USER: {t['user_text']}\nINTENT: {t['dialog_intent']}\nBOT: {_stateful_short(t['response_text'], 700)}"
+            for t in turns
+        )
+        result = Result(
+            suite="repeat",
+            scenario="repeat_search_without_visible_duplicates",
+            passed=passed,
+            checks=checks,
+            error="" if passed else "repeat smoke checks failed",
+            duration_ms=int((time.time() - started) * 1000),
+            response_text=transcript,
+            dialog_intent=turns[-1].get("dialog_intent") if turns else "",
+            system_meta={
+                "turns": len(turns),
+                "final_params": dict(state.get("params") or {}),
+                "final_selected": _stateful_option_name(state.get("selected_option")),
+                "awaiting_phone": bool(state.get("awaiting_phone")),
+                "seen_options": sorted(previously_seen),
+            },
+        )
+        _append_stateful_dialog_review(result, turns)
+        return [result]
+    except Exception as e:
+        result = Result(
+            suite="repeat",
+            scenario="repeat_search_without_visible_duplicates",
+            passed=False,
+            checks=[{"name": "exception", "passed": False, "msg": f"{type(e).__name__}: {e}"}],
+            error=traceback.format_exc(limit=5),
+            duration_ms=int((time.time() - started) * 1000),
+            response_text="\n\n".join(f"USER: {t.get('user_text')}\nBOT: {_stateful_short(t.get('response_text'))}" for t in turns),
+        )
+        _append_stateful_dialog_review(result, turns)
+        return [result]
+
+
 async def _run_control_dialog_test(
     client: OvermindClient,
     chat_max_tokens: int,
@@ -4117,7 +4269,7 @@ def _run_required_deploy_gate() -> Result:
     return _run_deploy_smoke_test()
 def main() -> None:
     p = argparse.ArgumentParser(description="nmbot test agent — codex + H016 + golden")
-    p.add_argument("--suite", default="all", choices=["all", "codex", "h016", "golden", "h021", "h023", "h024", "h026", "h028", "h029", "ux_e2e", "non_text", "deploy", "dialog", "stateful", "compare"])
+    p.add_argument("--suite", default="all", choices=["all", "codex", "h016", "golden", "h021", "h023", "h024", "h026", "h028", "h029", "ux_e2e", "non_text", "deploy", "dialog", "stateful", "compare", "repeat"])
     p.add_argument("--json", action="store_true", help="JSON-режим для CI")
     p.add_argument("--chat-max-tokens", type=int, default=10000)
     args = p.parse_args()

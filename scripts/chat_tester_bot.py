@@ -1382,7 +1382,7 @@ def _apply_dialog_plan_to_state(state: dict[str, Any], plan: dict[str, Any], *, 
     # план к уже известным ЖК и не принимает новые названия на веру.
     visible_policy = str(plan.get("visible_options_policy") or "")
     params_delta = plan.get("params_delta") if isinstance(plan.get("params_delta"), dict) else {}
-    params_delta = _normalize_followup_params_delta(params_delta)
+    params_delta = _normalize_followup_params_delta(params_delta, user_text=user_text)
     selected_action = str(plan.get("selected_option_action") or "")
     list_will_change = visible_policy == "clear" or bool(params_delta) or selected_action == "clear"
     allow_rejected_update = bool(plan.get("rejected_options_add")) and list_will_change
@@ -2094,7 +2094,18 @@ def _split_choice_and_action(text: str, options: list[dict[str, Any]]) -> tuple[
     return None, stripped
 
 
-def _normalize_followup_params_delta(delta: dict[str, Any]) -> dict[str, Any]:
+def _followup_text_has_explicit_budget(user_text: str) -> bool:
+    """Есть ли в follow-up явно названный бюджет.
+
+    Для фраз вроде «покажи дешевле» LLM-orchestrator иногда присылает
+    выдуманный `max_price`. Такой бюджет применять нельзя: сумма должна быть
+    названа клиентом явно, например «до 10 млн» или «бюджет 12».
+    """
+    low = re.sub(r"\s+", " ", str(user_text or "").lower().replace("ё", "е")).strip()
+    return bool(re.search(r"\b\d+(?:[\s.,]\d+)?\s*(?:млн|миллион|миллиона|миллионов|тыс|руб|₽)?\b", low))
+
+
+def _normalize_followup_params_delta(delta: dict[str, Any], *, user_text: str = "") -> dict[str, Any]:
     """Приводит LLM params_delta к ключам, которые уже понимает поиск.
 
     LLM может вернуть `budget: 15000000`, а текущий state/search ожидает
@@ -2112,6 +2123,8 @@ def _normalize_followup_params_delta(delta: dict[str, Any]) -> dict[str, Any]:
                 out["max_price"] = int(budget)
         except Exception:
             out["max_price"] = budget
+    if user_text and out.get("max_price") is not None and not _followup_text_has_explicit_budget(user_text):
+        out.pop("max_price", None)
     return out
 
 
@@ -4521,7 +4534,10 @@ _BUTTON_TECH_WORDS = re.compile(
 
 
 def _option_by_index(state: dict, idx: int) -> dict[str, Any] | None:
-    options = state.get("last_options") or []
+    # Клиент выбирает номер из последнего видимого списка, а не из полного
+    # внутреннего MCP/search списка. Если видимого порядка нет — падаем обратно
+    # на last_options для старых/служебных веток.
+    options = state.get("visible_options") or state.get("last_options") or []
     if 1 <= idx <= len(options):
         return options[idx - 1]
     return None
@@ -5769,7 +5785,7 @@ def main() -> None:
                 return
             elif followup_intent == "update_search_params":
                 params_delta = followup_meta.get("params_delta") if isinstance(followup_meta.get("params_delta"), dict) else {}
-                params_delta = _normalize_followup_params_delta(params_delta)
+                params_delta = _normalize_followup_params_delta(params_delta, user_text=text)
                 if params_delta:
                     state["params"] = {**state.get("params", {}), **params_delta}
                     LOGGER.info("User %d: params updated from followup: %s", uid, state["params"])

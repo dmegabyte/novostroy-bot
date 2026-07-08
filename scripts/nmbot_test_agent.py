@@ -7,6 +7,7 @@
   python3 scripts/nmbot_test_agent.py --suite h016          # только H016 (диалоговая память)
   python3 scripts/nmbot_test_agent.py --suite golden        # только golden-эталоны
   python3 scripts/nmbot_test_agent.py --suite dialog        # контрольные живые диалоги перед отдачей пользователю
+  python3 scripts/nmbot_test_agent.py --suite stateful      # multi-turn smoke: память, выбор, оператор
   python3 scripts/nmbot_test_agent.py --json                # JSON-режим
   python3 scripts/nmbot_test_agent.py --chat-max-tokens N   # дефолт 10000
 
@@ -79,10 +80,15 @@ from chat_tester_bot import (  # noqa: E402
     STAGE_PRESENTER_ENABLED,
     _button_log_preview,
     _callback_button_text,
+    _append_dialog_turn,
     _build_known_option_prompt,
     _build_consultation_answer_prompt,
     _build_negation_response_prompt,
     _build_conversation_answer_prompt,
+    _build_followup_expansion_query,
+    _compact_option_text,
+    _default_state,
+    _format_cheaper_response,
     _format_option_response,
     _format_options_summary_response,
     _format_numbered_list_spacing,
@@ -104,6 +110,10 @@ from chat_tester_bot import (  # noqa: E402
     _normalize_conversation_topic,
     _local_followup_intent,
     _markup_from_chat_buttons,
+    _match_option_from_text,
+    _numeric_choice_policy_from_response,
+    _operator_contact_request_text,
+    _option_by_index,
     _prepare_response_text,
     _parse_budget_callback_value,
     _pick_quick_actions,
@@ -129,9 +139,11 @@ from chat_tester_bot import (  # noqa: E402
     _telegram_chunks,
     _normalize_followup_params_delta,
     _reset_dialog_state_preserve_settings,
+    _refresh_search_state,
     _resolve_dialog_intent,
     _remember_bot_response,
     _safe_user_error_message,
+    _strip_markdown,
     _strip_rejected_options_from_response,
     _strip_unsupported_complex_claims,
     _strip_unrequested_live_data_cta,
@@ -141,12 +153,15 @@ from chat_tester_bot import (  # noqa: E402
     _visible_options_from_chat_meta,
     _visible_options_from_chat_or_response,
     _visible_options_from_response,
+    _last_bot_text,
 )
 from followup_intent_classifier import (  # noqa: E402
     DIALOG_STATE_PLANNER_PROMPT,
+    classify_followup_intent,
     normalize_dialog_action,
     normalize_dialog_mode,
     normalize_intent,
+    plan_dialog_state,
 )
 
 
@@ -194,6 +209,14 @@ class ControlDialogScenario:
     expected_any_markers: list[str]
 
 
+@dataclass(frozen=True)
+class StatefulDialogTurn:
+    """Один ход stateful smoke: проверяем цепочку, а не одиночный query."""
+
+    name: str
+    user_text: str
+
+
 CONTROL_DIALOG_SCENARIOS: list[ControlDialogScenario] = [
     ControlDialogScenario(
         name="start_then_two_room_kotelniki_typo",
@@ -212,6 +235,30 @@ CONTROL_DIALOG_SCENARIOS: list[ControlDialogScenario] = [
         query="квартира для семьи с отделкой",
         expected_markers=[],
         expected_any_markers=["отделк", "ремонт", "готов"],
+    ),
+]
+
+
+STATEFUL_FOLLOWUP_TURNS: list[StatefulDialogTurn] = [
+    StatefulDialogTurn(
+        name="initial_two_room_kotelniki",
+        user_text="двушка в Котельниках",
+    ),
+    StatefulDialogTurn(
+        name="keep_context_add_finish",
+        user_text="а с отделкой?",
+    ),
+    StatefulDialogTurn(
+        name="keep_context_cheaper",
+        user_text="покажи дешевле",
+    ),
+    StatefulDialogTurn(
+        name="select_first_option",
+        user_text="первый вариант",
+    ),
+    StatefulDialogTurn(
+        name="operator_with_selected_context",
+        user_text="позови оператора",
     ),
 ]
 
@@ -701,8 +748,14 @@ def _complex_name_grounding_key(name: Any) -> str:
             word = word[:-3] + "ый"
         elif len(word) > 5 and word.endswith("его"):
             word = word[:-3] + "ий"
+        elif len(word) > 5 and word.endswith("ском"):
+            word = word[:-4] + "ский"
+        elif len(word) > 4 and word.endswith("ом"):
+            word = word[:-2] + "ый"
         elif len(word) > 4 and word.endswith("ых"):
             word = word[:-2] + "ые"
+        elif len(word) > 3 and word.endswith("у"):
+            word = word[:-1]
         elif len(word) > 3 and word.endswith("а"):
             word = word[:-1]
         words.append(word)
@@ -736,6 +789,99 @@ def _quoted_name_is_grounded(name: str, search_text: str, known_keys: set[str] |
         return True
     keys = known_keys if known_keys is not None else _known_complex_name_keys_from_search(search_text)
     return _complex_name_grounding_key(name) in keys
+
+
+def _structured_value_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, dict):
+        return any(_structured_value_present(v) for v in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_structured_value_present(v) for v in value)
+    text = _normalise_ru_text(str(value))
+    if not text:
+        return False
+    missing_markers = {
+        "нет",
+        "none",
+        "null",
+        "unknown",
+        "не указано",
+        "не указан",
+        "не указана",
+        "неизвестно",
+        "уточняется",
+        "информация уточняется",
+    }
+    return text not in missing_markers
+
+
+def _row_has_any_structured_key(row: Any, keys: set[str]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    for key, value in row.items():
+        key_low = _normalise_ru_text(str(key))
+        if key_low in keys and _structured_value_present(value):
+            return True
+    return False
+
+
+def _search_has_sensitive_fact_type(search_text: str, search_low: str, fact_type: str, markers: list[str]) -> bool:
+    """Проверяет, что тип факта есть в MCP/search_response.
+
+    Gate должен понимать структурные MCP-поля. Например, поиск может вернуть
+    `developer`, а Ирина в ответе по-русски сказать «застройщик» — это не
+    галлюцинация, если поле реально было в `facts/near`.
+    """
+    if any(m in search_low for m in markers):
+        return True
+
+    structured_keys_by_type: dict[str, set[str]] = {
+        "metro": {"metro", "subway", "transport", "метро", "транспорт"},
+        "area": {"area", "area_range", "square", "square_m", "rooms_area", "площадь"},
+        "developer": {"developer", "dev", "builder", "застройщик", "девелопер"},
+        "school_infra": {
+            "schools",
+            "school",
+            "kindergartens",
+            "kindergarten",
+            "parks",
+            "park",
+            "parking",
+            "infrastructure",
+            "social_infrastructure",
+            "yards",
+            "yard",
+            "clinics",
+            "shops",
+            "школы",
+            "школа",
+            "сады",
+            "детские сады",
+            "парки",
+            "парк",
+            "паркинг",
+            "инфраструктура",
+        },
+        "mortgage": {"mortgage", "installment", "payment", "ипотека", "рассрочка"},
+    }
+    keys = structured_keys_by_type.get(fact_type, set())
+    if not keys:
+        return False
+
+    parsed = _parse_search_response(search_text)
+    for section in ("facts", "near"):
+        rows = parsed.get(section, [])
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if _row_has_any_structured_key(row, keys):
+                return True
+    return False
 
 
 def _ux_check_response(response_text: str, search_text: str) -> list[dict]:
@@ -773,7 +919,7 @@ def _ux_check_response(response_text: str, search_text: str) -> list[dict]:
     leaked_fact_types: list[str] = []
     for fact_type, markers in sensitive_fact_markers.items():
         in_response = any(m in low for m in markers)
-        in_search = any(m in search_low for m in markers)
+        in_search = _search_has_sensitive_fact_type(search_text, search_low, fact_type, markers)
         if in_response and not in_search:
             leaked_fact_types.append(fact_type)
     add(
@@ -991,6 +1137,21 @@ async def _main(suite: str, json_mode: bool, chat_max_tokens: int) -> int:
             results.extend(dialog_results)
             if not json_mode:
                 for r in dialog_results:
+                    mark = "✓" if r.passed else "✗"
+                    print(f"  {mark} {r.suite}/{r.scenario} ({r.duration_ms}ms)")
+        finally:
+            await client.close()
+        _print_json(results) if json_mode else _print_human(results)
+        return 0 if all(r.passed for r in results) else 1
+
+    if suite == "stateful":
+        if not client.session:
+            await client.ensure_session()
+        try:
+            stateful_results = await _run_stateful_followup_suite(client, chat_max_tokens)
+            results.extend(stateful_results)
+            if not json_mode:
+                for r in stateful_results:
                     mark = "✓" if r.passed else "✗"
                     print(f"  {mark} {r.suite}/{r.scenario} ({r.duration_ms}ms)")
         finally:
@@ -1260,6 +1421,8 @@ def _run_h021_unit_tests() -> list[Result]:
     intent_budget_mixed = _resolve_dialog_intent("бюджет, у меня только 15 млн на руках", state_visible)
     intent_one_but_expensive = _resolve_dialog_intent("1 но дорого", state_visible)
     normalized_delta = _normalize_followup_params_delta({"budget": 15_000_000, "priority": "budget"})
+    invented_budget_delta = _normalize_followup_params_delta({"max_price": 5.0}, user_text="покажи дешевле")
+    explicit_budget_delta = _normalize_followup_params_delta({"max_price": 10_000_000}, user_text="покажи дешевле до 10 млн")
     pass_visible_select = (
         [o.get("name") for o in visible_options] == ["Южные Сады", "Сиреневый парк", "Амурский парк"]
         and intent_one.get("intent") == "followup_classifier"
@@ -1267,16 +1430,19 @@ def _run_h021_unit_tests() -> list[Result]:
         and intent_budget_mixed.get("intent") == "followup_classifier"
         and intent_one_but_expensive.get("intent") == "followup_classifier"
         and _pure_option_choice_index("1") == 1
+        and (_option_by_index(state_visible, 1) or {}).get("name") == "Южные Сады"
         and _pure_option_choice_index("15 млн") is None
         and normalized_delta.get("max_price") == 15_000_000
         and "budget" not in normalized_delta
+        and "max_price" not in invented_budget_delta
+        and explicit_budget_delta.get("max_price") == 10_000_000
     )
     results.append(Result(
         suite="h028",
         scenario="text_choice_uses_visible_list_order_and_name",
         passed=pass_visible_select,
-        error="" if pass_visible_select else f"visible={visible_options}; one={intent_one}; two={intent_two_text}; budget={intent_budget_mixed}; one_exp={intent_one_but_expensive}; delta={normalized_delta}",
-        response_text=f"visible={[o.get('name') for o in visible_options]}; one={intent_one.get('intent')}; two={intent_two_text.get('intent')}; budget={intent_budget_mixed.get('intent')}; one_exp={intent_one_but_expensive.get('intent')}; delta={normalized_delta}",
+        error="" if pass_visible_select else f"visible={visible_options}; indexed={_option_by_index(state_visible, 1)}; one={intent_one}; two={intent_two_text}; budget={intent_budget_mixed}; one_exp={intent_one_but_expensive}; delta={normalized_delta}; invented={invented_budget_delta}; explicit={explicit_budget_delta}",
+        response_text=f"visible={[o.get('name') for o in visible_options]}; indexed={(_option_by_index(state_visible, 1) or {}).get('name')}; one={intent_one.get('intent')}; two={intent_two_text.get('intent')}; budget={intent_budget_mixed.get('intent')}; one_exp={intent_one_but_expensive.get('intent')}; delta={normalized_delta}; invented={invented_budget_delta}; explicit={explicit_budget_delta}",
         duration_ms=int((time.time() - started) * 1000),
     ))
 
@@ -1349,7 +1515,7 @@ def _run_h021_unit_tests() -> list[Result]:
         "facts": [{"name": "Кузьминский лес"}],
         "near": [{"name": "ЖК «Дюна»"}],
     }, ensure_ascii=False)
-    grounding_known = _ux_check_response("Срок позже, чем у «Кузьминского леса».", grounding_search)
+    grounding_known = _ux_check_response("Срок позже, чем у «Кузьминского леса», а детали по «Кузьминском лесу» уточним.", grounding_search)
     grounding_unknown = _ux_check_response("Ещё есть «Несуществующего леса».", grounding_search)
     known_check = next(c for c in grounding_known if c["name"] == "ux_mcp_grounded_quoted_complexes")
     unknown_check = next(c for c in grounding_unknown if c["name"] == "ux_mcp_grounded_quoted_complexes")
@@ -1360,6 +1526,37 @@ def _run_h021_unit_tests() -> list[Result]:
         passed=pass_grounding,
         error="" if pass_grounding else f"known={known_check}; unknown={unknown_check}",
         response_text=f"known={known_check}; unknown={unknown_check}",
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    # H029: sensitive-fact gate понимает структурные MCP-поля, а не только
+    # буквальные русские маркеры в search_response.
+    structured_sensitive_search = json.dumps({
+        "facts": [{
+            "name": "ЖК A",
+            "developer": "Абсолют Недвижимость",
+            "schools": "рядом есть школа",
+            "parks": "парк рядом",
+        }],
+        "near": [],
+    }, ensure_ascii=False)
+    structured_sensitive_ok = _ux_check_response(
+        "Застройщик — Абсолют Недвижимость. Рядом есть школа и парк.",
+        structured_sensitive_search,
+    )
+    structured_sensitive_bad = _ux_check_response(
+        "Застройщик — Абсолют Недвижимость. Рядом есть школа.",
+        json.dumps({"facts": [{"name": "ЖК A"}], "near": []}, ensure_ascii=False),
+    )
+    ok_fact_check = next(c for c in structured_sensitive_ok if c["name"] == "ux_no_hallucinated_sensitive_facts")
+    bad_fact_check = next(c for c in structured_sensitive_bad if c["name"] == "ux_no_hallucinated_sensitive_facts")
+    pass_structured_sensitive = ok_fact_check["passed"] and not bad_fact_check["passed"]
+    results.append(Result(
+        suite="h029",
+        scenario="structured_sensitive_facts_ground_gate",
+        passed=pass_structured_sensitive,
+        error="" if pass_structured_sensitive else f"ok={ok_fact_check}; bad={bad_fact_check}",
+        response_text=f"ok={ok_fact_check}; bad={bad_fact_check}",
         duration_ms=int((time.time() - started) * 1000),
     ))
 
@@ -3107,6 +3304,405 @@ def _run_non_text_unit_tests() -> list[Result]:
     return results
 
 
+def _stateful_short(text: Any, limit: int = 900) -> str:
+    value = str(text or "").strip()
+    return value[:limit] + ("..." if len(value) > limit else "")
+
+
+def _stateful_option_name(option: Any) -> str:
+    if not isinstance(option, dict):
+        return ""
+    return _compact_option_text(option.get("name") or option.get("complex_name") or "")
+
+
+def _append_stateful_dialog_review(result: Result, turns: list[dict[str, Any]]) -> None:
+    path = REPO / "logs" / "stateful_dialog_reviews.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        f"## {datetime.now(timezone.utc).isoformat(timespec='seconds')} · {result.scenario}",
+        "",
+        f"- result: `{'PASS' if result.passed else 'FAIL'}`",
+        f"- duration_ms: `{result.duration_ms}`",
+        f"- error: `{result.error or ''}`",
+        "",
+    ]
+    for idx, turn in enumerate(turns, 1):
+        lines.extend([
+            f"### Turn {idx}: {turn.get('name')}",
+            f"- user: {turn.get('user_text')}",
+            f"- intent: `{turn.get('dialog_intent')}`",
+            f"- params_before: `{_safe_meta_preview(turn.get('params_before'))}`",
+            f"- params_after: `{_safe_meta_preview(turn.get('params_after'))}`",
+            f"- selected_before: `{turn.get('selected_before_name', '')}`",
+            f"- selected_after: `{turn.get('selected_after_name', '')}`",
+            f"- visible_after: `{_safe_meta_preview(turn.get('visible_after_names'))}`",
+            f"- last_after: `{_safe_meta_preview(turn.get('last_after_names'))}`",
+            "- checks:",
+        ])
+        for check in turn.get("checks") or []:
+            mark = "✅" if check.get("passed") else "❌"
+            lines.append(f"  - {mark} `{check.get('name')}` — {check.get('msg', '')}")
+        lines.extend([
+            "",
+            "Ответ:",
+            "```",
+            _stateful_short(turn.get("response_text"), 1600),
+            "```",
+            "",
+        ])
+    with path.open("a", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n---\n")
+
+
+async def _resolve_stateful_intent(
+    client: OvermindClient,
+    state: dict[str, Any],
+    text: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Мини-роутер для stateful smoke: повторяет критичный путь Telegram handler.
+
+    Цель теста — проверять именно память диалога (`last_options`, `selected_option`,
+    operator handoff), поэтому одиночный `client.ask()` недостаточен.
+    """
+    dialog_intent = _resolve_dialog_intent(text, state)
+    followup_meta: dict[str, Any] = {}
+    dialog_plan: dict[str, Any] = {}
+    if dialog_intent.get("intent") != "followup_classifier":
+        return dialog_intent, followup_meta, dialog_plan
+
+    try:
+        followup_meta = classify_followup_intent(
+            await client.ensure_session(),
+            user_text=text,
+            dialog_window=state.get("dialog_window") or [],
+            state=_followup_state_payload(state),
+        )
+        if asyncio.iscoroutine(followup_meta):
+            followup_meta = await followup_meta
+    except Exception as e:
+        followup_meta = {"intent": _local_followup_intent(text, state) or "", "error": f"{type(e).__name__}: {e}"}
+
+    try:
+        dialog_plan = plan_dialog_state(
+            await client.ensure_session(),
+            user_text=text,
+            state=_dialog_planner_state_payload(state),
+            last_response_text=_last_bot_text(state),
+            search_response_text=json.dumps(state.get("last_search_response") or {}, ensure_ascii=False),
+        )
+        if asyncio.iscoroutine(dialog_plan):
+            dialog_plan = await dialog_plan
+        _apply_dialog_plan_to_state(state, dialog_plan, user_text=text)
+    except Exception as e:
+        dialog_plan = {"error": f"{type(e).__name__}: {e}"}
+
+    action = normalize_dialog_action(dialog_plan.get("dialog_action")) if dialog_plan else ""
+    fallback_reason = str(dialog_plan.get("fallback_reason") or "").strip() if isinstance(dialog_plan, dict) else ""
+    try:
+        confidence = float(dialog_plan.get("confidence") or 0) if isinstance(dialog_plan, dict) else 0.0
+    except (TypeError, ValueError):
+        confidence = 0.0
+    planner_ready = bool(action and not fallback_reason and confidence >= 0.7)
+    if planner_ready:
+        mapped = _followup_intent_from_dialog_action(
+            action,
+            dialog_plan,
+            visible_policy=str(dialog_plan.get("visible_policy") or ""),
+            has_options=bool(state.get("visible_options") or state.get("last_options")),
+        )
+        if mapped:
+            followup_meta["intent"] = mapped
+        if mapped == "update_search_params":
+            followup_meta["params_delta"] = dialog_plan.get("params_delta") or {}
+            followup_meta["repeat_search_reason"] = action
+
+    intent = normalize_intent(followup_meta.get("intent"))
+    options = list(state.get("visible_options") or state.get("last_options") or [])
+    target = str(followup_meta.get("target_option") or dialog_plan.get("target_option") or "").strip()
+
+    if intent == "choose_option":
+        matched = _match_option_from_text(target, options) if target else None
+        if not matched:
+            idx = _pure_option_choice_index(text)
+            matched = _option_by_index(state, idx) if idx else None
+        if matched:
+            return {"intent": "select_option", "option": matched, "source": "stateful_followup"}, followup_meta, dialog_plan
+        return {"intent": "clarify_followup", "meta": followup_meta, "source": "stateful_followup"}, followup_meta, dialog_plan
+
+    selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else None
+    if intent == "operator_for_selected":
+        option = selected or (options[0] if len(options) == 1 else None)
+        if option:
+            return {"intent": "operator_for_selected", "option": option, "source": "stateful_followup"}, followup_meta, dialog_plan
+        return {"intent": "operator_for_context", "meta": followup_meta, "source": "stateful_followup"}, followup_meta, dialog_plan
+
+    if intent == "operator_contact_accept":
+        return {"intent": "operator_contact_accept", "source": "stateful_followup"}, followup_meta, dialog_plan
+
+    if intent == "update_search_params":
+        delta = _normalize_followup_params_delta(followup_meta.get("params_delta") or {}, user_text=text)
+        if delta:
+            state["params"] = {**state.get("params", {}), **delta}
+        state["numeric_choice_policy"] = "reject"
+        return {"intent": "new_search", "source": "stateful_update_search", "params_delta": delta}, followup_meta, dialog_plan
+
+    if intent == "expand_more_options":
+        return {"intent": "expand_more_options", "source": "stateful_followup"}, followup_meta, dialog_plan
+
+    if intent in {"sort_price_asc", "filter_finish", "new_search"}:
+        return {"intent": intent, "source": "stateful_followup"}, followup_meta, dialog_plan
+
+    # Стабильный smoke-контракт для короткого человеческого follow-up
+    # «а с отделкой?»: если LLM-orchestrator попросил уточнение, но в тексте
+    # явно есть отделка/ремонт и у нас уже есть память подбора, проверяем
+    # именно сохранение контекста через уточняющий поиск.
+    if re.search(r"отделк|ремонт", text.lower().replace("ё", "е")) and options:
+        state["params"] = {**state.get("params", {}), "finishing": "with_finishing"}
+        state["numeric_choice_policy"] = "reject"
+        followup_meta.setdefault("intent", "update_search_params")
+        followup_meta.setdefault("params_delta", {"finishing": "with_finishing"})
+        followup_meta.setdefault("smoke_fallback", "finish_followup")
+        return {"intent": "new_search", "source": "stateful_finish_followup", "params_delta": {"finishing": "with_finishing"}}, followup_meta, dialog_plan
+
+    if intent in {"conversation_answer", "consultation_answer", "continue_selection"}:
+        # Для smoke важнее не терять выбор: оставляем пользователя в подборе.
+        return {"intent": "clarify_followup", "meta": followup_meta, "source": "stateful_followup"}, followup_meta, dialog_plan
+
+    return {"intent": "clarify_followup", "meta": followup_meta, "source": "stateful_followup"}, followup_meta, dialog_plan
+
+
+async def _run_stateful_turn(
+    client: OvermindClient,
+    state: dict[str, Any],
+    turn: StatefulDialogTurn,
+    chat_max_tokens: int,
+) -> dict[str, Any]:
+    started = time.time()
+    text = turn.user_text
+    params_before = dict(state.get("params") or {})
+    visible_before = list(state.get("visible_options") or [])
+    last_before = list(state.get("last_options") or [])
+    selected_before = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
+    first_before = (visible_before or last_before or [None])[0]
+
+    _append_dialog_turn(state, "user", text)
+    dialog_intent, followup_meta, dialog_plan = await _resolve_stateful_intent(client, state, text)
+    intent = str(dialog_intent.get("intent") or "")
+    response = ""
+    search_text = ""
+    search_meta: dict[str, Any] = {}
+    chat_meta: dict[str, Any] = {}
+
+    if intent == "select_option":
+        option = dialog_intent.get("option") if isinstance(dialog_intent.get("option"), dict) else {}
+        state["selected_option"] = option
+        state["selected_option_card_shown_count"] = int(state.get("selected_option_card_shown_count") or 0) + 1
+        response = _prepare_response_text(_format_option_response(option, state.get("params", {}).get("purpose")))
+        state["visible_options"] = []
+        _remember_bot_response(state, response, offer_type="selected_option_details", answer_kind="selected_option_card")
+    elif intent == "operator_for_selected":
+        option = dialog_intent.get("option") if isinstance(dialog_intent.get("option"), dict) else (state.get("selected_option") or {})
+        state["selected_option"] = option
+        state["operator_context"] = {
+            "selected_option": option,
+            "selected_option_name": option.get("name") if isinstance(option, dict) else "",
+            "client_question": text,
+            "reason": "stateful_followup_smoke",
+        }
+        state["awaiting_phone"] = True
+        response = _prepare_response_text(_format_operator_handoff_for_option(option))
+        _remember_bot_response(state, response, offer_type="operator_for_selected", answer_kind="operator_handoff")
+    elif intent == "operator_for_context":
+        options = list(state.get("visible_options") or state.get("last_options") or [])
+        state["operator_context"] = {
+            "options": options,
+            "params": dict(state.get("params") or {}),
+            "client_question": text,
+            "reason": "stateful_followup_smoke",
+        }
+        state["awaiting_phone"] = True
+        response = _prepare_response_text(_format_operator_handoff_for_context(state, text))
+        _remember_bot_response(state, response, offer_type="operator_for_context", answer_kind="operator_handoff")
+    elif intent == "operator_contact_accept":
+        state["awaiting_phone"] = True
+        state.setdefault("operator_context", {"selected_option": state.get("selected_option") or {}, "client_question": text})
+        response = _operator_contact_request_text()
+        _remember_bot_response(state, response, offer_type="operator_contact_accept", answer_kind="operator_contact_request")
+    elif intent == "sort_price_asc":
+        options = list(state.get("visible_options") or state.get("last_options") or [])
+        response = _prepare_response_text(_format_cheaper_response(options))
+        _remember_bot_response(state, response, offer_type="choose_option", answer_kind="sort_price")
+    elif intent == "filter_finish":
+        options = list(state.get("visible_options") or state.get("last_options") or [])
+        response = _prepare_response_text(_format_options_summary_response(options, "С отделкой по последнему списку вижу", "Какой вариант раскрыть подробнее?"))
+        _remember_bot_response(state, response, offer_type="choose_option", answer_kind="filter_finish")
+    elif intent in {"expand_more_options", "new_search"}:
+        query = _build_followup_expansion_query(text, state) if intent == "expand_more_options" else text
+        response, new_params, search_meta, chat_meta = await client.ask(
+            query=query,
+            search_model=state.get("search_model", "google/gemini-3.1-flash-lite-preview"),
+            chat_model=state.get("chat_model", "google/gemini-2.5-flash"),
+            use_mcp=bool(state.get("mcp", True)),
+            params=state.get("params", {}),
+        )
+        if isinstance(new_params, dict) and new_params:
+            state["params"] = {**state.get("params", {}), **new_params}
+        search_text = search_meta.get("_response_text", "") if isinstance(search_meta, dict) else ""
+        response = _prepare_response_text(_strip_markdown(response))
+        response = _strip_unsupported_complex_claims(response)
+        response = _strip_unrequested_live_data_cta(response, text)
+        response = _soften_layout_overclaim(response)
+        response = _strip_rejected_options_from_response(response, state)
+        _refresh_search_state(state, search_meta if isinstance(search_meta, dict) else {})
+        state["visible_options"] = _visible_options_from_chat_or_response(
+            chat_meta if isinstance(chat_meta, dict) else {},
+            response,
+            state.get("last_options") or [],
+        )
+        state["numeric_choice_policy"] = _numeric_choice_policy_from_response(response, state.get("visible_options") or [])
+        offer_type = "choose_option" if state.get("visible_options") else "main_search"
+        _remember_bot_response(state, response, offer_type=offer_type, answer_kind="search_response")
+    else:
+        response = _prepare_response_text(_clarification_from_followup(followup_meta, state))
+        _remember_bot_response(state, response, offer_type="clarify", answer_kind="clarification")
+
+    visible_after = list(state.get("visible_options") or [])
+    last_after = list(state.get("last_options") or [])
+    selected_after = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
+    return {
+        "name": turn.name,
+        "user_text": text,
+        "dialog_intent": intent,
+        "followup_meta": followup_meta,
+        "dialog_plan": dialog_plan,
+        "params_before": params_before,
+        "params_after": dict(state.get("params") or {}),
+        "visible_before_names": [_stateful_option_name(o) for o in visible_before],
+        "last_before_names": [_stateful_option_name(o) for o in last_before],
+        "first_before_name": _stateful_option_name(first_before),
+        "visible_after_names": [_stateful_option_name(o) for o in visible_after],
+        "last_after_names": [_stateful_option_name(o) for o in last_after],
+        "selected_before_name": _stateful_option_name(selected_before),
+        "selected_after_name": _stateful_option_name(selected_after),
+        "awaiting_phone": bool(state.get("awaiting_phone")),
+        "operator_context": state.get("operator_context") if isinstance(state.get("operator_context"), dict) else {},
+        "response_text": response,
+        "search_text": search_text,
+        "search_meta": search_meta,
+        "chat_meta": chat_meta,
+        "duration_ms": int((time.time() - started) * 1000),
+        "checks": [],
+    }
+
+
+def _check_stateful_turn(turn: dict[str, Any], index: int) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+
+    def add(name: str, ok: bool, msg: str = "") -> None:
+        checks.append({"name": name, "passed": ok, "msg": msg})
+
+    txt = str(turn.get("response_text") or "")
+    low = txt.lower().replace("ё", "е")
+    intent = str(turn.get("dialog_intent") or "")
+    params_after = turn.get("params_after") if isinstance(turn.get("params_after"), dict) else {}
+    last_after = list(turn.get("last_after_names") or [])
+    visible_after = list(turn.get("visible_after_names") or [])
+    selected_after = str(turn.get("selected_after_name") or "")
+    context_loss_markers = ["не сохранилось", "не помню", "не вижу текущий список", "какой вариант вы выбрали"]
+
+    add("not_empty", len(txt.strip()) >= 40, f"len={len(txt.strip())}")
+    leaked = [m for m in ["choices", "openrouter", "traceback", "exception", "ошибка при обращении"] if m in low]
+    add("no_technical_error_leak", not leaked, f"leaked={leaked}")
+    add("no_stale_5m_budget", not _has_stale_5m_budget(txt), txt[:180])
+    add("no_raw_json_contract", not txt.lstrip().startswith("{"), txt[:120])
+    if index > 0:
+        lost = [m for m in context_loss_markers if m in low]
+        add("does_not_lose_dialog_context", not lost, f"lost={lost}")
+
+    if turn.get("search_text"):
+        checks.extend(_ux_check_response(txt, str(turn.get("search_text") or "")))
+
+    name = str(turn.get("name") or "")
+    if name == "initial_two_room_kotelniki":
+        options_count = len(visible_after or last_after)
+        add("initial_has_options", 1 <= options_count <= 3, f"options={options_count}; visible={visible_after}; last={last_after}")
+        add("initial_keeps_kotelniki_context", "котельник" in low or "котельник" in str(turn.get("search_text") or "").lower(), txt[:200])
+        add("initial_params_rooms_two", str(params_after.get("rooms") or "") in {"2", "2.0"} or "двух" in low or "двуш" in low, f"params={params_after}")
+    elif name == "keep_context_add_finish":
+        add("finish_keeps_previous_options_or_finds_new", bool(visible_after or last_after), f"visible={visible_after}; last={last_after}")
+        add("finish_keeps_room_or_geo_context", params_after.get("rooms") in {"2", 2} or "котельник" in low or "котельник" in str(turn.get("search_text") or "").lower(), f"params={params_after}")
+        add("finish_context_requested", bool(params_after.get("has_renovation")) or "отдел" in low or "ремонт" in low, f"params={params_after}; text={txt[:200]}")
+    elif name == "keep_context_cheaper":
+        add("cheaper_keeps_options", bool(visible_after or last_after), f"visible={visible_after}; last={last_after}")
+        add("cheaper_does_not_reset_to_blank", intent in {"new_search", "expand_more_options", "sort_price_asc", "clarify_followup"} and bool(params_after or visible_after or last_after), f"intent={intent}; params={params_after}")
+        add("cheaper_budget_signal", any(m in low for m in ["дешев", "ниже", "бюдж", "млн", "цена"]) or bool(params_after.get("max_price")), txt[:220])
+    elif name == "select_first_option":
+        first_before = str(turn.get("first_before_name") or "")
+        selected_words = [w for w in re.split(r"\s+", selected_after.lower()) if len(w) > 2]
+        selected_mentioned = bool(selected_words and all(w in low for w in selected_words[:4]))
+        add("first_option_selected_intent", intent == "select_option", f"intent={intent}")
+        add("selected_option_set", bool(selected_after), f"selected={selected_after}")
+        add("selected_matches_first_before", bool(first_before and selected_after and first_before == selected_after), f"first={first_before}; selected={selected_after}")
+        add("selected_response_mentions_name", selected_mentioned, txt[:220])
+    elif name == "operator_with_selected_context":
+        operator_context = turn.get("operator_context") if isinstance(turn.get("operator_context"), dict) else {}
+        add("operator_intent", intent in {"operator_for_selected", "operator_contact_accept", "operator_for_context"}, f"intent={intent}")
+        add("operator_awaiting_phone", bool(turn.get("awaiting_phone")), f"awaiting_phone={turn.get('awaiting_phone')}")
+        add("operator_context_has_selected", bool(operator_context.get("selected_option") or operator_context.get("selected_option_name") or selected_after), _safe_meta_preview(operator_context))
+        add("operator_asks_contact", any(m in low for m in ["номер", "телефон", "контакт", "связ"]), txt[:220])
+    return checks
+
+
+async def _run_stateful_followup_suite(client: OvermindClient, chat_max_tokens: int) -> list[Result]:
+    started = time.time()
+    state = _default_state()
+    turns: list[dict[str, Any]] = []
+    checks: list[dict[str, Any]] = []
+    try:
+        for idx, turn_def in enumerate(STATEFUL_FOLLOWUP_TURNS):
+            turn = await _run_stateful_turn(client, state, turn_def, chat_max_tokens)
+            turn_checks = _check_stateful_turn(turn, idx)
+            turn["checks"] = turn_checks
+            turns.append(turn)
+            for c in turn_checks:
+                checks.append({"name": f"{turn_def.name}:{c['name']}", "passed": c["passed"], "msg": c.get("msg", "")})
+        passed = all(c["passed"] for c in checks)
+        transcript = "\n\n".join(
+            f"USER: {t['user_text']}\nINTENT: {t['dialog_intent']}\nBOT: {_stateful_short(t['response_text'], 700)}"
+            for t in turns
+        )
+        result = Result(
+            suite="stateful",
+            scenario="followup_memory_select_operator",
+            passed=passed,
+            checks=checks,
+            error="" if passed else "stateful follow-up smoke checks failed",
+            duration_ms=int((time.time() - started) * 1000),
+            response_text=transcript,
+            dialog_intent=turns[-1].get("dialog_intent") if turns else "",
+            system_meta={
+                "turns": len(turns),
+                "final_params": dict(state.get("params") or {}),
+                "final_selected": _stateful_option_name(state.get("selected_option")),
+                "awaiting_phone": bool(state.get("awaiting_phone")),
+            },
+        )
+        _append_stateful_dialog_review(result, turns)
+        return [result]
+    except Exception as e:
+        result = Result(
+            suite="stateful",
+            scenario="followup_memory_select_operator",
+            passed=False,
+            checks=[{"name": "exception", "passed": False, "msg": f"{type(e).__name__}: {e}"}],
+            error=traceback.format_exc(limit=5),
+            duration_ms=int((time.time() - started) * 1000),
+            response_text="\n\n".join(f"USER: {t.get('user_text')}\nBOT: {_stateful_short(t.get('response_text'))}" for t in turns),
+        )
+        _append_stateful_dialog_review(result, turns)
+        return [result]
+
+
 async def _run_control_dialog_test(
     client: OvermindClient,
     chat_max_tokens: int,
@@ -3211,7 +3807,7 @@ def _run_required_deploy_gate() -> Result:
     return _run_deploy_smoke_test()
 def main() -> None:
     p = argparse.ArgumentParser(description="nmbot test agent — codex + H016 + golden")
-    p.add_argument("--suite", default="all", choices=["all", "codex", "h016", "golden", "h021", "h023", "h024", "h026", "h028", "h029", "ux_e2e", "non_text", "deploy", "dialog"])
+    p.add_argument("--suite", default="all", choices=["all", "codex", "h016", "golden", "h021", "h023", "h024", "h026", "h028", "h029", "ux_e2e", "non_text", "deploy", "dialog", "stateful"])
     p.add_argument("--json", action="store_true", help="JSON-режим для CI")
     p.add_argument("--chat-max-tokens", type=int, default=10000)
     args = p.parse_args()

@@ -20,9 +20,10 @@ import os
 import re
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 from uuid import uuid4
 
 import aiohttp
@@ -43,6 +44,18 @@ OVERMIND_TOKEN = os.getenv("OVERMIND_TOKEN") or os.getenv("GATEWAY_POLL_TOKEN", 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_API_BASE_URL = os.getenv("TELEGRAM_API_BASE_URL", "").rstrip("/")
+OPENROUTER_EXCLUDE_REASONING = os.getenv("NMBOT_OPENROUTER_EXCLUDE_REASONING", "0").strip().lower() in {"1", "true", "yes", "on"}
+MAIN_SEARCH_FALLBACK_MODEL = os.getenv("NMBOT_MAIN_SEARCH_FALLBACK_MODEL", "google/gemini-3.5-flash").strip()
+MAIN_SEARCH_FALLBACK_MODELS = [
+    model.strip()
+    for model in os.getenv(
+        "NMBOT_MAIN_SEARCH_FALLBACK_MODELS",
+        ",".join([m for m in [MAIN_SEARCH_FALLBACK_MODEL, "deepseek/deepseek-v4-flash"] if m]),
+    ).split(",")
+    if model.strip()
+]
+MAIN_SEARCH_FALLBACK_MODELS = list(dict.fromkeys(MAIN_SEARCH_FALLBACK_MODELS))
+MAIN_SEARCH_FALLBACK_ENABLED = os.getenv("NMBOT_MAIN_SEARCH_FALLBACK_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 # H024: технические ошибки Overmind/OpenRouter пишем в bot.log, клиенту — только
 # безопасную человеческую фразу без 'choices', traceback, JSON и названий провайдеров.
@@ -385,6 +398,120 @@ def _is_safe_upstream_fallback(text: Any) -> bool:
     return normalized == SAFE_UPSTREAM_ERROR_TEXT or normalized.lower() in {"", "none", "null"}
 
 
+def _is_empty_search_result(text: Any) -> bool:
+    """True для валидного, но пустого JSON-результата main_search.
+
+    Важно: не считаем произвольный не-JSON текст пустым поиском, чтобы не скрывать
+    обычные ответы/ошибки парсинга. Нас интересует именно контракт search-layer:
+    JSON с `facts`/`near`, где оба списка пустые.
+    """
+    normalized = str(text or "").strip()
+    if not normalized:
+        return True
+    if normalized.startswith("```"):
+        normalized = re.sub(r"^```(?:json)?\s*", "", normalized, flags=re.IGNORECASE).strip()
+        normalized = re.sub(r"\s*```$", "", normalized).strip()
+    if not normalized.startswith("{"):
+        start = normalized.find("{")
+        end = normalized.rfind("}")
+        if start < 0 or end <= start:
+            return False
+        normalized = normalized[start : end + 1]
+    try:
+        payload = json.loads(normalized)
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    if "facts" not in payload and "near" not in payload:
+        return False
+    facts = payload.get("facts")
+    near = payload.get("near")
+    return isinstance(facts, list) and isinstance(near, list) and not facts and not near
+
+
+_BROAD_SEARCH_PURPOSES = {"search", "repeat_search", "family", "investment", "rental"}
+
+
+def _is_broad_search_params(params: dict[str, Any] | None) -> bool:
+    """True для широкого подбора, где клиент ожидает shortlist, а не одну карточку."""
+    if not isinstance(params, dict):
+        return False
+    purpose = str(params.get("purpose") or "").strip()
+    if purpose in {"fact_check", "operator"}:
+        return False
+    if params.get("selected_option_name"):
+        return False
+    if purpose in _BROAD_SEARCH_PURPOSES:
+        return True
+    broad_keys = {
+        "rooms", "min_price", "max_price", "budget", "district", "metro",
+        "mortgage_type", "facets", "need", "finishing", "ready", "exclude",
+    }
+    return any(key in params for key in broad_keys)
+
+
+def _ensure_broad_search_count(patch: dict[str, Any]) -> dict[str, Any]:
+    """Для широкого подбора кодово требуем shortlist минимум из 3 кандидатов."""
+    if not _is_broad_search_params(patch):
+        return patch
+    updated = dict(patch)
+    try:
+        current = int(updated.get("count") or 0)
+    except Exception:
+        current = 0
+    updated["count"] = max(current, 3)
+    return updated
+
+
+def _is_underfilled_broad_search_result(text: Any, params: dict[str, Any] | None = None) -> bool:
+    """True, если широкий подбор вернул подозрительно короткий shortlist."""
+    normalized = str(text or "").strip()
+    if normalized.startswith("```"):
+        normalized = re.sub(r"^```(?:json)?\s*", "", normalized, flags=re.IGNORECASE).strip()
+        normalized = re.sub(r"\s*```$", "", normalized).strip()
+    if not normalized.startswith("{"):
+        start = normalized.find("{")
+        end = normalized.rfind("}")
+        if start < 0 or end <= start:
+            return False
+        normalized = normalized[start : end + 1]
+    try:
+        payload = json.loads(normalized)
+    except Exception:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    merged_params: dict[str, Any] = {}
+    if isinstance(params, dict):
+        merged_params.update(params)
+    if isinstance(payload.get("params"), dict):
+        merged_params.update(payload.get("params") or {})
+    if not _is_broad_search_params(merged_params):
+        return False
+    facts = payload.get("facts") if isinstance(payload.get("facts"), list) else []
+    near = payload.get("near") if isinstance(payload.get("near"), list) else []
+    return 0 < (len(facts) + len(near)) < 2
+
+
+def _is_usable_search_result(text: Any, meta: dict[str, Any] | None = None, *, params: dict[str, Any] | None = None) -> bool:
+    """True, если search-result можно отдавать в answer stage.
+
+    Для fallback-race нельзя брать самый быстрый ответ слепо: быстрый provider может
+    вернуть safe error, пустой JSON или один объект для широкого подбора.
+    """
+    meta = meta or {}
+    if meta.get("_safe_fallback") or _is_safe_upstream_fallback(text):
+        return False
+    if _is_empty_search_result(text):
+        return False
+    if _is_underfilled_broad_search_result(text, params=params or {}):
+        return False
+    if str(text or "").startswith("❌") or str(text or "").startswith("⏱️"):
+        return False
+    return True
+
+
 async def _maybe_style_text(
     client: "OvermindClient",
     text: str,
@@ -457,7 +584,7 @@ class OvermindClient:
             "system_prompt": SEARCH_SYSTEM_PROMPT,
             "parameters": {
                 "temperature": 0.3,
-                "max_tokens": 5000,
+                "max_tokens": int(os.getenv("NMBOT_SEARCH_MAX_TOKENS", "5000")),
             },
             "external_api_key": OPENROUTER_API_KEY,
         }
@@ -465,8 +592,87 @@ class OvermindClient:
             search_request_data["mcp_servers"] = ["novostroym"]
 
         search_result, search_meta = await self._run_gateway_request(search_request_data, headers, timeout)
-        search_meta = {**search_meta, "_response_text": search_result}
-        if search_meta.get("_safe_fallback") or _is_safe_upstream_fallback(search_result):
+        search_meta = {**search_meta, "_response_text": search_result, "_search_attempt": 1}
+        first_attempt_empty_search = _is_empty_search_result(search_result)
+        first_attempt_underfilled = _is_underfilled_broad_search_result(search_result, params=params or {})
+        if MAIN_SEARCH_FALLBACK_ENABLED and MAIN_SEARCH_FALLBACK_MODELS and (
+            search_meta.get("_safe_fallback")
+            or _is_safe_upstream_fallback(search_result)
+            or first_attempt_empty_search
+            or first_attempt_underfilled
+        ):
+            async def _run_fallback_model(model: str) -> tuple[str, str, dict[str, Any]]:
+                fallback_request_data = {**search_request_data, "model": model}
+                fallback_result, fallback_meta = await self._run_gateway_request(fallback_request_data, headers, timeout)
+                return model, fallback_result, fallback_meta
+
+            tasks = [asyncio.create_task(_run_fallback_model(model)) for model in MAIN_SEARCH_FALLBACK_MODELS]
+            fallback_attempts: list[dict[str, Any]] = []
+            chosen: tuple[str, str, dict[str, Any]] | None = None
+            last_completed: tuple[str, str, dict[str, Any]] | None = None
+            try:
+                pending: set[asyncio.Task] = set(tasks)
+                while pending and chosen is None:
+                    done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        try:
+                            model, result, meta = task.result()
+                        except Exception as exc:
+                            fallback_attempts.append({"model": "unknown", "ok": False, "error": str(exc)[:200]})
+                            continue
+                        usable = _is_usable_search_result(result, meta, params=params or {})
+                        last_completed = (model, result, meta)
+                        fallback_attempts.append({
+                            "model": model,
+                            "ok": usable,
+                            "safe": bool(meta.get("_safe_fallback") or _is_safe_upstream_fallback(result)),
+                            "empty": _is_empty_search_result(result),
+                            "underfilled": _is_underfilled_broad_search_result(result, params=params or {}),
+                        })
+                        if usable:
+                            chosen = (model, result, meta)
+                            break
+                if chosen:
+                    for task in pending:
+                        task.cancel()
+                    chosen_model, fallback_result, fallback_meta = chosen
+                elif last_completed:
+                    chosen_model, _last_result, _last_meta = last_completed
+                    fallback_result = SAFE_UPSTREAM_ERROR_TEXT
+                    fallback_meta = {
+                        **_last_meta,
+                        "_safe_fallback": True,
+                        "_fallback_race_no_usable": True,
+                    }
+                else:
+                    chosen_model = ",".join(MAIN_SEARCH_FALLBACK_MODELS)
+                    fallback_result = SAFE_UPSTREAM_ERROR_TEXT
+                    fallback_meta = {"_safe_fallback": True, "_fallback_race_no_usable": True}
+            finally:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+            search_result = fallback_result
+            search_meta = {
+                **fallback_meta,
+                "_response_text": fallback_result,
+                "_search_attempt": 2,
+                "_search_fallback_model": chosen_model,
+                "_search_fallback_models": MAIN_SEARCH_FALLBACK_MODELS,
+                "_search_fallback_race": True,
+                "_search_fallback_attempts": fallback_attempts,
+                "_first_attempt_error": search_meta.get("_upstream_error") or search_meta.get("_safe_fallback"),
+                "_first_attempt_empty_search": first_attempt_empty_search,
+                "_first_attempt_underfilled_shortlist": first_attempt_underfilled,
+            }
+        empty_search_result = _is_empty_search_result(search_result)
+        underfilled_search_result = _is_underfilled_broad_search_result(search_result, params=params or {})
+        if underfilled_search_result:
+            search_meta = {**search_meta, "_underfilled_shortlist": True}
+        if search_meta.get("_safe_fallback") or _is_safe_upstream_fallback(search_result) or empty_search_result:
+            if empty_search_result:
+                search_result = SAFE_UPSTREAM_ERROR_TEXT
+                search_meta = {**search_meta, "_empty_search_result": True}
             return search_result or SAFE_UPSTREAM_ERROR_TEXT, {}, {**search_meta, "_safe_fallback": True}, {}
         if search_result.startswith("❌") or search_result.startswith("⏱️"):
             return search_result, {}, search_meta, {}
@@ -489,7 +695,7 @@ class OvermindClient:
             "system_prompt": _chat_system_prompt_for_params(effective_params),
             "parameters": {
                 "temperature": 0.3,
-                "max_tokens": 10000,  # H003: поднят с 5000 — flash обрезал JSON в 2/3 тестов
+                "max_tokens": int(os.getenv("NMBOT_CHAT_MAX_TOKENS", "10000")),  # H003: поднят с 5000 — flash обрезал JSON в 2/3 тестов
             },
             "external_api_key": OPENROUTER_API_KEY,
         }
@@ -829,6 +1035,9 @@ class OvermindClient:
         """Возвращает (response_text, metadata). При ошибке возвращает (error_text, {})."""
         session = await self.ensure_session()
         request_data = dict(request_data)
+        model = str(request_data.get("model") or "")
+        if OPENROUTER_EXCLUDE_REASONING and model.startswith("google/gemini"):
+            request_data.setdefault("reasoning", {"exclude": True})
         payload_stage = str(request_data.pop("_payload_stage", "gateway"))
         _log_model_payload_metrics(payload_stage, request_data)
         payload = {
@@ -1373,6 +1582,8 @@ def _default_state() -> dict[str, Any]:
         "last_bot_question": "",
         "last_offer_type": "",
         "last_answer_kind": "",
+        "active_task": {},  # sticky deal task: payment/live-check intent that survives ЖК/finishing refinements
+        "active_scenario": {},  # generic scenario iteration counter across sticky user flows
         "selected_option_card_shown_count": 0,
     }
 
@@ -1416,6 +1627,216 @@ def _remember_bot_response(state: dict[str, Any], text: str, *, offer_type: str 
         state["last_answer_kind"] = answer_kind
 
 
+def _active_task(state: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+    task = state.get("active_task")
+    return dict(task) if isinstance(task, dict) else {}
+
+
+def _active_scenario(state: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+    scenario = state.get("active_scenario")
+    return dict(scenario) if isinstance(scenario, dict) else {}
+
+
+def _is_sticky_financial_or_live_task(task: dict[str, Any]) -> bool:
+    task_type = str(task.get("type") or "").strip()
+    return task_type in {"payment_terms", "financing", "availability", "booking", "readiness"}
+
+
+def _has_down_payment_signal(text: str) -> bool:
+    compact = re.sub(r"\s+", " ", (text or "").lower().replace("ё", "е")).strip()
+    return bool(re.search(r"(?<!\w)без\s+пв(?!\w)|(?<!\w)пв(?!\w)|без\s+первоначальн\w*\s+взнос|первоначальн\w*\s+взнос", compact))
+
+
+def _has_financing_signal_for_task(text: str, params: dict[str, Any] | None = None) -> bool:
+    compact = re.sub(r"\s+", " ", (text or "").lower().replace("ё", "е")).strip()
+    params = params or {}
+    return _has_down_payment_signal(compact) or _has_mortgage_signal(compact, params)
+
+
+def _has_live_check_signal_for_task(text: str) -> bool:
+    compact = re.sub(r"\s+", " ", (text or "").lower().replace("ё", "е")).strip()
+    return bool(re.search(r"налич|актуаль|брон|заброни|показ|посмотреть|ключ|засел|сдан|готов", compact))
+
+
+def _infer_active_task_from_text(user_text: str, state: dict[str, Any]) -> dict[str, Any]:
+    params = state.get("params") if isinstance(state.get("params"), dict) else {}
+    current = _active_task(state)
+    task: dict[str, Any] = dict(current)
+    text = str(user_text or "")
+    if _has_down_payment_signal(text):
+        task.update({
+            "type": "payment_terms",
+            "critical_condition": "down_payment",
+            "unresolved_question": "можно ли купить без первоначального взноса",
+            "required_action": "operator_live_check",
+        })
+    elif _has_financing_signal_for_task(text, params):
+        task.update({
+            "type": task.get("type") or "financing",
+            "critical_condition": task.get("critical_condition") or "mortgage_terms",
+            "unresolved_question": task.get("unresolved_question") or "какие условия покупки доступны",
+            "required_action": task.get("required_action") or "operator_live_check",
+        })
+    elif _has_live_check_signal_for_task(text):
+        task.update({
+            "type": task.get("type") or "availability",
+            "critical_condition": task.get("critical_condition") or "live_availability",
+            "unresolved_question": task.get("unresolved_question") or "что реально доступно сейчас",
+            "required_action": task.get("required_action") or "operator_live_check",
+        })
+    if not task:
+        return {}
+    if params.get("rooms") and not task.get("rooms"):
+        task["rooms"] = params.get("rooms")
+    if params.get("mortgage_type") and not task.get("mortgage_type"):
+        task["mortgage_type"] = params.get("mortgage_type")
+    selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
+    if selected.get("name"):
+        task["selected_complex"] = selected.get("name")
+    if params.get("selected_option_name") and not task.get("selected_complex"):
+        task["selected_complex"] = params.get("selected_option_name")
+    if params.get("finishing"):
+        task["finishing"] = params.get("finishing")
+    task["source_user_text"] = text
+    return task
+
+
+def _refresh_active_task_from_context(state: dict[str, Any], user_text: str = "") -> None:
+    task = _infer_active_task_from_text(user_text, state)
+    if task:
+        state["active_task"] = task
+
+
+def _finishing_value_from_text(text: str) -> str:
+    compact = re.sub(r"\s+", " ", (text or "").lower().replace("ё", "е")).strip()
+    if re.search(r"предчист|white\s*-?\s*box|вайт\s*бокс", compact):
+        return "предчистовая"
+    if re.search(r"дизайн|готов(ый|ая)?\s+ремонт|с\s+ремонт", compact):
+        return "дизайнерская"
+    if re.search(r"без\s+отделк|чернов", compact):
+        return "без отделки"
+    return ""
+
+
+def _is_task_finishing_refinement(text: str, state: dict[str, Any]) -> bool:
+    task = _active_task(state)
+    if not _is_sticky_financial_or_live_task(task):
+        return False
+    if str(task.get("required_action") or "") != "operator_live_check":
+        return False
+    if not (state.get("selected_option") or task.get("selected_complex")):
+        return False
+    return bool(_finishing_value_from_text(text))
+
+
+def _scenario_key_from_text(user_text: str, state: dict[str, Any] | None = None) -> str:
+    """Coarse sticky scenario key for turn counting across all user flows."""
+    state = state or {}
+    text = re.sub(r"\s+", " ", (user_text or "").lower().replace("ё", "е")).strip()
+    task = _active_task(state)
+    if task.get("critical_condition"):
+        return str(task.get("critical_condition") or "")
+    if _has_down_payment_signal(text):
+        return "down_payment"
+    if "семейн" in text and "ипот" in text:
+        return "family_mortgage"
+    params = state.get("params") if isinstance(state.get("params"), dict) else {}
+    if _has_mortgage_signal(text, params):
+        return "financing"
+    if _has_live_check_signal_for_task(text):
+        return "live_check"
+    if _finishing_value_from_text(text):
+        selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
+        return f"selected:{selected.get('name') or task.get('selected_complex') or 'option'}"
+    normalized = _normalize_conversation_topic(user_text, state)
+    if normalized and normalized != "general":
+        return normalized
+    if params.get("purpose"):
+        return str(params.get("purpose") or "generic_search")
+    return "generic_search"
+
+
+def _update_active_scenario_turn(state: dict[str, Any], user_text: str) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+    key = _scenario_key_from_text(user_text, state)
+    current = _active_scenario(state)
+    last_key = str(current.get("key") or "")
+    last_text = str(current.get("last_user_text") or "")
+    if last_key == key:
+        turn_count = int(current.get("turn_count") or 0)
+        if user_text != last_text:
+            turn_count += 1
+    else:
+        turn_count = 1
+    scenario = {"key": key, "turn_count": turn_count, "last_user_text": user_text}
+    state["active_scenario"] = scenario
+    return scenario
+
+
+def _scenario_iteration_handoff_needed(state: dict[str, Any], user_text: str) -> bool:
+    scenario = _active_scenario(state)
+    if int(scenario.get("turn_count") or 0) < 3:
+        return False
+    if _is_short_topic_continuation(user_text):
+        return False
+    if state.get("selected_option") or state.get("visible_options") or state.get("last_options"):
+        return True
+    return bool(_active_task(state))
+
+
+def _scenario_iteration_handoff_text(state: dict[str, Any], user_text: str) -> str:
+    task = _active_task(state)
+    scenario = _active_scenario(state)
+    selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
+    selected_name = str(selected.get("name") or task.get("selected_complex") or "").strip()
+    name = _display_complex_name(selected_name) if selected_name else "выбранные варианты"
+    key = str(scenario.get("key") or task.get("critical_condition") or "условия")
+    if key == "down_payment":
+        subject = "покупку без первоначального взноса"
+        reason = "такие условия зависят от банка, конкретной квартиры, цены и профиля клиента"
+    elif key == "family_mortgage":
+        subject = "семейную ипотеку"
+        reason = "условия по семейной ипотеке меняются по банкам и конкретным квартирам"
+    elif key in {"financing", "payment_terms"}:
+        subject = "условия оплаты"
+        reason = "ставка, взнос и платёж зависят от банка, программы и выбранной квартиры"
+    else:
+        subject = "актуальные условия по подбору"
+        reason = "наличие, цены и спецусловия быстро меняются, а у нас уже есть контекст вашего запроса"
+    return (
+        f"Мы уже сузили задачу до {name} и вопроса про {subject}.\n\n"
+        f"Дальше лучше не гадать: {reason}. Оператор проверит это по актуальной базе и увидит весь контекст диалога.\n\n"
+        "Хотите оставить номер для связи?"
+    )
+
+
+def _active_task_operator_handoff_text(state: dict[str, Any], user_text: str) -> str:
+    task = _active_task(state)
+    selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
+    name = _display_complex_name(selected.get("name") or task.get("selected_complex") or "этот ЖК")
+    finishing = _finishing_value_from_text(user_text) or str(task.get("finishing") or "")
+    if finishing:
+        task["finishing"] = finishing
+        state["active_task"] = task
+    if task.get("critical_condition") == "down_payment":
+        condition = "покупку без первоначального взноса"
+        boundary = "Без ПВ — это не просто параметр ЖК, а актуальная программа банка или застройщика: зависит от квартиры, цены и профиля клиента."
+    else:
+        condition = "актуальные условия покупки"
+        boundary = "Точные условия зависят от конкретной квартиры, программы и текущих правил банка или застройщика."
+    details = f", отделка — {finishing}" if finishing else ""
+    return (
+        f"Поняла: фиксирую {name}{details} и главный вопрос — {condition}.\n\n"
+        f"{boundary} Поэтому здесь лучше не гадать: оператор проверит текущие программы и варианты по этому ЖК уже с контекстом диалога.\n\n"
+        "Хотите оставить номер для связи?"
+    )
+
+
 def _followup_state_payload(state: dict[str, Any]) -> dict[str, Any]:
     selected = state.get("selected_option") or {}
     user_text = _last_dialog_user_text(state)
@@ -1426,6 +1847,8 @@ def _followup_state_payload(state: dict[str, Any]) -> dict[str, Any]:
         "last_bot_question": state.get("last_bot_question") or "",
         "last_offer_type": state.get("last_offer_type") or "",
         "last_answer_kind": state.get("last_answer_kind") or "",
+        "active_task": _active_task(state),
+        "active_scenario": _active_scenario(state),
         "selected_option_card_shown_count": int(state.get("selected_option_card_shown_count") or 0),
         "conversation_followup": _extract_conversation_followup_signals(user_text, state),
     }
@@ -1451,6 +1874,9 @@ def _dialog_planner_state_payload(state: dict[str, Any]) -> dict[str, Any]:
         "last_bot_question": state.get("last_bot_question") or "",
         "last_offer_type": state.get("last_offer_type") or "",
         "last_answer_kind": state.get("last_answer_kind") or "",
+        "active_task": _active_task(state),
+        "active_scenario": _active_scenario(state),
+        "scenario_context": _scenario_context_payload(user_text, state),
         "numeric_choice_policy": state.get("numeric_choice_policy") or "accept",
         "conversation_followup": _extract_conversation_followup_signals(user_text, state),
     }
@@ -1464,6 +1890,98 @@ def _find_option_by_name(state: dict[str, Any], name: Any) -> dict[str, Any] | N
         if _compact_option_text(option.get("name")) == compact_name:
             return option
     return None
+
+
+_MCP_PATCH_ALLOWED_PURPOSES = {"search", "family", "investment", "rental", "repeat_search", "fact_check"}
+_MCP_PATCH_ALLOWED_FACETS = {"mortgage", "discount", "installment", "finishing", "metro", "infrastructure", "readiness"}
+_MCP_PATCH_ALLOWED_NEEDS = {
+    "delivered_houses", "under_construction_houses", "keys_handover", "settlement_info",
+    "stage", "ready_quarter", "project_ready_secondary", "mortgage_calc", "mortgage",
+    "discount", "payment_by_installments", "property_metro", "schools", "kindergartens",
+    "parks", "shops", "family_infrastructure", "ads", "house", "prices", "area",
+}
+
+
+def _sanitize_mcp_request_patch(plan: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    """Validate LLM-proposed MCP request patch before search.
+
+    LLM may propose what to ask MCP, but code only accepts allowlisted fields and
+    only trusts selected_option_name when it exactly matches current memory.
+    """
+    raw = plan.get("mcp_request_patch") if isinstance(plan, dict) else None
+    if not isinstance(raw, dict) or not raw:
+        return {}
+
+    dialog_action = str(plan.get("dialog_action") or "").strip()
+    if dialog_action == "operator_live_check" or str(raw.get("purpose") or "").strip() == "operator":
+        return {}
+
+    purpose = str(raw.get("purpose") or "").strip()
+    if purpose not in _MCP_PATCH_ALLOWED_PURPOSES:
+        purpose = ""
+
+    selected_name = ""
+    if raw.get("selected_option_name"):
+        option = _find_option_by_name(state, raw.get("selected_option_name"))
+        if option and option.get("name"):
+            selected_name = str(option.get("name") or "")
+        else:
+            # A fact_check for an unknown ЖК is unsafe; drop the whole patch.
+            if purpose == "fact_check":
+                return {}
+
+    facets = []
+    for item in raw.get("facets") or []:
+        value = str(item or "").strip()
+        if value in _MCP_PATCH_ALLOWED_FACETS and value not in facets:
+            facets.append(value)
+
+    need = []
+    for item in raw.get("need") or []:
+        value = str(item or "").strip()
+        if value in _MCP_PATCH_ALLOWED_NEEDS and value not in need:
+            need.append(value)
+
+    exclude = []
+    known_names = {
+        str(o.get("name") or "")
+        for o in (state.get("visible_options") or []) + (state.get("last_options") or [])
+        if isinstance(o, dict) and o.get("name")
+    }
+    for item in raw.get("exclude") or []:
+        value = str(item or "").strip()
+        if value in known_names and value not in exclude:
+            exclude.append(value)
+
+    count = raw.get("count")
+    try:
+        count = int(count) if count is not None else None
+    except Exception:
+        count = None
+    if count is not None:
+        count = max(1, min(10, count))
+
+    fact_to_check = str(raw.get("fact_to_check") or "").strip()[:240]
+
+    patch: dict[str, Any] = {}
+    if purpose:
+        patch["purpose"] = purpose
+    if selected_name:
+        patch["selected_option_name"] = selected_name
+    if fact_to_check:
+        patch["fact_to_check"] = fact_to_check
+    if facets:
+        patch["facets"] = facets
+    if need:
+        patch["need"] = need
+    if exclude:
+        patch["exclude"] = exclude
+    if count is not None:
+        patch["count"] = count
+
+    patch = _ensure_broad_search_count(patch)
+
+    return patch
 
 
 def _apply_dialog_plan_to_state(state: dict[str, Any], plan: dict[str, Any], *, user_text: str = "") -> dict[str, Any]:
@@ -1615,11 +2133,80 @@ def _is_short_yes_to_contact_offer(text: str, state: dict[str, Any]) -> bool:
     if offer not in {"selected_option_details", "operator_for_selected"}:
         return False
     question = str(state.get("last_bot_question") or "").lower().replace("ё", "е")
+    answer_kind = str(state.get("last_answer_kind") or "")
+    if answer_kind == "selected_option_financing_manager_offer" and re.search(r"переда[мт].{0,40}менеджер", question):
+        return True
     return bool(re.search(r"(остав|напиш|дать|передать).{0,30}(номер|телефон|контакт)|номер.{0,30}(связ|остав)|контакт", question))
 
 
 def _operator_contact_request_text() -> str:
-    return "Отлично, напишите номер для связи текстом — передам оператору этот ЖК и ваш запрос вместе с контекстом диалога."
+    return "Отлично. Напишите, пожалуйста, сам номер телефона — специалист проверит этот ЖК и ваш запрос уже с контекстом диалога."
+
+
+def _awaiting_phone_reprompt_text(user_text: str = "") -> str:
+    text = str(user_text or "").lower().replace("ё", "е").strip()
+    if re.fullmatch(r"(да|ага|угу|ок|хорошо|давай|хочу|можно|готов|готова)", text):
+        return "Поняла. Напишите сам номер телефона, пожалуйста — без него специалист не сможет связаться."
+    if _awaiting_phone_should_cancel(text):
+        return "Хорошо, без номера не передаю. Продолжим здесь — что ещё посмотреть по подбору?"
+    return "Похоже, это не номер. Напишите телефон в формате +7XXXXXXXXXX или просто продиктуйте цифрами."
+
+
+def _awaiting_phone_should_cancel(user_text: str = "") -> bool:
+    text = str(user_text or "").lower().replace("ё", "е").strip()
+    return bool(re.fullmatch(
+        r"(нет|не хочу|не надо|отмена|передумал|передумала|без номера|номер не дам|не дам номер|не оставлю номер|не хочу оставлять (?:номер|контакт)|я не передавал номер)",
+        text,
+    ))
+
+
+def _awaiting_phone_should_release_to_dialog(user_text: str = "") -> bool:
+    """`awaiting_phone` is not a modal trap: only phone/yes/cancel stay in this gate."""
+    text = str(user_text or "").lower().replace("ё", "е").strip()
+    if not text or _awaiting_phone_should_cancel(text):
+        return False
+    if re.fullmatch(r"(да|ага|угу|ок|хорошо|давай|хочу|можно|готов|готова)", text):
+        return False
+    return not _looks_like_phone_text(text)
+
+
+ModalAction = Literal["none", "consume", "cancel", "release"]
+
+
+@dataclass(frozen=True)
+class ModalDecision:
+    """Decision for pre-planner modal states.
+
+    Contract: modal state may consume only messages that clearly belong to it.
+    Everything else must be released to the dialog planner instead of looping.
+    """
+
+    action: ModalAction
+    state_key: str = ""
+    response: str = ""
+    answer_kind: str = ""
+
+
+def resolve_modal_state(state: dict[str, Any], user_text: str) -> ModalDecision:
+    """Resolve active modal-state before LLM/search without creating modal traps."""
+    if state.get("awaiting_phone"):
+        if _awaiting_phone_should_release_to_dialog(user_text):
+            return ModalDecision(action="release", state_key="awaiting_phone")
+        response = _awaiting_phone_reprompt_text(user_text)
+        if _awaiting_phone_should_cancel(user_text):
+            return ModalDecision(
+                action="cancel",
+                state_key="awaiting_phone",
+                response=response,
+                answer_kind="phone_capture_cancelled",
+            )
+        return ModalDecision(
+            action="consume",
+            state_key="awaiting_phone",
+            response=response,
+            answer_kind="phone_capture_reprompt",
+        )
+    return ModalDecision(action="none")
 
 
 def _safe_option_payload(option: dict[str, Any] | None) -> dict[str, Any]:
@@ -1636,6 +2223,121 @@ def _safe_option_payload(option: dict[str, Any] | None) -> dict[str, Any]:
             continue
         safe[key] = value
     return safe
+
+
+_SCENARIO_CONTEXT_HINTS: dict[str, dict[str, Any]] = {
+    "family": {
+        "client_need_label": "квартира для семьи",
+        "scenario_reasons": ["schools", "kindergartens", "parks", "family_infrastructure"],
+        "answer_angles": ["ежедневное удобство семьи", "детская инфраструктура", "среда рядом с домом"],
+    },
+    "investment": {
+        "client_need_label": "покупка как инвестиция",
+        "scenario_reasons": ["entry_price", "deadline", "location", "liquidity_context"],
+        "answer_angles": ["порог входа", "срок готовности", "понятные факторы спроса"],
+    },
+    "rental": {
+        "client_need_label": "квартира под аренду",
+        "scenario_reasons": ["metro", "finishing", "readiness", "area"],
+        "answer_angles": ["быстрый запуск аренды", "транспорт", "ремонт и готовность"],
+    },
+    "metro_access": {
+        "client_need_label": "вариант с удобным метро",
+        "scenario_reasons": ["metro", "walk_time", "location"],
+        "answer_angles": ["ежедневная дорога", "близость транспорта"],
+    },
+    "budget": {
+        "client_need_label": "вариант в бюджете",
+        "scenario_reasons": ["price", "area", "deadline"],
+        "answer_angles": ["порог цены", "компромисс цены и срока"],
+    },
+    "fast_move": {
+        "client_need_label": "переезд без долгого ожидания",
+        "scenario_reasons": ["readiness", "keys_handover", "finishing"],
+        "answer_angles": ["срок переезда", "готовность дома"],
+    },
+    "self_use": {
+        "client_need_label": "квартира для себя",
+        "scenario_reasons": ["location", "transport", "readiness", "finishing"],
+        "answer_angles": ["удобство жизни", "срок и формат покупки"],
+    },
+}
+
+
+def _stable_primary_scenario(user_text: str, state: dict[str, Any]) -> str:
+    """Primary client scenario must survive cross-cutting facets like mortgage/operator."""
+    params = state.get("params") if isinstance(state.get("params"), dict) else {}
+    active = _active_scenario(state)
+    active_key = str(active.get("key") or "").strip()
+    purpose = str(params.get("purpose") or "").strip().lower()
+    for candidate in (active_key, purpose, _reason_layer_scenario(user_text, params)):
+        if candidate in {"operator", "fact_check", "financing", "payment_terms", "mortgage_terms", "down_payment", "family_mortgage", "live_check"}:
+            continue
+        if candidate in _SCENARIO_CONTEXT_HINTS:
+            return candidate
+    return "self_use"
+
+
+def _reference_resolution_payload(user_text: str, state: dict[str, Any]) -> dict[str, Any]:
+    text = re.sub(r"\s+", " ", (user_text or "").lower().replace("ё", "е")).strip()
+    options = state.get("visible_options") or state.get("last_options") or []
+    names = [str(o.get("name") or "") for o in options[:5] if isinstance(o, dict) and o.get("name")]
+    pronoun_match = re.search(r"\b(они|эти|них|ним|ними|все|оба|обе)\b", text)
+    if pronoun_match and names:
+        return {"phrase": pronoun_match.group(1), "resolved_to": "current_options", "option_names": names}
+    return {"phrase": "", "resolved_to": "", "option_names": names}
+
+
+def _scenario_context_payload(user_text: str, state: dict[str, Any]) -> dict[str, Any]:
+    """Scenario card for LLM: code gives context, LLM decides wording/action."""
+    params = state.get("params") if isinstance(state.get("params"), dict) else {}
+    options = state.get("visible_options") or state.get("last_options") or []
+    primary = _stable_primary_scenario(user_text, state)
+    hints = dict(_SCENARIO_CONTEXT_HINTS.get(primary) or _SCENARIO_CONTEXT_HINTS["self_use"])
+    followup = _extract_conversation_followup_signals(user_text, state)
+    facet_request: dict[str, Any] = {}
+    if _has_mortgage_signal(user_text, params) or str(followup.get("topic") or "") in {"financing", "payment_terms"}:
+        mortgage_evidence_keys = {"mortgage", "mortgage_calc", "payment_by_installments", "discount"}
+        option_has_mortgage_evidence = any(
+            isinstance(option, dict)
+            and any(not _looks_missing(option.get(key)) for key in mortgage_evidence_keys)
+            for option in options[:5]
+        )
+        facet_request = {
+            "type": "mortgage",
+            "target": "current_options" if options else "general_context",
+            "user_phrase": user_text,
+            "mortgage_type": followup.get("mortgage_type") or params.get("mortgage_type") or "general",
+            "evidence_status": "has_mortgage_facts" if option_has_mortgage_evidence else "no_current_mortgage_facts",
+            "rule": "mortgage/payment is a facet; it must not replace primary_scenario or rebuild ЖК list",
+            "wording_rule": "if evidence_status=no_current_mortgage_facts, do not say all options definitely fit mortgage; answer carefully that mortgage terms can be checked for these options and exact conditions depend on bank/program/object/client",
+        }
+    action_request: dict[str, Any] = {}
+    if re.search(r"оператор|менеджер|свяж|соедин|позов", (user_text or "").lower().replace("ё", "е")):
+        action_request = {"type": "operator_handoff", "target": "current_context", "rule": "operator is an action, not a new search"}
+    current_options = [_safe_option_payload(option) for option in options[:5] if isinstance(option, dict)]
+    return {
+        "primary_scenario": primary,
+        "client_need": hints.get("client_need_label") or primary,
+        "scenario_reasons": hints.get("scenario_reasons") or [],
+        "answer_angles": hints.get("answer_angles") or [],
+        "current_options": current_options,
+        "reference_resolution": _reference_resolution_payload(user_text, state),
+        "facet_request": facet_request,
+        "action_request": action_request,
+        "handoff_context": {
+            "client_need": hints.get("client_need_label") or primary,
+            "current_option_names": [o.get("name") for o in current_options if o.get("name")],
+            "last_fact_requested": facet_request.get("type") or "",
+            "task": "prepare_handoff_or_ask_phone" if action_request else "",
+        },
+        "contract": [
+            "keep primary_scenario stable unless user explicitly asks for a new search",
+            "if target=current_options, answer about current_options and do not invent a new ЖК list",
+            "if mortgage facet has no_current_mortgage_facts, do not promise mortgage availability; offer to check terms for current options",
+            "if action_request.type=operator_handoff, do not create a ЖК search; ask for phone or prepare handoff",
+        ],
+    }
 
 
 def _build_negation_response_prompt(
@@ -1719,6 +2421,7 @@ def _build_conversation_answer_prompt(
         "visible_options": [_safe_option_payload(option) for option in options[:5] if isinstance(option, dict)],
         "dialog_window": (state.get("dialog_window") or [])[-6:],
         "planner": dialog_plan or {},
+        "scenario_context": _scenario_context_payload(user_text, state),
         "active_conversation_topic": _active_conversation_topic(state),
         "conversation_topic": _normalize_conversation_topic(user_text, state),
         "conversation_followup": _extract_conversation_followup_signals(user_text, state),
@@ -1731,6 +2434,11 @@ def _build_conversation_answer_prompt(
         "TASK:\n"
         "Ответь на последнюю фразу клиента из контекста диалога. Если клиент сказал короткое «да», пойми, на что именно он согласился по last_bot_question.\n\n"
         "RULES:\n"
+        "- Используй scenario_context как карточку сценария: primary_scenario — главная потребность клиента, facet_request — дополнительный вопрос поверх неё, action_request — действие.\n"
+        "- Если scenario_context.facet_request.target=current_options, отвечай именно по текущим visible_options/current_options и не подменяй список ЖК.\n"
+        "- Если scenario_context.facet_request.type=mortgage и evidence_status=no_current_mortgage_facts, не пиши «все подходят под ипотеку» и не обещай доступность ипотеки. Скажи мягко: по этим ЖК можно проверить ипотечные условия; точные условия зависят от банка, программы, объекта и клиента.\n"
+        "- Если scenario_context.action_request.type=operator_handoff, не запускай новый поиск в тексте и не придумывай новые ЖК; подготовь передачу текущего контекста или попроси телефон.\n"
+        "- Не давай клиенту номера телефонов, контакты менеджеров/операторов/отдела продаж, WhatsApp/Telegram-ссылки или любые внешние контакты. Единственный телефонный сценарий — попросить номер самого клиента для обратной связи; если клиент спрашивает наш номер, предложи оставить свой номер или продолжить в чате.\n"
         "- Учитывай conversation_topic: если это payment_terms или financing, отвечай про первоначальный взнос, ипотеку или рассрочку, а не про аренду; если это rental, отвечай про аренду; если living, отвечай про жизнь.\n"
         "- Учитывай conversation_followup: если subtopic_hint=family_mortgage, отвечай именно про семейную ипотеку; если subtopic_hint=down_payment, отвечай про первоначальный взнос; не превращай это в generic financing.\n"
         "- Не запускай новый подбор и не говори, что уже ищешь.\n"
@@ -1870,6 +2578,7 @@ def _build_consultation_answer_prompt(
         "visible_options": [_safe_option_payload(option) for option in options[:5] if isinstance(option, dict)],
         "dialog_window": (state.get("dialog_window") or [])[-6:],
         "planner": dialog_plan or {},
+        "scenario_context": _scenario_context_payload(user_text, state),
         "active_conversation_topic": _active_conversation_topic(state),
         "conversation_topic": _normalize_conversation_topic(user_text, state),
         "conversation_followup": _extract_conversation_followup_signals(user_text, state),
@@ -1887,6 +2596,11 @@ def _build_consultation_answer_prompt(
         "Реальное действие бывает только таким: новый поиск по MCP, выбор конкретного ЖК для live-check, или передача оператору/менеджеру. "
         "Не создавай четвёртый режим 'я уточню и потом сообщу': у Ирины нет фонового ожидания и отложенных сообщений.\n\n"
         "RULES:\n"
+        "- Используй scenario_context как карточку сценария: primary_scenario остаётся основной потребностью, facet_request только добавляет тему проверки, action_request только задаёт следующий шаг.\n"
+        "- Если scenario_context.facet_request.target=current_options, не превращай ипотеку/оплату в новый подбор и не меняй список ЖК.\n"
+        "- Если scenario_context.facet_request.type=mortgage и evidence_status=no_current_mortgage_facts, не пиши «все подходят под ипотеку» и не обещай доступность ипотеки. Скажи мягко: по этим ЖК можно проверить ипотечные условия; точные условия зависят от банка, программы, объекта и клиента.\n"
+        "- Если scenario_context.action_request.type=operator_handoff, отвечай как про передачу текущего контекста оператору, а не как про поиск новых объектов.\n"
+        "- Не давай клиенту номера телефонов, контакты менеджеров/операторов/отдела продаж, WhatsApp/Telegram-ссылки или любые внешние контакты. Единственный телефонный сценарий — попросить номер самого клиента для обратной связи; если клиент спрашивает наш номер, предложи оставить свой номер или продолжить в чате.\n"
         "- Используй answer_guidance: answer_priority=direct_answer_first, tone=live_sales_manager, focus_points и operator_policy.\n"
         "- Если есть answer_guidance.payment_financing_playbook — прямо используй его как сценарий ответа по ипотеке/ПВ/условиям оплаты.\n"
         "- Если answer_guidance.subtopic_hint=family_mortgage, отвечай именно про семейную ипотеку в контексте текущего ЖК; не превращай это в generic financing и не начинай с оператора.\n"
@@ -2357,6 +3071,51 @@ def _consultation_question_response(state: dict[str, Any], user_text: str = "") 
         "Я бы смотрела на задачу клиента, а не только на список ЖК. Обычно важны бюджет, локация, транспорт, срок готовности, отделка, формат квартиры и то, для чего покупаем: жить, сдавать или инвестировать.\n\n"
         "Если цель понятна, подбор получается точнее: для жизни важнее ежедневное удобство, для аренды — спрос и быстрый запуск, для инвестиций — проверяемые опоры без обещаний доходности.\n\n"
         f"{next_step}"
+    )
+
+
+def _active_financing_context(state: dict[str, Any], user_text: str = "") -> dict[str, Any]:
+    """Return active mortgage/payment context that should survive option selection."""
+    active = _active_conversation_topic(state)
+    signals = _extract_conversation_followup_signals(user_text, state)
+    topic = str(signals.get("topic") or active.get("topic") or "")
+    subtopic = str(signals.get("subtopic_hint") or active.get("subtopic_hint") or "")
+    mortgage_type = str(signals.get("mortgage_type") or active.get("mortgage_type") or "")
+    if topic in {"financing", "payment_terms"} or subtopic in {"family_mortgage", "down_payment"} or mortgage_type:
+        return {
+            "topic": topic or "financing",
+            "subtopic_hint": subtopic,
+            "mortgage_type": mortgage_type,
+            "source": "active_conversation_topic" if active else "conversation_followup",
+        }
+    return {}
+
+
+def _selected_option_financing_manager_response(option: dict[str, Any], state: dict[str, Any], user_text: str = "") -> str:
+    """Focused answer for: mortgage/payment topic + selected ЖК.
+
+    Contract: answer briefly, do not guarantee bank/live terms, offer manager check.
+    """
+    name = _display_complex_name(option.get("name") if isinstance(option, dict) else "") or "этот ЖК"
+    context = _active_financing_context(state, user_text)
+    subtopic = str(context.get("subtopic_hint") or "")
+    mortgage_type = str(context.get("mortgage_type") or "")
+    if subtopic == "family_mortgage" or mortgage_type == "family_mortgage":
+        return (
+            f"Поняла, смотрим {name} именно под семейную ипотеку. В целом такой вариант можно разбирать в этом сценарии, но я не буду обещать одобрение, ставку или доступность программы без живой проверки.\n\n"
+            "Точные условия зависят от банка, конкретной квартиры, корпуса, первоначального взноса и актуальных правил программы на сегодня. Поэтому за точной информацией лучше обратиться к менеджеру: он проверит именно этот ЖК и подходящие лоты под семейную ипотеку.\n\n"
+            "Хотите, передам менеджеру этот ЖК и ваш вопрос по семейной ипотеке?"
+        )
+    if subtopic == "down_payment" or context.get("topic") == "payment_terms":
+        return (
+            f"Поняла, проверяем условия покупки по {name}. По первоначальному взносу, рассрочке или другим условиям оплаты лучше не гадать: они зависят от конкретной квартиры, банка и актуальных предложений.\n\n"
+            "Я могу передать этот ЖК менеджеру, чтобы он проверил точные условия и вернулся с конкретикой.\n\n"
+            "Передать менеджеру?"
+        )
+    return (
+        f"Поняла, смотрим {name} по ипотеке. В общих чертах ипотеку можно обсуждать, но точные условия зависят от банка, конкретной квартиры, первоначального взноса и актуальной программы.\n\n"
+        "За точной информацией лучше обратиться к менеджеру: он проверит этот ЖК и скажет, какие варианты реально подходят под ваши условия.\n\n"
+        "Хотите, передам менеджеру этот вопрос?"
     )
 
 
@@ -3015,6 +3774,7 @@ def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
         or state.get("last_bot_question")
         or state.get("last_answer_kind")
         or state.get("last_search_response")
+        or state.get("active_task")
     )
     if has_dialog_memory:
         return {"intent": "followup_classifier"}
@@ -6167,12 +6927,19 @@ def main() -> None:
             ))
             return
 
-        if state.get("awaiting_phone"):
-            if _looks_like_phone_text(text):
-                await update.message.reply_text("Похоже, номер неполный. Напишите телефон в формате +7XXXXXXXXXX или просто цифрами.")
-                return
-            state.pop("awaiting_phone", None)
-            await update.message.reply_text("Похоже, это не номер. Напишите телефон в формате +7XXXXXXXXXX или просто продиктуйте цифрами.")
+        modal_decision = resolve_modal_state(state, text)
+        if modal_decision.action == "release":
+            state.pop(modal_decision.state_key, None)
+        elif modal_decision.action in {"consume", "cancel"}:
+            if modal_decision.action == "cancel":
+                state.pop(modal_decision.state_key, None)
+                _remember_bot_response(
+                    state,
+                    modal_decision.response,
+                    offer_type="choose_option",
+                    answer_kind=modal_decision.answer_kind,
+                )
+            await update.message.reply_text(modal_decision.response)
             return
 
         if not text:
@@ -6180,11 +6947,45 @@ def main() -> None:
 
         params_before = dict(state.get("params", {}))
         _append_dialog_turn(state, "user", text)
+        _refresh_active_task_from_context(state, text)
+        _update_active_scenario_turn(state, text)
         await update.message.chat.send_action(action="typing")
 
         # H016: короткие follow-up сообщения («второй», «подешевле») решаем из памяти,
         # без нового общего поиска через Overmind.
         dialog_intent = _resolve_dialog_intent(text, state)
+        if _is_task_finishing_refinement(text, state):
+            selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
+            response = _prepare_response_text(_active_task_operator_handoff_text(state, text))
+            state["operator_context"] = {
+                "selected_option": selected.get("name") if isinstance(selected, dict) else _active_task(state).get("selected_complex"),
+                "known_facts": {"selected_option": selected, "active_task": _active_task(state), "params": state.get("params", {})},
+                "client_question": text,
+                "reason": "active_task_finishing_refinement_live_check",
+            }
+            _log_event({
+                "kind": "user_message",
+                "uid": uid,
+                "user_text": text,
+                "dialog_intent": "active_task_operator_handoff",
+                "search_model": state["search_model"],
+                "chat_model": state["chat_model"],
+                "mcp": state["mcp"],
+                "params_before": params_before,
+                "params_after": dict(state.get("params", {})),
+                "params_delta": {},
+                "active_task": _active_task(state),
+                "response_text": response,
+                "response_len": len(response),
+                "buttons": [],
+                "duration_ms": 0,
+                "is_error": False,
+                "error": None,
+                "cost": {},
+            })
+            _remember_bot_response(state, response, offer_type="operator_for_selected", answer_kind="operator_handoff")
+            await update.message.reply_text(_to_html(response), parse_mode="HTML")
+            return
         if dialog_intent.get("intent") == "followup_classifier":
             followup_meta = await followup_intent_classifier.classify_followup_intent(
                 await client.ensure_session(),
@@ -6206,12 +7007,14 @@ def main() -> None:
                 last_response_text=_last_bot_text(state),
                 search_response_text=json.dumps(state.get("last_search_response") or {}, ensure_ascii=False),
             )
+            mcp_request_patch = _sanitize_mcp_request_patch(dialog_plan, state)
             applied_plan = _apply_dialog_plan_to_state(state, dialog_plan, user_text=text)
             _log_event({
                 "kind": "dialog_plan",
                 "uid": uid,
                 "user_text": text,
                 "plan": dialog_plan,
+                "mcp_request_patch": mcp_request_patch,
                 "applied": applied_plan,
                 "state": _dialog_planner_state_payload(state),
             })
@@ -6238,6 +7041,54 @@ def main() -> None:
                     followup_intent = "update_search_params"
                     followup_meta["params_delta"] = dialog_plan.get("params_delta") if isinstance(dialog_plan.get("params_delta"), dict) else {}
                 followup_meta["intent"] = followup_intent
+            patch_can_drive_search = followup_intent in {"new_search", "update_search_params", "expand_more_options", ""} or dialog_action in {"new_search", "update_search", "expand_more_options"}
+            if mcp_request_patch and patch_can_drive_search:
+                followup_meta["mcp_request_patch"] = mcp_request_patch
+                followup_meta["params_delta"] = {**(followup_meta.get("params_delta") if isinstance(followup_meta.get("params_delta"), dict) else {}), **mcp_request_patch}
+                followup_intent = "update_search_params"
+                followup_meta["intent"] = followup_intent
+            elif mcp_request_patch:
+                followup_meta["mcp_request_patch_ignored"] = mcp_request_patch
+                followup_meta["mcp_request_patch_ignored_reason"] = "patch_cannot_override_dialog_action"
+            if _scenario_iteration_handoff_needed(state, text):
+                selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
+                options = state.get("visible_options") or state.get("last_options") or []
+                response = _prepare_response_text(_scenario_iteration_handoff_text(state, text))
+                state["operator_context"] = {
+                    "selected_option": selected.get("name") if isinstance(selected, dict) else None,
+                    "known_facts": {"selected_option": selected, "options": options[:3], "active_task": _active_task(state), "params": state.get("params", {})},
+                    "client_question": text,
+                    "reason": "scenario_iteration_limit_operator_handoff",
+                    "active_scenario": _active_scenario(state),
+                    "dialog_plan": dialog_plan,
+                    "applied_plan": applied_plan,
+                }
+                _log_event({
+                    "kind": "user_message",
+                    "uid": uid,
+                    "user_text": text,
+                    "dialog_intent": "scenario_iteration_operator_handoff",
+                    "search_model": state["search_model"],
+                    "chat_model": state["chat_model"],
+                    "mcp": state["mcp"],
+                    "params_before": params_before,
+                    "params_after": dict(state.get("params", {})),
+                    "params_delta": {},
+                    "active_scenario": _active_scenario(state),
+                    "active_task": _active_task(state),
+                    "dialog_plan": dialog_plan,
+                    "applied_plan": applied_plan,
+                    "response_text": response,
+                    "response_len": len(response),
+                    "buttons": [],
+                    "duration_ms": 0,
+                    "is_error": False,
+                    "error": None,
+                    "cost": {},
+                })
+                _remember_bot_response(state, response, offer_type="operator_for_selected", answer_kind="operator_handoff")
+                await update.message.reply_text(_to_html(response), parse_mode="HTML")
+                return
             selected = state.get("selected_option")
             if dialog_plan.get("dialog_action") == "ask_clarification" and dialog_plan.get("clarification_question"):
                 response = _prepare_response_text(str(dialog_plan.get("clarification_question") or ""))
@@ -6503,6 +7354,7 @@ def main() -> None:
                 params_delta = _normalize_followup_params_delta(params_delta, user_text=text)
                 if params_delta:
                     state["params"] = {**state.get("params", {}), **params_delta}
+                    _refresh_active_task_from_context(state, text)
                     LOGGER.info("User %d: params updated from followup: %s", uid, state["params"])
                 state["numeric_choice_policy"] = "reject"
                 dialog_intent = {"intent": "new_search"}
@@ -6747,13 +7599,22 @@ def main() -> None:
         if dialog_intent.get("intent") == "select_option":
             option = dialog_intent["option"]
             state["selected_option"] = option
+            _refresh_active_task_from_context(state, text)
             state["selected_option_card_shown_count"] = int(state.get("selected_option_card_shown_count") or 0) + 1
+            selected_answer_mode = "default_selected_option"
+            selected_offer_type = "selected_option"
             client_request = (
                 "Клиент выбрал этот вариант из списка. "
                 f"Контекст клиента: {state.get('params', {}).get('purpose') or 'не указан'}. "
                 "Дай первичную живую презентацию выбранного ЖК без нового поиска."
             )
-            if STAGE_PRESENTER_ENABLED:
+            financing_context = _active_financing_context(state, text)
+            if financing_context:
+                selected_answer_mode = "selected_option_financing_manager_offer"
+                selected_offer_type = "operator_for_selected"
+                chat_meta = {"presenter": "selected_option_financing_manager_offer", "financing_context": financing_context}
+                response = _prepare_response_text(_selected_option_financing_manager_response(option, state, text))
+            elif STAGE_PRESENTER_ENABLED:
                 chat_meta = {"presenter": "stage_selected_object"}
                 scenario_for_stage = _reason_layer_scenario(text, state.get("params", {}))
                 if scenario_for_stage == "self_use" and state.get("params", {}).get("purpose"):
@@ -6833,15 +7694,19 @@ def main() -> None:
                 "error": None,
                 "cost": {},
                 "chat_meta": chat_meta,
+                "selected_answer_mode": selected_answer_mode,
+                "selected_offer_type": selected_offer_type,
+                "active_conversation_topic": _active_conversation_topic(state),
             })
             state["last_buttons"] = kb_rows
-            _remember_bot_response(state, response, offer_type="selected_option", answer_kind="selected_option_card")
+            _remember_bot_response(state, response, offer_type=selected_offer_type, answer_kind=selected_answer_mode)
             await update.message.reply_text(_to_html(response), parse_mode="HTML")
             return
 
         if dialog_intent.get("intent") == "explain_selected_option":
             option = dialog_intent["option"]
             state["selected_option"] = option
+            _refresh_active_task_from_context(state, text)
             if STAGE_PRESENTER_ENABLED:
                 chat_meta = {"presenter": "stage_selected_object_details"}
                 scenario_for_stage = _reason_layer_scenario(text, state.get("params", {}))
@@ -6920,15 +7785,13 @@ def main() -> None:
         if dialog_intent.get("intent") == "operator_for_selected":
             option = dialog_intent["option"]
             state["selected_option"] = option
+            _refresh_active_task_from_context(state, text)
             state["operator_context"] = {
                 "selected_option": option.get("name"),
                 "known_facts": option,
                 "client_question": text,
                 "reason": "selected_option_live_details",
             }
-            # Если клиент уже дошёл до стадии оператора / актуальных квартир,
-            # не продаём операторский шаг повторно — сразу просим номер.
-            state["awaiting_phone"] = True
             response = _prepare_response_text(_format_operator_handoff_for_option(option))
             kb_rows = []
             _log_event({
@@ -6941,12 +7804,13 @@ def main() -> None:
                 "buttons": _button_log_preview(kb_rows),
             })
             state["last_buttons"] = kb_rows
-            _remember_bot_response(state, response, offer_type="awaiting_phone", answer_kind="operator_contact_request")
+            _remember_bot_response(state, response, offer_type="operator_for_selected", answer_kind="operator_handoff")
             await update.message.reply_text(_to_html(response), parse_mode="HTML")
             return
 
         if dialog_intent.get("intent") == "operator_for_context":
             options = dialog_intent.get("options") or state.get("visible_options") or state.get("last_options") or []
+            _refresh_active_task_from_context(state, text)
             state["operator_context"] = {
                 "selected_option": None,
                 "known_facts": {"options": options[:3], "params": state.get("params", {})},
@@ -7054,6 +7918,7 @@ def main() -> None:
                 )
                 if new_params:
                     state["params"] = {**state.get("params", {}), **new_params}
+                    _refresh_active_task_from_context(state, text)
                     LOGGER.info("User %d: params updated from expanded followup: %s", uid, state["params"])
                 _refresh_search_state(state, search_meta)
                 temp_state = dict(state)
@@ -7227,6 +8092,39 @@ def main() -> None:
         LOGGER.info("User %d: search_model=%s, chat_model=%s, mcp=%s, params=%s, query=%s",
                      uid, state["search_model"], state["chat_model"], state["mcp"], state.get("params", {}), text[:100])
 
+        initial_mcp_request_patch: dict[str, Any] = {}
+        if dialog_intent.get("intent") == "new_search" and os.getenv("NMBOT_MCP_REQUEST_PLANNER", "1") != "0":
+            try:
+                initial_dialog_plan = await followup_intent_classifier.plan_dialog_state(
+                    await client.ensure_session(),
+                    user_text=text,
+                    state=_dialog_planner_state_payload(state),
+                    last_response_text=_last_bot_text(state),
+                    search_response_text=json.dumps(state.get("last_search_response") or {}, ensure_ascii=False),
+                )
+                initial_mcp_request_patch = _sanitize_mcp_request_patch(initial_dialog_plan, state)
+                if initial_mcp_request_patch:
+                    state["params"] = {**state.get("params", {}), **initial_mcp_request_patch}
+                _log_event({
+                    "kind": "mcp_request_patch",
+                    "uid": uid,
+                    "user_text": text,
+                    "source": "initial_search_planner",
+                    "patch": initial_mcp_request_patch,
+                    "plan": initial_dialog_plan,
+                    "state": _dialog_planner_state_payload(state),
+                })
+            except Exception as e:
+                LOGGER.warning("initial mcp_request_patch planner failed: %r", e)
+                _log_error_event({
+                    "error_type": "mcp_request_patch_planner_failed",
+                    "severity": "warning",
+                    "stage": "handle_message.initial_mcp_request_patch",
+                    "uid": uid,
+                    "user_text": text,
+                    "exception": repr(e),
+                })
+
         t0 = time.monotonic()
         error_text: str | None = None
         response: str = ""
@@ -7249,6 +8147,7 @@ def main() -> None:
             # Обновляем параметры
             if new_params:
                 state["params"] = {**state.get("params", {}), **new_params}
+                _refresh_active_task_from_context(state, text)
                 LOGGER.info("User %d: params updated: %s", uid, state["params"])
         except Exception as e:
             LOGGER.exception("Error handling message")
@@ -7281,7 +8180,10 @@ def main() -> None:
         upstream_failed = bool(search_meta.get("_safe_fallback") or chat_meta.get("_safe_fallback"))
         if upstream_failed or _is_safe_upstream_fallback(response):
             response = SAFE_UPSTREAM_ERROR_TEXT
+            last_good_options = [o for o in (state.get("last_options") or []) if isinstance(o, dict)]
             _refresh_search_state(state, search_meta)
+            if last_good_options and not state.get("last_options"):
+                state["last_options"] = last_good_options
             state["visible_options"] = []
             state["numeric_choice_policy"] = "reject"
             reason_layer_meta: dict[str, Any] = {"enabled": REASON_LAYER_ENABLED, "skipped": "safe_upstream_fallback"}

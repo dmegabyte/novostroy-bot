@@ -111,6 +111,16 @@ from chat_tester_bot import (  # noqa: E402
     _fix_complex_name_artifacts,
     _extract_conversation_followup_signals,
     _store_active_conversation_topic,
+    _active_task,
+    _active_scenario,
+    _active_task_operator_handoff_text,
+    _active_financing_context,
+    _finishing_value_from_text,
+    _is_task_finishing_refinement,
+    _scenario_iteration_handoff_needed,
+    _scenario_iteration_handoff_text,
+    _update_active_scenario_turn,
+    _refresh_active_task_from_context,
     _operator_reason_response,
     _continue_selection_response,
     _clarification_from_followup,
@@ -130,6 +140,10 @@ from chat_tester_bot import (  # noqa: E402
     _match_option_from_text,
     _numeric_choice_policy_from_response,
     _operator_contact_request_text,
+    _awaiting_phone_reprompt_text,
+    _awaiting_phone_should_cancel,
+    _awaiting_phone_should_release_to_dialog,
+    resolve_modal_state,
     _option_by_index,
     _prepare_response_text,
     _parse_budget_callback_value,
@@ -152,6 +166,7 @@ from chat_tester_bot import (  # noqa: E402
     _render_stage_recommendation,
     _reason_layer_scenario,
     _consultation_question_response,
+    _selected_option_financing_manager_response,
     _consultation_answer_guidance,
     _selection_logic_response,
     _stage_option_fact_parts,
@@ -163,7 +178,11 @@ from chat_tester_bot import (  # noqa: E402
     _remember_bot_response,
     _should_run_building_status_fact_check,
     _selected_option_for_fact_check,
+    _sanitize_mcp_request_patch,
+    _is_underfilled_broad_search_result,
+    _is_usable_search_result,
     _safe_user_error_message,
+    _scenario_context_payload,
     _strip_markdown,
     _strip_rejected_options_from_response,
     _strip_unsupported_complex_claims,
@@ -178,6 +197,7 @@ from chat_tester_bot import (  # noqa: E402
 )
 from followup_intent_classifier import (  # noqa: E402
     DIALOG_STATE_PLANNER_PROMPT,
+    FOLLOWUP_INTENT_PROMPT,
     classify_followup_intent,
     normalize_dialog_action,
     normalize_dialog_mode,
@@ -2090,6 +2110,84 @@ def _run_h021_unit_tests() -> list[Result]:
         error=family_mortgage_direct_text,
     )
 
+    family_mortgage_selected_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": e2e_option,
+        "params": {"purpose": "family"},
+        "dialog_window": [],
+        "active_conversation_topic": {
+            "topic": "financing",
+            "subtopic_hint": "family_mortgage",
+            "mortgage_type": "family_mortgage",
+            "target_scope": "current_options",
+            "source_user_text": "а под семейную ипотеку?",
+        },
+    }
+    family_selected_context = _active_financing_context(family_mortgage_selected_state, "3. Мичуринский парк")
+    family_selected_text = _selected_option_financing_manager_response(
+        e2e_option,
+        family_mortgage_selected_state,
+        "3. Мичуринский парк",
+    ).lower()
+    family_selected_pass = (
+        family_selected_context.get("subtopic_hint") == "family_mortgage"
+        and "семейн" in family_selected_text
+        and "ипотек" in family_selected_text
+        and "менеджер" in family_selected_text
+        and "точн" in family_selected_text
+        and "банк" in family_selected_text
+        and "ставк" in family_selected_text
+        and "не буду обещать" in family_selected_text
+        and "цена, расположение" not in family_selected_text
+        and "какой аспект" not in family_selected_text
+    )
+    add_result(
+        "ux_e2e",
+        "family_mortgage_selected_option_answers_then_manager_not_generic_card",
+        family_selected_pass,
+        response_text=f"context={family_selected_context}; text={family_selected_text}",
+        error=f"context={family_selected_context}; text={family_selected_text}",
+    )
+
+    family_mortgage_plan_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": None,
+        "params": {"purpose": "family"},
+        "dialog_window": [],
+        "active_conversation_topic": {
+            "topic": "financing",
+            "subtopic_hint": "family_mortgage",
+            "mortgage_type": "family_mortgage",
+            "target_scope": "current_options",
+            "source_user_text": "а под семейную ипотеку?",
+        },
+    }
+    family_mortgage_plan_applied = _apply_dialog_plan_to_state(
+        family_mortgage_plan_state,
+        {
+            "dialog_action": "select_option",
+            "selected_option_action": "set",
+            "selected_option_name": e2e_option.get("name"),
+        },
+        user_text="3. Мичуринский парк",
+    )
+    family_plan_context = _active_financing_context(family_mortgage_plan_state, "3. Мичуринский парк")
+    family_plan_pass = (
+        family_mortgage_plan_state.get("selected_option", {}).get("name") == e2e_option.get("name")
+        and "selected_option_set" in family_mortgage_plan_applied.get("applied", [])
+        and family_plan_context.get("subtopic_hint") == "family_mortgage"
+        and family_plan_context.get("source") == "active_conversation_topic"
+    )
+    add_result(
+        "ux_e2e",
+        "family_mortgage_select_option_keeps_active_financing_topic",
+        family_plan_pass,
+        response_text=f"applied={family_mortgage_plan_applied}; context={family_plan_context}; selected={family_mortgage_plan_state.get('selected_option')}",
+        error=f"applied={family_mortgage_plan_applied}; context={family_plan_context}; selected={family_mortgage_plan_state.get('selected_option')}",
+    )
+
     family_mortgage_guidance = _consultation_answer_guidance("под семейную ипотеку подойдет?", family_mortgage_direct_state)
     family_mortgage_prompt = _build_consultation_answer_prompt(
         user_text="под семейную ипотеку подойдет?",
@@ -2191,6 +2289,117 @@ def _run_h021_unit_tests() -> list[Result]:
         sticky_topic_pass,
         response_text=f"state={sticky_payment_state.get('active_conversation_topic')}; yes={sticky_yes}; all={sticky_all}; typo_all={sticky_typo_all}; prompt={sticky_prompt[:1400]}",
         error=f"state={sticky_payment_state.get('active_conversation_topic')}; yes={sticky_yes}; all={sticky_all}; typo_all={sticky_typo_all}; prompt={sticky_prompt[:1400]}",
+    )
+
+    dzen_option = {
+        "idx": 2,
+        "name": "ЖК «Дзен-кварталы»",
+        "price_min": 11350000,
+        "finishing": "предчистовая или дизайнерская",
+        "why_mortgage": "Доступна семейная ипотека, первоначальный взнос от 20.01%.",
+    }
+    active_task_state = {
+        "params": {"rooms": "2", "facets": ["mortgage"], "need": ["mortgage_calc", "mortgage"]},
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": None,
+        "dialog_window": [],
+    }
+    _refresh_active_task_from_context(active_task_state, "двушка без пв")
+    active_task_state["selected_option"] = dzen_option
+    _refresh_active_task_from_context(active_task_state, "дзен квартиры")
+    active_task_refinement = _is_task_finishing_refinement("предчистовая", active_task_state)
+    active_task_response = _active_task_operator_handoff_text(active_task_state, "предчистовая").lower()
+    active_task_contract_pass = (
+        _active_task(active_task_state).get("type") == "payment_terms"
+        and _active_task(active_task_state).get("critical_condition") == "down_payment"
+        and _active_task(active_task_state).get("selected_complex") == "ЖК «Дзен-кварталы»"
+        and _active_task(active_task_state).get("finishing") == "предчистовая"
+        and _finishing_value_from_text("предчистовая") == "предчистовая"
+        and active_task_refinement is True
+        and "без первоначального взноса" in active_task_response
+        and "оператор" in active_task_response
+        and "хотите оставить номер" in active_task_response
+        and "друг" not in active_task_response
+        and "отделк" in active_task_response
+    )
+    add_result(
+        "ux_e2e",
+        "active_task_down_payment_survives_selected_complex_and_finishing_refinement",
+        active_task_contract_pass,
+        response_text=f"task={_active_task(active_task_state)}; refinement={active_task_refinement}; response={active_task_response}",
+        error=f"task={_active_task(active_task_state)}; refinement={active_task_refinement}; response={active_task_response}",
+    )
+
+    iteration_state = {
+        "params": {"purpose": "family", "rooms": "2", "facets": ["mortgage"]},
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": {"name": "ЖК «Дюна»"},
+        "dialog_window": [],
+    }
+    _refresh_active_task_from_context(iteration_state, "все без пв?")
+    iter_1 = _update_active_scenario_turn(iteration_state, "все без пв?")
+    _refresh_active_task_from_context(iteration_state, "жк дюна")
+    iter_2 = _update_active_scenario_turn(iteration_state, "жк дюна")
+    _refresh_active_task_from_context(iteration_state, "семейная")
+    iter_3 = _update_active_scenario_turn(iteration_state, "семейная")
+    iteration_handoff = _scenario_iteration_handoff_needed(iteration_state, "семейная")
+    iteration_text = _scenario_iteration_handoff_text(iteration_state, "семейная").lower()
+    iteration_contract_pass = (
+        iter_1.get("turn_count") == 1
+        and iter_2.get("turn_count") == 2
+        and iter_3.get("turn_count") == 3
+        and _active_scenario(iteration_state).get("key") == "down_payment"
+        and iteration_handoff is True
+        and "оператор" in iteration_text
+        and "актуаль" in iteration_text
+        and "контекст" in iteration_text
+        and "хотите оставить номер" in iteration_text
+    )
+    add_result(
+        "ux_e2e",
+        "scenario_iteration_three_turns_leads_to_operator_handoff",
+        iteration_contract_pass,
+        response_text=f"iters={[iter_1, iter_2, iter_3]}; task={_active_task(iteration_state)}; response={iteration_text}",
+        error=f"iters={[iter_1, iter_2, iter_3]}; scenario={_active_scenario(iteration_state)}; task={_active_task(iteration_state)}; response={iteration_text}",
+    )
+
+    investment_options = [
+        {"idx": 1, "name": "ЖК «Гранель Аникеевский»"},
+        {"idx": 2, "name": "ЖК «Гранель Ильинойс»"},
+        {"idx": 3, "name": "ЖК «Публицист»"},
+    ]
+    planner_selected_state = {
+        "params": {"purpose": "investment"},
+        "last_options": investment_options,
+        "visible_options": investment_options,
+        "selected_option": None,
+        "active_scenario": {"key": "investment", "turn_count": 3, "last_user_text": "публицист"},
+    }
+    selected_plan_applied = _apply_dialog_plan_to_state(
+        planner_selected_state,
+        {
+            "dialog_action": "select_option",
+            "selected_option_action": "set",
+            "selected_option_name": "ЖК «Публицист»",
+        },
+        user_text="публицист",
+    )
+    selected_handoff_text = _scenario_iteration_handoff_text(planner_selected_state, "публицист").lower()
+    planner_before_handoff_pass = (
+        planner_selected_state.get("selected_option", {}).get("name") == "ЖК «Публицист»"
+        and "selected_option_set" in selected_plan_applied.get("applied", [])
+        and _scenario_iteration_handoff_needed(planner_selected_state, "публицист") is True
+        and "публицист" in selected_handoff_text
+        and "выбранные варианты" not in selected_handoff_text
+    )
+    add_result(
+        "ux_e2e",
+        "scenario_iteration_uses_llm_selected_option_before_handoff",
+        planner_before_handoff_pass,
+        response_text=f"applied={selected_plan_applied}; selected={planner_selected_state.get('selected_option')}; response={selected_handoff_text}",
+        error=f"applied={selected_plan_applied}; selected={planner_selected_state.get('selected_option')}; response={selected_handoff_text}",
     )
 
     legacy_question_payload = {
@@ -2355,17 +2564,95 @@ def _run_h021_unit_tests() -> list[Result]:
     contact_yes = _resolve_dialog_intent("да", contact_accept_state)
     contact_want = _resolve_dialog_intent("хочу", contact_accept_state)
     contact_local = _local_followup_intent("да", {**contact_accept_state, "last_offer_type": "operator_for_selected"})
+    modal_yes = resolve_modal_state({"awaiting_phone": True}, "да")
+    modal_cancel = resolve_modal_state({"awaiting_phone": True}, "я не передавал номер")
+    modal_release_bot = resolve_modal_state({"awaiting_phone": True}, "ты бот?")
+    modal_release_game = resolve_modal_state({"awaiting_phone": True}, "давай лучше погадаем")
+    modal_none = resolve_modal_state({}, "ты бот?")
     contact_accept_pass = (
         contact_yes.get("intent") == "operator_contact_accept"
         and contact_want.get("intent") == "operator_contact_accept"
         and contact_local == "operator_contact_accept"
+        and "номер телефона" in _operator_contact_request_text().lower()
+        and "сам номер" in _awaiting_phone_reprompt_text("да").lower()
+        and not _awaiting_phone_should_cancel("да")
+        and _awaiting_phone_should_cancel("нет")
+        and _awaiting_phone_should_cancel("я не передавал номер")
+        and not _awaiting_phone_should_release_to_dialog("да")
+        and not _awaiting_phone_should_release_to_dialog("нет")
+        and not _awaiting_phone_should_release_to_dialog("+79991234567")
+        and _awaiting_phone_should_release_to_dialog("ты бот?")
+        and _awaiting_phone_should_release_to_dialog("давай лучше погадаем")
+        and modal_yes.action == "consume"
+        and modal_cancel.action == "cancel"
+        and modal_release_bot.action == "release"
+        and modal_release_game.action == "release"
+        and modal_none.action == "none"
     )
     add_result(
         "ux_e2e",
         "yes_after_contact_offer_requests_phone_not_repeat_details",
         contact_accept_pass,
-        response_text=f"yes={contact_yes}; want={contact_want}; local={contact_local}",
-        error=f"yes={contact_yes}; want={contact_want}; local={contact_local}",
+        response_text=f"yes={contact_yes}; want={contact_want}; local={contact_local}; modal={modal_yes}/{modal_cancel}/{modal_release_bot}/{modal_release_game}/{modal_none}",
+        error=f"yes={contact_yes}; want={contact_want}; local={contact_local}; modal={modal_yes}/{modal_cancel}/{modal_release_bot}/{modal_release_game}/{modal_none}",
+    )
+
+    operator_offer_state = dict(contact_accept_state)
+    offer_text = _format_operator_handoff_for_option(e2e_option)
+    _remember_bot_response(operator_offer_state, offer_text, offer_type="operator_for_selected", answer_kind="operator_handoff")
+    operator_offer_pass = (
+        not bool(operator_offer_state.get("awaiting_phone"))
+        and _resolve_dialog_intent("да", operator_offer_state).get("intent") == "operator_contact_accept"
+        and "хотите" in offer_text.lower()
+        and "номер" in offer_text.lower()
+    )
+    add_result(
+        "ux_e2e",
+        "operator_offer_waits_for_consent_before_phone_capture",
+        operator_offer_pass,
+        response_text=f"offer={offer_text}; state={operator_offer_state}",
+        error=f"offer={offer_text}; state={operator_offer_state}; intent={_resolve_dialog_intent('да', operator_offer_state)}",
+    )
+
+    mortgage_manager_offer_state = {
+        "last_options": e2e_raw_options,
+        "visible_options": e2e_visible_options,
+        "selected_option": e2e_option,
+        "params": {"purpose": "family"},
+        "dialog_window": [],
+        "active_conversation_topic": {
+            "topic": "financing",
+            "subtopic_hint": "family_mortgage",
+            "mortgage_type": "family_mortgage",
+            "target_scope": "current_options",
+            "source_user_text": "мне для семейной ипотеки надо",
+        },
+    }
+    mortgage_manager_offer_text = _selected_option_financing_manager_response(
+        e2e_option,
+        mortgage_manager_offer_state,
+        "да Мичуринский",
+    )
+    _remember_bot_response(
+        mortgage_manager_offer_state,
+        mortgage_manager_offer_text,
+        offer_type="operator_for_selected",
+        answer_kind="selected_option_financing_manager_offer",
+    )
+    mortgage_manager_yes_intent = _resolve_dialog_intent("да", mortgage_manager_offer_state)
+    mortgage_manager_offer_pass = (
+        mortgage_manager_yes_intent.get("intent") == "operator_contact_accept"
+        and mortgage_manager_offer_state.get("last_offer_type") == "operator_for_selected"
+        and mortgage_manager_offer_state.get("last_answer_kind") == "selected_option_financing_manager_offer"
+        and "передам менеджеру" in mortgage_manager_offer_text.lower()
+        and "номер" in _operator_contact_request_text().lower()
+    )
+    add_result(
+        "ux_e2e",
+        "family_mortgage_manager_offer_yes_requests_phone_directly",
+        mortgage_manager_offer_pass,
+        response_text=f"offer={mortgage_manager_offer_text}; intent={mortgage_manager_yes_intent}",
+        error=f"offer={mortgage_manager_offer_text}; state={mortgage_manager_offer_state}; intent={mortgage_manager_yes_intent}",
     )
 
     # UX_E2E: телефон — это code-level capture выше LLM/search, а не очередной запрос в подбор.
@@ -3202,9 +3489,30 @@ def _run_h021_unit_tests() -> list[Result]:
         and "conversation_answer" in planner_prompt_low
         and "consultation_answer" in planner_prompt_low
         and "conversation_followup" in planner_prompt_low
+        and "mcp_request_patch" in planner_prompt_low
+        and "purpose" in planner_prompt_low
+        and "need" in planner_prompt_low
+        and "delivered_houses" in planner_prompt_low
+        and "property_metro" in planner_prompt_low
+        and "mortgage_calc" in planner_prompt_low
         and "что посоветуешь" in planner_prompt_low
         and "что важно для аренды" in planner_prompt_low
         and "как связаться с оператором" in planner_prompt_low
+        and "decision algorithm" in planner_prompt_low
+        and "ctx.action_request.type == \"operator_handoff\"" in planner_prompt_low
+        and "ctx.facet_request.target == \"current_options\"" in planner_prompt_low
+        and '"mcp_request_patch": none' in planner_prompt_low
+        and "ты не пишешь клиентский ответ" in planner_prompt_low
+        and "clarification_question всегда пустая строка" in planner_prompt_low
+        and "все подходят под ипотеку" in planner_prompt_low
+        and "верни consultation_answer и clarification_question=\"\"" in planner_prompt_low
+        and "частичное название" in planner_prompt_low
+        and "каноническое точное name из памяти" in planner_prompt_low
+        and "если совпадение неоднозначно" in planner_prompt_low
+        and "не давай клиенту номера телефонов" in _build_conversation_answer_prompt(user_text="дайте номер оператора", state={}, dialog_plan={}).lower()
+        and "единственный телефонный сценарий" in _build_conversation_answer_prompt(user_text="дайте номер оператора", state={}, dialog_plan={}).lower()
+        and "не давай клиенту номера телефонов" in _build_consultation_answer_prompt(user_text="дайте номер оператора", state={}, dialog_plan={}).lower()
+        and "единственный телефонный сценарий" in _build_consultation_answer_prompt(user_text="дайте номер оператора", state={}, dialog_plan={}).lower()
         and normalize_dialog_action("update_search") == "update_search"
         and normalize_dialog_action("recommend_options") == "recommend_options"
         and normalize_dialog_action("conversation_answer") == "conversation_answer"
@@ -3214,12 +3522,177 @@ def _run_h021_unit_tests() -> list[Result]:
         and normalize_intent("consultation_answer") == "consultation_answer"
         and normalize_dialog_action("bad") == "continue_from_memory"
     )
+    followup_prompt_low = FOLLOWUP_INTENT_PROMPT.lower()
+    pass_dialog_planner_prompt = pass_dialog_planner_prompt and (
+        "ты не пишешь клиентский ответ" in followup_prompt_low
+        and "intent=consultation_answer" in followup_prompt_low
+        and "clarification_question=\"\"" in followup_prompt_low
+        and "не пиши здесь «все подходят под ипотеку»" in followup_prompt_low
+    )
     results.append(Result(
         suite="h029",
         scenario="dialog_planner_prompt_has_state_contract",
         passed=pass_dialog_planner_prompt,
         error="" if pass_dialog_planner_prompt else "dialog planner prompt lacks state contract/examples",
         response_text=DIALOG_STATE_PLANNER_PROMPT,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    no_outbound_phone_re = re.compile(r"(?:\+\s*7|8)\D*(?:\d\D*){10}|\b\d{10,15}\b")
+    outbound_phone_samples = [
+        _format_operator_handoff_for_option({"name": "ЖК «Лучи»"}),
+        _format_operator_handoff_for_context(
+            {"visible_options": [{"name": "ЖК «Лучи»"}, {"name": "Жилой район «Скандинавия»"}]},
+            "дайте номер оператора",
+        ),
+        _operator_contact_request_text(),
+        _phone_captured_farewell(),
+    ]
+    pass_no_outbound_phone_numbers = all(not no_outbound_phone_re.search(sample) for sample in outbound_phone_samples)
+    results.append(Result(
+        suite="h029",
+        scenario="operator_handoff_never_outputs_phone_numbers",
+        passed=pass_no_outbound_phone_numbers,
+        error="operator handoff text must ask client phone, not output contact numbers" if not pass_no_outbound_phone_numbers else "",
+        response_text=json.dumps(outbound_phone_samples, ensure_ascii=False),
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    mcp_patch_state = {
+        "visible_options": [{"name": "ЖК «Лучи"}, {"name": "Жилой район «Скандинавия"}],
+        "last_options": [{"name": "ЖК «Лучи"}, {"name": "Жилой район «Скандинавия"}],
+        "params": {"rooms": "2"},
+    }
+    safe_mcp_patch = _sanitize_mcp_request_patch(
+        {
+            "mcp_request_patch": {
+                "purpose": "fact_check",
+                "selected_option_name": "ЖК «Лучи",
+                "fact_to_check": "corpus_delivery_status delivered_houses under_construction_houses keys_handover settlement",
+                "facets": ["readiness", "unknown_facet"],
+                "need": ["delivered_houses", "under_construction_houses", "keys_handover", "settlement_info", "bad_need"],
+                "exclude": ["Жилой район «Скандинавия", "ЖК «Несуществующий"],
+                "count": 99,
+            }
+        },
+        mcp_patch_state,
+    )
+    unsafe_mcp_patch = _sanitize_mcp_request_patch(
+        {"mcp_request_patch": {"purpose": "fact_check", "selected_option_name": "ЖК «Несуществующий", "need": ["delivered_houses"]}},
+        mcp_patch_state,
+    )
+    operator_mcp_patch = _sanitize_mcp_request_patch(
+        {"dialog_action": "operator_live_check", "mcp_request_patch": {"purpose": "operator", "need": ["mortgage"]}},
+        mcp_patch_state,
+    )
+    pass_mcp_patch = (
+        safe_mcp_patch.get("purpose") == "fact_check"
+        and safe_mcp_patch.get("selected_option_name") == "ЖК «Лучи"
+        and "delivered_houses" in safe_mcp_patch.get("need", [])
+        and "bad_need" not in safe_mcp_patch.get("need", [])
+        and safe_mcp_patch.get("facets") == ["readiness"]
+        and safe_mcp_patch.get("exclude") == ["Жилой район «Скандинавия"]
+        and safe_mcp_patch.get("count") == 10
+        and unsafe_mcp_patch == {}
+        and operator_mcp_patch == {}
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="mcp_request_patch_is_allowlisted_before_search",
+        passed=pass_mcp_patch,
+        error="" if pass_mcp_patch else f"safe={safe_mcp_patch}; unsafe={unsafe_mcp_patch}; operator={operator_mcp_patch}",
+        response_text=json.dumps({"safe": safe_mcp_patch, "unsafe": unsafe_mcp_patch, "operator": operator_mcp_patch}, ensure_ascii=False),
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    scenario_context_state = {
+        "visible_options": [
+            {"name": "Бусиновский парк", "location": "Москва", "price": "от 12 млн"},
+            {"name": "Второй Нагатинский", "location": "Москва"},
+            {"name": "Жилой район «Скандинавия»", "location": "Новая Москва"},
+        ],
+        "last_options": [
+            {"name": "Бусиновский парк"},
+            {"name": "Второй Нагатинский"},
+            {"name": "Жилой район «Скандинавия»"},
+        ],
+        "params": {"purpose": "family", "rooms": "2"},
+    }
+    mortgage_ctx = _scenario_context_payload("а они подходят по ипотеку?", scenario_context_state)
+    operator_ctx = _scenario_context_payload("оператор", scenario_context_state)
+    pass_scenario_context = (
+        mortgage_ctx.get("primary_scenario") == "family"
+        and mortgage_ctx.get("reference_resolution", {}).get("resolved_to") == "current_options"
+        and mortgage_ctx.get("facet_request", {}).get("type") == "mortgage"
+        and mortgage_ctx.get("facet_request", {}).get("target") == "current_options"
+        and mortgage_ctx.get("facet_request", {}).get("evidence_status") == "no_current_mortgage_facts"
+        and "не обещай доступность ипотеки" in _build_consultation_answer_prompt(
+            user_text="а они подходят по ипотеку?",
+            state=scenario_context_state,
+            dialog_plan={"dialog_action": "consultation_answer"},
+        ).lower()
+        and len(mortgage_ctx.get("current_options") or []) == 3
+        and operator_ctx.get("action_request", {}).get("type") == "operator_handoff"
+        and operator_ctx.get("handoff_context", {}).get("current_option_names") == ["Бусиновский парк", "Второй Нагатинский", "Жилой район «Скандинавия»"]
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="scenario_context_preserves_family_options_for_mortgage_and_operator",
+        passed=pass_scenario_context,
+        error="" if pass_scenario_context else f"mortgage={mortgage_ctx}; operator={operator_ctx}",
+        response_text=json.dumps({"mortgage": mortgage_ctx, "operator": operator_ctx}, ensure_ascii=False),
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    broad_patch_cases = {
+        "search": {"mcp_request_patch": {"purpose": "search", "need": ["prices"]}},
+        "repeat_search": {"mcp_request_patch": {"purpose": "repeat_search", "exclude": ["ЖК «Лучи"]}},
+        "family": {"mcp_request_patch": {"purpose": "family", "need": ["schools", "kindergartens"]}},
+        "investment": {"mcp_request_patch": {"purpose": "investment", "need": ["entry_price"]}},
+        "rental": {"mcp_request_patch": {"purpose": "rental", "need": ["area"]}},
+    }
+    broad_patch_results = {
+        name: _sanitize_mcp_request_patch(plan, mcp_patch_state)
+        for name, plan in broad_patch_cases.items()
+    }
+    selected_fact_patch = _sanitize_mcp_request_patch(
+        {"mcp_request_patch": {"purpose": "fact_check", "selected_option_name": "ЖК «Лучи", "need": ["prices"]}},
+        mcp_patch_state,
+    )
+    underfilled_broad = _is_underfilled_broad_search_result(
+        json.dumps({"facts": [{"name": "Жилой район «Скандинавия»"}], "near": [], "params": {"purpose": "family", "rooms": "2"}}, ensure_ascii=False),
+        params={"purpose": "family", "rooms": "2"},
+    )
+    underfilled_fact_check = _is_underfilled_broad_search_result(
+        json.dumps({"facts": [{"name": "Жилой район «Скандинавия»"}], "near": [], "params": {"purpose": "fact_check", "selected_option_name": "Жилой район «Скандинавия»"}}, ensure_ascii=False),
+        params={"purpose": "fact_check", "selected_option_name": "Жилой район «Скандинавия»"},
+    )
+    usable_two_options = _is_usable_search_result(
+        json.dumps({"facts": [{"name": "Жилой район «Скандинавия»"}, {"name": "ЖК «Лучи»"}], "near": [], "params": {"purpose": "family", "rooms": "2"}}, ensure_ascii=False),
+        {},
+        params={"purpose": "family", "rooms": "2"},
+    )
+    usable_underfilled = _is_usable_search_result(
+        json.dumps({"facts": [{"name": "Жилой район «Скандинавия»"}], "near": [], "params": {"purpose": "family", "rooms": "2"}}, ensure_ascii=False),
+        {},
+        params={"purpose": "family", "rooms": "2"},
+    )
+    usable_safe_error = _is_usable_search_result("Сейчас поиск не ответил как надо", {"_safe_fallback": True}, params={"purpose": "family"})
+    pass_broad_count = (
+        all(item.get("count") == 3 for item in broad_patch_results.values())
+        and "count" not in selected_fact_patch
+        and underfilled_broad
+        and not underfilled_fact_check
+        and usable_two_options
+        and not usable_underfilled
+        and not usable_safe_error
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="broad_search_patch_forces_count_and_underfilled_guard",
+        passed=pass_broad_count,
+        error="" if pass_broad_count else f"broad={broad_patch_results}; fact={selected_fact_patch}; underfilled_broad={underfilled_broad}; underfilled_fact_check={underfilled_fact_check}",
+        response_text=json.dumps({"broad": broad_patch_results, "fact": selected_fact_patch}, ensure_ascii=False),
         duration_ms=int((time.time() - started) * 1000),
     ))
 

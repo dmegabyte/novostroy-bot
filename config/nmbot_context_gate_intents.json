@@ -1,0 +1,85 @@
+{
+  "schema": "nmbot.context_gate_intents.v1",
+  "cards": [
+    {
+      "id": "stage.response-formatter-payload",
+      "evidence_type": "stage",
+      "match_all": ["payload", "форматтера"],
+      "resolver_query": "v2.response_formatter",
+      "purpose": "Resolve the V2 formatter payload owner and focused contract test.",
+      "owner_path": "nmbot_v2/response_composer.py"
+    },
+    {
+      "id": "stage.response-writer-request",
+      "evidence_type": "stage",
+      "match_all": ["writer", "запрос"],
+      "resolver_query": "v2.response_writer",
+      "purpose": "Resolve the V2 writer request payload owner and focused contract test.",
+      "owner_path": "nmbot_v2/response_composer.py"
+    },
+    {
+      "id": "stage.jivo-api-bot-message",
+      "evidence_type": "stage",
+      "match_all": ["bot_message", "jivo api"],
+      "resolver_query": "jivo.api.prepare",
+      "purpose": "Resolve the Jivo API BOT_MESSAGE preparation boundary.",
+      "owner_path": "scripts/nmbot_api_server.py"
+    },
+    {
+      "id": "stage.jivo-bridge-event",
+      "evidence_type": "stage",
+      "match_all": ["bridge", "jivo event"],
+      "resolver_query": "jivo.bridge.delivery",
+      "purpose": "Resolve the terminal Jivo bridge delivery boundary.",
+      "owner_path": "scripts/nmbot_n8n_bridge_server.py"
+    },
+    {
+      "id": "current.jivo-session-key",
+      "evidence_type": "current-source",
+      "match_all": ["ключ", "jivo"],
+      "resolver_query": "_jivo_session_key",
+      "purpose": "Resolve construction of the current Jivo session key.",
+      "owner_path": "scripts/nmbot_api_server.py"
+    },
+    {
+      "id": "docs.runtime-version-ownership",
+      "evidence_type": "docs",
+      "match_all": ["v0", "v2", "v3"],
+      "resolver_query": "docs V0 V2 V3",
+      "purpose": "Resolve the runtime version ownership and live-selector boundary.",
+      "owner_path": "docs/NMBOT_RUNTIME_VERSIONS.md"
+    },
+    {
+      "id": "docs.jivo-waiting-status",
+      "evidence_type": "docs",
+      "match_all": ["статусов", "ожидания", "bridge"],
+      "resolver_query": "docs waiting status bridge",
+      "purpose": "Resolve the external contract for Jivo waiting statuses.",
+      "owner_path": "docs/NMBOT_EXTERNAL_CONTRACTS.md"
+    },
+    {
+      "id": "docs.first-shortlist-ux",
+      "evidence_type": "docs",
+      "match_all": ["первом", "полезном", "ответе"],
+      "resolver_query": "docs первый запрос клиента",
+      "purpose": "Resolve the first useful shortlist UX contract.",
+      "owner_path": "docs/IDEAL_IRINA_UX.md"
+    },
+    {
+      "id": "docs.rollback-selector-boundary",
+      "evidence_type": "docs",
+      "match_all": ["rollback", "selector"],
+      "resolver_query": "docs rollback selector",
+      "purpose": "Resolve the release rollback and selector proof boundary.",
+      "owner_path": "docs/NMBOT_RUNBOOK.md"
+    },
+    {
+      "id": "docs.stop2-envelope",
+      "evidence_type": "docs",
+      "match_all": ["stop-2", "лимит"],
+      "resolver_query": "docs STOP-2 bounded retrieval envelope",
+      "purpose": "Resolve the authoritative STOP-2 envelope and expansion gate.",
+      "owner_path": "docs/PROJECT_CONTEXT_RETRIEVAL_PROTOCOL.md"
+    }
+  ]
+}

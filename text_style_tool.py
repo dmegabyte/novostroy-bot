@@ -17,6 +17,13 @@ def _env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
+def _apply_openrouter_reasoning_exclude(request_data: dict[str, Any]) -> None:
+    enabled = _env("NMBOT_OPENROUTER_EXCLUDE_REASONING", "0").strip().lower() in {"1", "true", "yes", "on"}
+    model = str(request_data.get("model") or "")
+    if enabled and model.startswith("google/gemini"):
+        request_data.setdefault("reasoning", {"exclude": True})
+
+
 def _required_env(name: str) -> str:
     value = _env(name)
     if not value:
@@ -115,6 +122,7 @@ async def rewrite_text(
         "parameters": {"temperature": float(_env("NMBOT_STYLE_TEMPERATURE", "0.2")), "max_tokens": max_tokens},
         "external_api_key": _required_env("OPENROUTER_API_KEY"),
     }
+    _apply_openrouter_reasoning_exclude(request_data)
 
     task = await _create_task(session, request_data, timeout)
     task_id = task.get("id")

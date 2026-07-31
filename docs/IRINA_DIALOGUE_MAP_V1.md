@@ -1,7 +1,12 @@
 # Irina / MINION — карта диалога v1
 
 Дата: 2026-07-02
-Статус: рабочее ТЗ для новой итерации presenter-слоя
+Статус: HISTORICAL/LEGACY рабочее ТЗ для старой итерации presenter-слоя.
+Документ полезен как карта UX-сценариев и библиотека формулировок, но не
+является источником production ownership текущего Jivo/API → runtime adapter →
+selected runtime flow. Для актуального разделения V0/V2/V3 см.
+`docs/NMBOT_RUNTIME_VERSIONS.md`; V3 использует V2 typed runtime namespace с
+отдельной identity/IntentPlanV3.
 
 ## Главная идея
 
@@ -25,11 +30,16 @@
    → ведём к оператору
 
 4. Клиент уточняет бюджет / отделку / район
-   → фильтруем прошлый список или делаем новый MCP-поиск
-   → снова показываем варианты или честно говорим, что близко к запросу
+    → фильтруем прошлый список или делаем новый MCP-поиск
+    → снова показываем exact варианты или честно говорим, что близко к запросу
 
 5. Клиент согласился на оператора
-   → просим телефон
+    → просим телефон
+
+6. Клиент согласился на callback / обратный звонок
+   → собираем имя и телефон
+   → подтверждаем заявку
+   → фоново пишем её в Google Sheets
 ```
 
 ## Почему нужна карта
@@ -38,6 +48,7 @@
 
 - первый список пытается быть и подбором, и продажей, и операторской воронкой;
 - выбранный ЖК иногда отвечает как обычная презентация, но не ведёт к оператору;
+- callback-заявка иногда путалась с operator handoff;
 - модель видит сырые поля и пишет технические фразы вроде `сдача/готовность`;
 - reason-layer пытается чинить текст поверх уже неправильной архитектуры.
 
@@ -100,7 +111,10 @@
    - готовность / срок человеческим языком;
    - площадь;
    - разрешённая польза.
-5. Модель или presenter превращает карточки в живой список.
+5. В текущем V2 production карточки превращаются в клиентский ответ через
+   deterministic renderer либо feature-gated composer. Deterministic renderer
+   остаётся fallback; старые model/presenter варианты ниже остаются historical
+   examples, а не самостоятельным route или recipe.
 
 ## Цель ответа
 
@@ -329,7 +343,7 @@
 
 ## Следующий шаг
 
-- Клиент даёт телефон → CRM/operator handoff.
+- Клиент даёт имя + телефон → callback-заявка в private outbox / Google Sheets; чат не переводится автоматически на оператора.
 - Клиент отказывается → `Stage 5` или `Stage 4`.
 
 ---
@@ -786,10 +800,10 @@ state.turns_after_results
 
 ## Главное правило для оркестратора
 
-Оркестратор решает **не “что ответить”, а “какой presenter имеет право отвечать”**.
+LEGACY wording: в старом presenter-подходе оркестратор решал **не “что ответить”, а “какой presenter имеет право отвечать”**. В текущем V2 production runtime выбирает stage/action/recipe, а клиентский текст собирается из проверенного `ResponsePlan` через deterministic renderer или feature-gated composer.
 
 ```text
-stage → presenter → validator → response
+stage/action/recipe → ResponsePlan → renderer/composer → response
 ```
 
 Если выбран неправильный stage, даже хороший prompt даст плохой ответ.
@@ -825,13 +839,13 @@ scenario + MCP fact → allowed meaning → короткий клиентски�
 Комментарий: Рядом Мещерский парк и Чоботовский лес — будет проще чаще гулять с детьми на свежем воздухе.
 ```
 
-Этот слой используется внутри `first_list` и `selected_object`, но не меняет базовую карту стадий: оркестратор всё так же выбирает стадию, presenter собирает ответ, validator проверяет факты и стиль.
+Этот слой исторически использовался внутри `first_list` и `selected_object`, но не меняет базовую карту стадий. Для текущего V2 production он не владеет route/recipe: runtime выбирает stage/action/recipe, а renderer или feature-gated composer собирает только безопасную форму ответа.
 
 ---
 
 # Что должно быть в коде
 
-Минимально нужны не “ещё один промпт”, а stage-presenter функции:
+LEGACY implementation sketch: тогда минимально нужны были не “ещё один промпт”, а stage-presenter функции:
 
 ```text
 detect_stage(message, state) -> stage
@@ -845,7 +859,7 @@ render_comparison(cards) -> response
 validate_response(stage, response) -> ok/error
 ```
 
-LLM можно оставить только внутри `render_first_list` и `render_selected_object`, но она должна получать уже готовые смысловые карточки, а не сырые поля.
+Historical note: LLM допускалась только внутри `render_first_list` и `render_selected_object` и должна была получать уже готовые смысловые карточки, а не сырые поля. В текущем V2 production composer всё ещё не владеет stage/recipe/order/CTA и может публиковаться только через отдельный `publish` gate; при `off`/ошибке ответ строится deterministic renderer.
 
 ---
 

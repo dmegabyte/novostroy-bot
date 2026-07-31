@@ -1,0 +1,63 @@
+- description: v2 / search
+  vars:
+    version: v2
+    case: search
+    scenario: search
+    query: python3 scripts/chat_cli.py --timeout 180 Найди однушку до 8 млн в Москве
+    mcp: ''
+    response: 'Нашла один вариант однушки в Москве, которая подходит под ваш бюджет и запрос:
+
+
+      ЖК «Зелёный парк» в Крюково. Квартира с отделкой, цена от 7 827 900 руб. Дом уже сдан, так что можно планировать переезд.
+
+
+      Есть еще варианты, но они либо без отделки, либо цена по запросу, что может быть выше вашего бюджета. Могу их тоже показать,
+      если интересно.'
+    warnings: ''
+    facts_count: 1
+    visible_count: 0
+    facts_names: Зелёный парк
+    visible_names: ''
+    evaluation: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем не найдено",
+      "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt": "prompts/eval/prompt_master_v1.txt",
+      "scenario": "search", "command": "python3 scripts/chat_cli.py --timeout 180 Найди однушку до 8 млн в Москве"}'
+    score: 100
+    prompt_master_verdict: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем
+      не найдено", "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt":
+      "prompts/eval/prompt_master_v1.txt", "scenario": "search", "command": "python3 scripts/chat_cli.py --timeout 180 Найди
+      однушку до 8 млн в Москве"}'
+  metadata:
+    case: search
+    version: v2
+- description: v2 / operator
+  vars:
+    version: v2
+    case: operator
+    scenario: operator
+    query: 'python3 scripts/chat_cli.py --timeout 180 --params {"selected_option_name": "ЖК «Лучи»"} Можно ли забронировать?'
+    mcp: ''
+    response: 'Да, в ЖК «Лучи» предусмотрена покупка по ДДУ с использованием эскроу-счетов. Это стандартный и безопасный механизм
+      бронирования и покупки новостройки.
+
+
+      Вы можете обратиться к застройщику или официальным представителям для оформления брони на конкретный лот.
+
+
+      Хотите, чтобы я помогла связаться с застройщиком?'
+    warnings: ''
+    facts_count: 1
+    visible_count: 0
+    facts_names: ЖК «Лучи»
+    visible_names: ''
+    evaluation: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем не найдено",
+      "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt": "prompts/eval/prompt_master_v1.txt",
+      "scenario": "operator", "command": "python3 scripts/chat_cli.py --timeout 180 --params {\"selected_option_name\": \"ЖК
+      «Лучи»\"} Можно ли забронировать?"}'
+    score: 100
+    prompt_master_verdict: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем
+      не найдено", "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt":
+      "prompts/eval/prompt_master_v1.txt", "scenario": "operator", "command": "python3 scripts/chat_cli.py --timeout 180 --params
+      {\"selected_option_name\": \"ЖК «Лучи»\"} Можно ли забронировать?"}'
+  metadata:
+    case: operator
+    version: v2

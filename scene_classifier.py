@@ -58,6 +58,13 @@ def _env(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
+def _apply_openrouter_reasoning_exclude(request_data: dict[str, Any]) -> None:
+    enabled = _env("NMBOT_OPENROUTER_EXCLUDE_REASONING", "0").strip().lower() in {"1", "true", "yes", "on"}
+    model = str(request_data.get("model") or "")
+    if enabled and model.startswith("google/gemini"):
+        request_data.setdefault("reasoning", {"exclude": True})
+
+
 def _required_env(name: str) -> str:
     value = _env(name)
     if not value:
@@ -137,6 +144,7 @@ async def classify_scene(
         "parameters": {"temperature": 0.0, "max_tokens": 500},
         "external_api_key": _required_env("OPENROUTER_API_KEY"),
     }
+    _apply_openrouter_reasoning_exclude(request_data)
 
     try:
         token = _overmind_token()

@@ -1,0 +1,22 @@
+{
+  "schema": "d1_d6_taxonomy.v1",
+  "dimensions": {
+    "D1": "project identity",
+    "D2": "route selection",
+    "D3": "evidence target",
+    "D4": "budget/privacy",
+    "D5": "dependency/isolation",
+    "D6": "verifier/rollback"
+  },
+  "allowed_dimension_values": [
+    "ok",
+    "failed",
+    "not_applicable"
+  ],
+  "allowed_failure_source": [
+    "agent_tool",
+    "external",
+    "contract",
+    "unknown"
+  ]
+}

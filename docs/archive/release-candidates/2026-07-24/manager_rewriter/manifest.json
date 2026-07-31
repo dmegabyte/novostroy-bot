@@ -1,0 +1,87 @@
+{
+  "forbidden_services": [
+    "novostroy-bot-n8n-bridge.service"
+  ],
+  "health_url": "http://127.0.0.1:8088/health",
+  "remote_root": "/home/neiro/novostroy-bot",
+  "runtime_modes": {
+    "V2": "off",
+    "V3": "publish"
+  },
+  "schema_version": "nmbot.manager_rewriter_release.v2",
+  "service": "novostroy-bot-api.service",
+  "targets": [
+    {
+      "candidate_sha256": "611df91b4e9f91979708c40dc2a74d057ee943846b6ca7b9ef710bb4ee18ea8f",
+      "expected_remote_base_sha256": "611df91b4e9f91979708c40dc2a74d057ee943846b6ca7b9ef710bb4ee18ea8f",
+      "kind": "modify",
+      "path": "nmbot_v2/contracts.py"
+    },
+    {
+      "candidate_sha256": "e9808fb0773aa7f4cad4908cab170ad335070d84d98036b416755075c9806ff0",
+      "expected_remote_base_sha256": "e9808fb0773aa7f4cad4908cab170ad335070d84d98036b416755075c9806ff0",
+      "kind": "modify",
+      "path": "nmbot_v2/ports.py"
+    },
+    {
+      "candidate_sha256": "c37d0f2a42ffa90cd9a33b76e37119e096fb88a87ff44d6aec5031d90b936484",
+      "expected_remote_base_sha256": "c37d0f2a42ffa90cd9a33b76e37119e096fb88a87ff44d6aec5031d90b936484",
+      "kind": "modify",
+      "path": "nmbot_v2/runtime.py"
+    },
+    {
+      "candidate_sha256": "dea0754d657e40ebfbfb712da47dd18b742baf684acf9d8ddfc4b07d20aa9316",
+      "expected_remote_base_sha256": "dea0754d657e40ebfbfb712da47dd18b742baf684acf9d8ddfc4b07d20aa9316",
+      "kind": "modify",
+      "path": "nmbot_v2/state.py"
+    },
+    {
+      "candidate_sha256": "1118a1a523e350e898406cc7022c5d7f195ee9d29f14882e081c50c80899fb8d",
+      "expected_remote_base_sha256": "4c2e72cb03fd9c59f8b4d33b99604891eab7e0883221dcdfd081d7d864b3dd2d",
+      "kind": "modify",
+      "path": "scripts/nmbot_runtime_adapter.py"
+    },
+    {
+      "candidate_sha256": "c873eacb316004a811d600cb6eea233a8e3056bb74376519f856be272e12087d",
+      "expected_remote_base_sha256": "c873eacb316004a811d600cb6eea233a8e3056bb74376519f856be272e12087d",
+      "kind": "modify",
+      "path": "prompts/v2_manager_rewriter.txt"
+    },
+    {
+      "candidate_sha256": "c78da31f8ccc6d85f5474caaa1ea421d0e293b0f51640507bd3e295027309042",
+      "expected_remote_base_sha256": "c78da31f8ccc6d85f5474caaa1ea421d0e293b0f51640507bd3e295027309042",
+      "kind": "modify",
+      "path": "nmbot_v2/manager_rewriter.py"
+    },
+    {
+      "candidate_sha256": "daf930e47aca685ce616ae752c66f1e5920012cdfda6877637d4ab668ee6775a",
+      "expected_remote_base_sha256": "daf930e47aca685ce616ae752c66f1e5920012cdfda6877637d4ab668ee6775a",
+      "kind": "modify",
+      "path": "scripts/nmbot_manager_rewriter.py"
+    },
+    {
+      "candidate_sha256": "edc2548fe17b8775fb300769d3ffa09197020099eb01a021dc77647266197fb8",
+      "expected_remote_base_sha256": "85ea346ee2ff83b378362f4f904348100e0192967981cf2b608f0e4c6c754db8",
+      "kind": "modify",
+      "path": "nmbot_v2/pending.py"
+    },
+    {
+      "candidate_sha256": "66efba325d98a70d7e0c028221b3718618012eead63a01cfa55aa26ea2fff231",
+      "expected_remote_base_sha256": "e4d8de9cb40da3c6de18a43d921aa1cfe4c57562fef42d73c23eed11d9fd96fd",
+      "kind": "modify",
+      "path": "nmbot_v2/response.py"
+    },
+    {
+      "candidate_sha256": "c702537942077e77da2a1cba74e70835254cde5ad4cf6c8876b0885686512cd0",
+      "expected_remote_base_sha256": "4ac29e3b2aa35a6b97118859d8ddb70d34b536dc3346ef7b1f72949a4383fd5b",
+      "kind": "modify",
+      "path": "nmbot_v2/scenario_recipes.py"
+    },
+    {
+      "candidate_sha256": "9db0b64b2f87a40927f8499b442ccdfd66b16609bc32631987f91e6f6f3a53b7",
+      "expected_remote_base_sha256": "89cdfdcf002cb4079450b5efbef1d921cf8f94c5abb16351f40f25fb8750e155",
+      "kind": "modify",
+      "path": "data/nmbot_release_identity.json"
+    }
+  ]
+}

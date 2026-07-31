@@ -1,0 +1,32 @@
+[
+  {
+    "id": "family",
+    "fixture_scenario_id": "family",
+    "query": "двухкомнатная квартира для семьи",
+    "min_candidates": 1
+  },
+  {
+    "id": "family_financing_overlay",
+    "fixture_scenario_id": "family_financing_overlay",
+    "query": "двухкомнатная квартира для семьи в ипотеку",
+    "min_candidates": 1
+  },
+  {
+    "id": "rooms_budget_location",
+    "fixture_scenario_id": "rooms_budget_location",
+    "query": "двухкомнатная квартира на Соколе до 18 млн",
+    "min_candidates": 1
+  },
+  {
+    "id": "ready_finishing",
+    "fixture_scenario_id": "ready_finishing",
+    "query": "готовая квартира с отделкой под аренду",
+    "min_candidates": 1
+  },
+  {
+    "id": "district_location_separation",
+    "fixture_scenario_id": "district_location_separation",
+    "query": "квартира в Коммунарке, Новая Москва",
+    "min_candidates": 1
+  }
+]

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"case_id": "pos_001", "diagnostic_code": "residential_complex_mismatch"},
+    {"case_id": "pos_002", "diagnostic_code": "foreign_complex_in_pair"},
+    {"case_id": "pos_003", "diagnostic_code": "question_missing_anchor"},
+    {"case_id": "pos_004", "diagnostic_code": "no_numeric_facts"},
+    {"case_id": "pos_005", "diagnostic_code": "numbers_not_in_transcript"},
+    {"case_id": "pos_006", "diagnostic_code": "too_many_pairs"},
+    {"case_id": "pos_007", "diagnostic_code": "no_numeric_quality_fact"},
+    {"case_id": "pos_008", "diagnostic_code": "location_fact_without_primary_anchor"},
+    {"case_id": "pos_009", "diagnostic_code": "broken_location_target"},
+    {"case_id": "pos_010", "diagnostic_code": "suspect_broken_location_answer"},
+    {"case_id": "pos_011", "diagnostic_code": "deadline_event_changed_to_keys"},
+    {"case_id": "pos_012", "diagnostic_code": "telegraph_finishing_answer"},
+    {"case_id": "neg_001", "diagnostic_code": "totally_missing_code_zzz"},
+    {"case_id": "neg_002", "diagnostic_code": "unknown_code_alpha"},
+    {"case_id": "neg_003", "diagnostic_code": "residential_complex_mismatch_extra"},
+    {"case_id": "neg_004", "diagnostic_code": "unknown_code_alpha:dynamic_suffix"},
+    {"case_id": "neg_005", "diagnostic_code": "commented_literal_probe"},
+    {"case_id": "neg_006", "diagnostic_code": "docstring_literal_probe"},
+    {"case_id": "neg_007", "diagnostic_code": "module_level_literal_probe"},
+    {"case_id": "neg_008", "diagnostic_code": "V1_PAIR_VERIFIER"},
+    {"case_id": "neg_009", "diagnostic_code": ""},
+    {"case_id": "neg_010", "diagnostic_code": "qapairs.stage.v1"},
+    {"case_id": "neg_011", "diagnostic_code": "qa-pairs-stage-token"},
+    {"case_id": "neg_012", "diagnostic_code": "чужой_токен"},
+    {"case_id": "neg_013", "diagnostic_code": "numbers_not_in_transcriptual"},
+    {"case_id": "neg_014", "diagnostic_code": "deadline_event_changed_to_keys_extra"}
+  ]
+}

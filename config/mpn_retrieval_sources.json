@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "adapter": {
+    "id": "mpn",
+    "label": "MPN local owner adapter evidence",
+    "canonical_notebook": "mpn",
+    "owner_root": "/home/ser/projects/mpn-daemon",
+    "owner_root_evidence": {
+      "source": "task_contract",
+      "refs": ["confirmed contract: primary owner root /home/ser/projects/mpn-daemon"]
+    },
+    "owner": "ser",
+    "rollback_owner": "ser",
+    "status": "pilot_ready_local_developer_routing_only",
+    "validated": true
+  },
+  "active_sources": [
+    {
+      "path": "mpn_local_pipeline.py",
+      "kind": "pipeline",
+      "stage": "local_pipeline",
+      "symbols": [
+        "main",
+        "read_summary_prompt",
+        "build_tags_prompt",
+        "validate_tags",
+        "fetch_operator_tags_for_crm_guard",
+        "send_to_crm"
+      ],
+      "evidence_refs": ["mpn_local_pipeline.py:185", "mpn_local_pipeline.py:558", "mpn_local_pipeline.py:645", "mpn_local_pipeline.py:921", "mpn_local_pipeline.py:1076", "mpn_local_pipeline.py:1096", "mpn_local_pipeline.py:1228-1491"],
+      "report_only": true
+    }
+  ],
+  "docs": [],
+  "focused_tests": [],
+  "dependencies": [
+    {
+      "card": "config/mpn_dependency_card.json",
+      "scope_id": "mpn.cc-daemons.direct-ingest.v1"
+    }
+  ],
+  "excluded": {
+    "paths": [
+      ".env",
+      ".env.*",
+      "config/",
+      "configs/",
+      "logs/",
+      "*.log",
+      "*.sqlite",
+      "*.sqlite3",
+      "*.db",
+      "*.zip",
+      "*.tar",
+      "*.tar.gz",
+      "*.tgz",
+      "*.7z",
+      "runtime/",
+      "data/",
+      "tmp/",
+      "backups/"
+    ],
+    "operations": ["crm_post", "google_sheets", "network", "ssh_vps", "eval", "runtime_logs", "apply", "write"]
+  }
+}

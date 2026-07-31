@@ -146,6 +146,88 @@
 - **Слишком короткий reason — тоже проблема.** Если `reason` у объекта выглядит как ярлык или подпись, а не как объяснение пользы, это не good-answer уровень.
 - **`reason` = presentation_reason.** В JSON поле остаётся `reason`, чтобы не ломать парсер и таблицу, но по смыслу это мини-презентация: подтверждённый факт → отличие от других → польза клиенту сейчас. Список фактов через запятую (`сдан, с отделкой, парк рядом`) не считается хорошим `reason`.
 
+Для V2 конкретные рецепты presentation-сценариев, их anchors, разрешённые
+выводы, fallback и CTA собраны в `docs/NMBOT_V2_SCENARIO_RECIPES.md`. Это
+закрытый реестр: answer-модель применяет выданный рецепт к canonical facts, но
+не выбирает сама причину, по которой ЖК стоит рассматривать. Для CTA с
+предсказуемыми продолжениями planner-модель получает закрытый набор outcome и
+выбирает канонический переход; код только валидирует выбор против реестра, а
+не роутит по словам клиента.
+
+Planner возвращает semantic meaning, но не технический route или recipe.
+Runtime exact-валидирует canonical значения и один раз выбирает executable
+recipe. Тот же `ResponsePlan` contract обязан использоваться deterministic
+fallback и composer; повторный resolver в composer запрещён.
+
+Для customer composition используется единый structured JSON contract:
+
+```json
+{
+  "intro": "...",
+  "options": [{"name": "...", "facts": "...", "description": "..."}],
+  "recommendation": "...",
+  "missing_note": "...",
+  "final_question": "..."
+}
+```
+
+`recommendation` обязателен для `recommend_current`. Communication model
+формулирует только эти части по `ResponseBrief`; она не выбирает факты, не
+меняет routing/state и не показывает клиенту внутренний evidence verdict.
+Для quality review используется `docs/GOLDEN_DIALOGS.md`, Example 7.
+
+Актуальная проверяемая форма реестра: 30 recipe entries и два closed reply
+contract — `financing_consent` и `selected_live_fact_consent`. Для обоих
+допустимы только `accept`, `decline`, `ask_or_clarify`, `unexpected`; любые
+invalid/missing значения не открывают контактную воронку.
+
+Матрица release-gate покрывает recipe family × stage × scope × fact status ×
+pending outcome, включая off-topic, selected live fact, financing,
+fresh/timeout/mismatch и explicit inventory evidence. Invalid/missing closed
+outcome не может открыть контактную воронку.
+
+Последний полный локальный gate для executable registry: **551 passed**, 473
+существующих `aiohttp NotAppKeyWarning`, 3.54 sec. Live smoke после deploy
+проверял только поведение ответа: off-topic bounded return-to-real-estate,
+selected live parking fact с `scope=one` и honest missing-data boundary, затем
+bare price follow-up как `parking_price`. Этот smoke не засчитывается как Sheet
+delivery; callback → Sheet delivery подтверждён отдельным историческим mortgage
+сценарием.
+
+### Правило редактирования prompt через Prompt Quality Guardian
+
+Перед изменением любого prompt сначала читаем его целиком вместе с входным payload,
+JSON-схемой, normalizer/validator и тестами. Ошибка в поведении не становится новой
+строкой автоматически:
+
+Prompt Quality Guardian получает не короткое описание симптома, а полный контекст
+решения: точную проблему и желаемый результат, `Actual / Contract / Desired`,
+ограничения и риски, затронутый слой, payload и wire-контракт, relevant-код,
+тестовые сценарии, live-диалог/trace, уже пробованные решения и их результаты.
+Нужно явно указать, что сработало, что не сработало и почему прежние попытки нельзя
+повторять. Без этого Guardian может локально улучшить формулировку, но пропустить
+смысл задачи, существующее правило или риск для соседнего сценария.
+
+1. найти существующее правило, которое отвечает за тот же смысл;
+2. если оно найдено — переписать это правило, объединив старый и новый смысл;
+3. если такого правила нет — добавить одно правило в подходящий раздел, не дублируя
+   существующие запреты и требования;
+4. проверить весь prompt на дубли, взаимоисключающие инструкции и потерю старых
+   сценариев;
+5. сохранить неизменными wire-контракт, допустимые значения и code-level validation.
+
+Для V2 это выполняется отдельно по слоям:
+
+- `followup_intent_classifier.py:DIALOG_STATE_PLANNER_PROMPT` — planner-модель
+  `google/gemini-3.1-flash-lite-preview`; отвечает только за смысл и канонический
+  JSON-план, не пишет клиентский ответ;
+- `prompts/v2_response_composer.txt` — answer-модель
+  `google/gemini-2.5-flash`; формулирует клиентский текст только из проверенного
+  `ResponseBrief` и не меняет routing, state или факты.
+
+Prompt Quality Guardian проверяет каждый слой как единый целевой документ. Нельзя
+переносить правило planner в composer или правило продажной подачи в planner.
+
 ---
 
 ## 2. Что тестируем
@@ -336,7 +418,7 @@ FAIL, если:
 - family показывает реальную пользу для семьи;
 - investment показывает цену / ипотеку / ЕГРН, если это есть;
 - search показывает короткий shortlist;
-- если search уже дал 3+ подходящих варианта (facts+near), ответ должен сохранить 3 явных карточки, а не схлопнуть shortlist до одной строки;
+- если search уже дал 3+ подходящих варианта, shortlist должен сохранять exact `facts` как первичные карточки, а `near` — только как альтернативы, не схлопываясь в одну строку;
 - operator даёт мягкий handoff;
 - off-topic даёт короткую границу;
 - есть один полезный следующий шаг.

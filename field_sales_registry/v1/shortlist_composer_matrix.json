@@ -1,0 +1,207 @@
+[
+  {
+    "case_id": "shortlist_sparse_family_three_options",
+    "scenario": "family",
+    "input": {
+      "schema_version": 1,
+      "answer_goal": "present_shortlist",
+      "scenario": "family",
+      "cta_template": "Что для вас важнее: минимальная цена или конкретный район?",
+      "options": [
+        {
+          "object_name": "ЖК Синтетический Бусиновский",
+          "fields": [
+            {"field_id": "school", "label": "школа", "value": true, "literal_meaning": "В описании отмечена школа.", "allowed_benefit": "Можно назвать школу как общий семейный ориентир без обещания мест.", "strength": "weak", "forbidden_claims": ["Не обещать места в школе."], "rendering_rules": ["Общий факт писать один раз."]},
+            {"field_id": "kindergarten", "label": "детский сад", "value": true, "literal_meaning": "В описании отмечен детский сад.", "allowed_benefit": "Можно назвать детский сад как общий семейный ориентир без обещания мест.", "strength": "weak", "forbidden_claims": ["Не обещать места в саду."], "rendering_rules": ["Общий факт писать один раз."]},
+            {"field_id": "ready", "label": "готовый корпус", "value": true, "literal_meaning": "Корпус отмечен как готовый.", "allowed_benefit": "Можно сказать, что готовность корпуса общая для сравнения, без обещания немедленного переезда.", "strength": "weak", "forbidden_claims": ["Не обещать сразу переехать."], "rendering_rules": ["Общий факт писать один раз."]},
+            {"field_id": "location", "label": "локация", "value": "Бусиновский район", "literal_meaning": "Локация варианта — Бусиновский район.", "allowed_benefit": "Можно сказать, что выбор зависит от нужной локации.", "strength": "weak", "forbidden_claims": ["Не называть локацию лучшей."], "rendering_rules": ["Писать как отличие, не как преимущество."]},
+            {"field_id": "apartment_price", "label": "цена квартиры", "value": 12417930, "literal_meaning": "Цена квартиры — 12 417 930 рублей.", "allowed_benefit": "Можно сравнить цену с другими вариантами точной разницей.", "strength": "strong", "forbidden_claims": ["Не обещать сохранение цены."], "rendering_rules": ["Писать цену буквально."]}
+          ]
+        },
+        {
+          "object_name": "ЖК Синтетический Мичуринский",
+          "fields": [
+            {"field_id": "school", "label": "школа", "value": true, "literal_meaning": "В описании отмечена школа.", "allowed_benefit": "Можно назвать школу как общий семейный ориентир без обещания мест.", "strength": "weak", "forbidden_claims": ["Не обещать места в школе."], "rendering_rules": ["Общий факт писать один раз."]},
+            {"field_id": "kindergarten", "label": "детский сад", "value": true, "literal_meaning": "В описании отмечен детский сад.", "allowed_benefit": "Можно назвать детский сад как общий семейный ориентир без обещания мест.", "strength": "weak", "forbidden_claims": ["Не обещать места в саду."], "rendering_rules": ["Общий факт писать один раз."]},
+            {"field_id": "ready", "label": "готовый корпус", "value": true, "literal_meaning": "Корпус отмечен как готовый.", "allowed_benefit": "Можно сказать, что готовность корпуса общая для сравнения, без обещания немедленного переезда.", "strength": "weak", "forbidden_claims": ["Не обещать сразу переехать."], "rendering_rules": ["Общий факт писать один раз."]},
+            {"field_id": "location", "label": "локация", "value": "Очаково-Матвеевское", "literal_meaning": "Локация варианта — Очаково-Матвеевское.", "allowed_benefit": "Можно сказать, что выбор зависит от нужной локации.", "strength": "weak", "forbidden_claims": ["Не называть локацию лучшей."], "rendering_rules": ["Писать как отличие, не как преимущество."]},
+            {"field_id": "apartment_price", "label": "цена квартиры", "value": 14307660, "literal_meaning": "Цена квартиры — 14 307 660 рублей.", "allowed_benefit": "Можно сравнить цену с другими вариантами точной разницей.", "strength": "strong", "forbidden_claims": ["Не обещать сохранение цены."], "rendering_rules": ["Писать цену буквально."]}
+          ]
+        },
+        {
+          "object_name": "ЖК Синтетический Лосиный",
+          "fields": [
+            {"field_id": "school", "label": "школа", "value": true, "literal_meaning": "В описании отмечена школа.", "allowed_benefit": "Можно назвать школу как общий семейный ориентир без обещания мест.", "strength": "weak", "forbidden_claims": ["Не обещать места в школе."], "rendering_rules": ["Общий факт писать один раз."]},
+            {"field_id": "kindergarten", "label": "детский сад", "value": true, "literal_meaning": "В описании отмечен детский сад.", "allowed_benefit": "Можно назвать детский сад как общий семейный ориентир без обещания мест.", "strength": "weak", "forbidden_claims": ["Не обещать места в саду."], "rendering_rules": ["Общий факт писать один раз."]},
+            {"field_id": "ready", "label": "готовый корпус", "value": true, "literal_meaning": "Корпус отмечен как готовый.", "allowed_benefit": "Можно сказать, что готовность корпуса общая для сравнения, без обещания немедленного переезда.", "strength": "weak", "forbidden_claims": ["Не обещать сразу переехать."], "rendering_rules": ["Общий факт писать один раз."]},
+            {"field_id": "location", "label": "локация", "value": "Метрогородок", "literal_meaning": "Локация варианта — Метрогородок.", "allowed_benefit": "Можно сказать, что выбор зависит от нужной локации.", "strength": "weak", "forbidden_claims": ["Не называть локацию лучшей."], "rendering_rules": ["Писать как отличие, не как преимущество."]},
+            {"field_id": "apartment_price", "label": "цена квартиры", "value": 14429000, "literal_meaning": "Цена квартиры — 14 429 000 рублей.", "allowed_benefit": "Можно сравнить цену с другими вариантами точной разницей.", "strength": "strong", "forbidden_claims": ["Не обещать сохранение цены."], "rendering_rules": ["Писать цену буквально."]}
+          ]
+        }
+      ]
+    },
+    "candidate": {
+      "intro": "Во всех трёх вариантах есть школа, детский сад и готовый корпус, поэтому эти семейные факты лучше считать общими, а различать варианты по цене и локации.",
+      "options": [
+        {"object_name": "ЖК Синтетический Бусиновский", "presentation": "В Бусиновском районе цена квартиры — 12 417 930 рублей. Это самый низкий вход по цене в этой тройке, поэтому его логично смотреть первым, если бюджет важнее выбора конкретной локации.", "decision_role": "lowest_price", "used_field_ids": ["apartment_price", "location"]},
+        {"object_name": "ЖК Синтетический Мичуринский", "presentation": "В Очаково-Матвеевском цена квартиры — 14 307 660 рублей. Это вариант для тех, кому нужна именно эта локация; при этом он на 121 340 рублей дешевле варианта в Метрогородке.", "decision_role": "middle_price/location_choice", "used_field_ids": ["apartment_price", "location"]},
+        {"object_name": "ЖК Синтетический Лосиный", "presentation": "В Метрогородке цена квартиры — 14 429 000 рублей. Его стоит выбирать из-за нужной локации, но ценового преимущества перед двумя другими вариантами у него нет.", "decision_role": "highest_price/location_choice", "used_field_ids": ["apartment_price", "location"]}
+      ],
+      "recommendation": "Если выбирать сухо по фактам, сначала смотрим самый доступный Бусиновский; между Мичуринским и Лосиным выбор уже больше про нужную локацию и разницу в цене.",
+      "final_question": "Что для вас важнее: минимальная цена или конкретный район?"
+    },
+    "expected_valid": true,
+    "expected_errors": [],
+    "expected_decision_roles": ["lowest_price", "middle_price/location_choice", "highest_price/location_choice"]
+  },
+  {
+    "case_id": "shortlist_one_true_unique_feature",
+    "scenario": "comfort",
+    "input": {
+      "schema_version": 1,
+      "answer_goal": "present_shortlist",
+      "scenario": "comfort",
+      "cta_template": "Что для вас важнее: минимальная цена или терраса?",
+      "options": [
+        {"object_name": "ЖК Синтетический Север", "fields": [{"field_id": "apartment_price", "label": "цена квартиры", "value": 10000000, "literal_meaning": "Цена квартиры — 10 000 000 рублей.", "allowed_benefit": "Можно сравнить цену.", "strength": "strong", "forbidden_claims": ["Не обещать сохранение цены."], "rendering_rules": ["Писать буквально."]}]},
+        {"object_name": "ЖК Синтетический Юг", "fields": [{"field_id": "apartment_price", "label": "цена квартиры", "value": 11000000, "literal_meaning": "Цена квартиры — 11 000 000 рублей.", "allowed_benefit": "Можно сравнить цену.", "strength": "strong", "forbidden_claims": ["Не обещать сохранение цены."], "rendering_rules": ["Писать буквально."]}, {"field_id": "terrace", "label": "терраса", "value": true, "literal_meaning": "У варианта отмечена терраса.", "allowed_benefit": "Можно назвать террасу как уникальный факт.", "strength": "medium", "forbidden_claims": ["Не обещать качество террасы."], "rendering_rules": ["Писать как факт."]}]}
+      ]
+    },
+    "candidate": {"intro": "Здесь общих сильных фактов немного, поэтому сравнение держится на цене и одном уникальном признаке.", "options": [{"object_name": "ЖК Синтетический Север", "presentation": "Цена квартиры — 10 000 000 рублей. Это более низкая цена в паре, поэтому вариант понятен как бюджетная точка сравнения.", "decision_role": "lowest_price", "used_field_ids": ["apartment_price"]}, {"object_name": "ЖК Синтетический Юг", "presentation": "Цена квартиры — 11 000 000 рублей, и у варианта отмечена терраса. Он дороже, зато этот отдельный факт может быть смыслом выбора, если он важнее минимальной цены.", "decision_role": "highest_price/unique_fact", "used_field_ids": ["apartment_price", "terrace"]}], "recommendation": "", "final_question": "Что для вас важнее: минимальная цена или терраса?"},
+    "expected_valid": true,
+    "expected_errors": [],
+    "expected_decision_roles": ["lowest_price", "highest_price/unique_fact"]
+  },
+  {
+    "case_id": "shortlist_no_unique_advantage_same_values",
+    "scenario": "general",
+    "input": {
+      "schema_version": 1,
+      "answer_goal": "present_shortlist",
+      "scenario": "general",
+      "cta_template": "Хотите, я покажу, чем они отличаются в деталях?",
+      "options": [
+        {"object_name": "ЖК Синтетический Восток", "fields": [{"field_id": "location", "label": "локация", "value": "Восточный район", "literal_meaning": "Локация варианта — Восточный район.", "allowed_benefit": "Можно сказать, что выбор зависит от нужной локации.", "strength": "weak", "forbidden_claims": ["Не называть локацию лучшей."], "rendering_rules": ["Писать нейтрально."]}, {"field_id": "apartment_price", "label": "цена квартиры", "value": 9000000, "literal_meaning": "Цена квартиры — 9 000 000 рублей.", "allowed_benefit": "Можно сравнить цену.", "strength": "strong", "forbidden_claims": ["Не обещать сохранение цены."], "rendering_rules": ["Писать буквально."]}]},
+        {"object_name": "ЖК Синтетический Запад", "fields": [{"field_id": "location", "label": "локация", "value": "Западный район", "literal_meaning": "Локация варианта — Западный район.", "allowed_benefit": "Можно сказать, что выбор зависит от нужной локации.", "strength": "weak", "forbidden_claims": ["Не называть локацию лучшей."], "rendering_rules": ["Писать нейтрально."]}, {"field_id": "apartment_price", "label": "цена квартиры", "value": 9000000, "literal_meaning": "Цена квартиры — 9 000 000 рублей.", "allowed_benefit": "Можно сравнить цену.", "strength": "strong", "forbidden_claims": ["Не обещать сохранение цены."], "rendering_rules": ["Писать буквально."]}]}
+      ]
+    },
+    "candidate": {"intro": "По цене варианты совпадают: у обоих указано 9 000 000 рублей, поэтому ценового преимущества нет.", "options": [{"object_name": "ЖК Синтетический Восток", "presentation": "Цена квартиры — 9 000 000 рублей, локация — Восточный район. Отдельного преимущества по фактам нет; вариант имеет смысл выбирать только если нужна эта локация.", "decision_role": "no_unique_advantage", "used_field_ids": ["apartment_price", "location"]}, {"object_name": "ЖК Синтетический Запад", "presentation": "Цена квартиры — 9 000 000 рублей, локация — Западный район. По тем же фактам он не сильнее первого; честный выбор здесь зависит от нужной локации.", "decision_role": "no_unique_advantage", "used_field_ids": ["apartment_price", "location"]}], "recommendation": "Без дополнительных фактов честная рекомендация — не выбирать победителя, а уточнить нужную локацию.", "final_question": "Хотите, я покажу, чем они отличаются в деталях?"},
+    "expected_valid": true,
+    "expected_errors": [],
+    "expected_decision_roles": ["no_unique_advantage", "no_unique_advantage"]
+  },
+  {
+    "case_id": "shortlist_negative_repeated_common_facts",
+    "scenario": "family",
+    "input": {
+      "schema_version": 1,
+      "answer_goal": "present_shortlist",
+      "scenario": "family",
+      "cta_template": "Хотите, я разберу один из этих вариантов подробнее?",
+      "options": [
+        {"object_name": "ЖК Синтетический А", "fields": [{"field_id": "school", "label": "школа", "value": true, "literal_meaning": "В описании отмечена школа.", "allowed_benefit": "Можно назвать школу как общий семейный ориентир без обещания мест.", "strength": "weak", "forbidden_claims": ["Не обещать места в школе."], "rendering_rules": ["Общий факт писать один раз."]}, {"field_id": "apartment_price", "label": "цена квартиры", "value": 8000000, "literal_meaning": "Цена квартиры — 8 000 000 рублей.", "allowed_benefit": "Можно сравнить цену.", "strength": "strong", "forbidden_claims": ["Не обещать сохранение цены."], "rendering_rules": ["Писать буквально."]}]},
+        {"object_name": "ЖК Синтетический Б", "fields": [{"field_id": "school", "label": "школа", "value": true, "literal_meaning": "В описании отмечена школа.", "allowed_benefit": "Можно назвать школу как общий семейный ориентир без обещания мест.", "strength": "weak", "forbidden_claims": ["Не обещать места в школе."], "rendering_rules": ["Общий факт писать один раз."]}, {"field_id": "apartment_price", "label": "цена квартиры", "value": 8500000, "literal_meaning": "Цена квартиры — 8 500 000 рублей.", "allowed_benefit": "Можно сравнить цену.", "strength": "strong", "forbidden_claims": ["Не обещать сохранение цены."], "rendering_rules": ["Писать буквально."]}]}
+      ]
+    },
+    "candidate": {"intro": "У обоих вариантов есть школа как общий семейный ориентир.", "options": [{"object_name": "ЖК Синтетический А", "presentation": "Есть школа, цена квартиры — 8 000 000 рублей. Есть школа, поэтому вариант семейный.", "decision_role": "lowest_price", "used_field_ids": ["school", "apartment_price"]}, {"object_name": "ЖК Синтетический Б", "presentation": "Есть школа, цена квартиры — 8 500 000 рублей. Есть школа, поэтому вариант семейный.", "decision_role": "highest_price/unique_fact", "used_field_ids": ["school", "apartment_price"]}], "recommendation": "Выбирать можно по школе.", "final_question": "Хотите, я разберу один из этих вариантов подробнее?"},
+    "expected_valid": false,
+    "expected_errors": ["common_fact_repeated", "duplicate_presentation", "decision_role_mismatch"],
+    "expected_decision_roles": []
+  },
+  {
+    "case_id": "shortlist_negative_unsupported_claims",
+    "scenario": "readiness",
+    "input": {
+      "schema_version": 1,
+      "answer_goal": "present_shortlist",
+      "scenario": "readiness",
+      "cta_template": "Хотите, я проверю этот вариант глубже?",
+      "options": [
+        {"object_name": "ЖК Синтетический Готовый", "fields": [{"field_id": "ready", "label": "готовый корпус", "value": true, "literal_meaning": "Корпус отмечен как готовый.", "allowed_benefit": "Можно сказать, что корпус готов, без обещания немедленного переезда.", "strength": "weak", "forbidden_claims": ["Не обещать сразу переехать."], "rendering_rules": ["Писать буквально."]}]}
+      ]
+    },
+    "candidate": {"intro": "Вариант выглядит удобным: корпус готов, можно сразу переехать, а метро рядом в 5 минут пешком.", "options": [{"object_name": "ЖК Синтетический Готовый", "presentation": "Корпус готов. Это лучший вариант для быстрого переезда.", "decision_role": "unique_fact", "used_field_ids": ["ready"]}], "recommendation": "Можно выбирать его без дополнительных сомнений.", "final_question": "Хотите, я проверю этот вариант глубже?"},
+    "expected_valid": false,
+    "expected_errors": ["unsupported_claim", "unknown_number", "decision_role_mismatch"],
+    "expected_decision_roles": []
+  },
+  {
+    "case_id": "shortlist_financing_budget_two_options",
+    "scenario": "budget",
+    "input": {
+      "schema_version": 1,
+      "answer_goal": "present_shortlist",
+      "scenario": "budget",
+      "cta_template": "Что для вас важнее сравнить дальше: цену квартиры, ставку, взнос или срок рассрочки?",
+      "options": [
+        {"object_name": "ЖК Синтетический Финанс Север", "fields": [
+          {"field_id": "apartment_price", "label": "цена квартиры", "value": 9800000, "literal_meaning": "Цена квартиры — 9 800 000 рублей.", "allowed_benefit": "Можно назвать цену буквально и сравнить её с другим вариантом.", "strength": "strong", "forbidden_claims": ["Не обещать сохранение цены."], "rendering_rules": ["Писать цену буквально."]},
+          {"field_id": "mortgage_rate", "label": "ипотечная ставка", "value": "8,9%", "literal_meaning": "Ипотечная ставка — 8,9%.", "allowed_benefit": "Можно назвать ставку буквально без обещания одобрения или лучшей программы.", "strength": "medium", "forbidden_claims": ["Не обещать одобрение ипотеки.", "Не называть ставку лучшей."], "rendering_rules": ["Копировать значение буквально."]},
+          {"field_id": "down_payment", "label": "первоначальный взнос", "value": "2 200 000 рублей", "literal_meaning": "Первоначальный взнос — 2 200 000 рублей.", "allowed_benefit": "Можно назвать взнос буквально без расчёта платежа.", "strength": "medium", "forbidden_claims": ["Не считать ежемесячный платёж."], "rendering_rules": ["Копировать значение буквально."]},
+          {"field_id": "installment_months", "label": "срок рассрочки", "value": "18 месяцев", "literal_meaning": "Срок рассрочки — 18 месяцев.", "allowed_benefit": "Можно назвать срок рассрочки буквально без вывода о переплате.", "strength": "medium", "forbidden_claims": ["Не обещать отсутствие переплаты."], "rendering_rules": ["Копировать значение буквально."]}
+        ]},
+        {"object_name": "ЖК Синтетический Финанс Юг", "fields": [
+          {"field_id": "apartment_price", "label": "цена квартиры", "value": 10400000, "literal_meaning": "Цена квартиры — 10 400 000 рублей.", "allowed_benefit": "Можно назвать цену буквально и сравнить её с другим вариантом.", "strength": "strong", "forbidden_claims": ["Не обещать сохранение цены."], "rendering_rules": ["Писать цену буквально."]},
+          {"field_id": "mortgage_rate", "label": "ипотечная ставка", "value": "7,8%", "literal_meaning": "Ипотечная ставка — 7,8%.", "allowed_benefit": "Можно назвать ставку буквально без обещания одобрения или лучшей программы.", "strength": "medium", "forbidden_claims": ["Не обещать одобрение ипотеки.", "Не называть ставку лучшей."], "rendering_rules": ["Копировать значение буквально."]},
+          {"field_id": "down_payment", "label": "первоначальный взнос", "value": "3 000 000 рублей", "literal_meaning": "Первоначальный взнос — 3 000 000 рублей.", "allowed_benefit": "Можно назвать взнос буквально без расчёта платежа.", "strength": "medium", "forbidden_claims": ["Не считать ежемесячный платёж."], "rendering_rules": ["Копировать значение буквально."]},
+          {"field_id": "installment_months", "label": "срок рассрочки", "value": "24 месяца", "literal_meaning": "Срок рассрочки — 24 месяца.", "allowed_benefit": "Можно назвать срок рассрочки буквально без вывода о переплате.", "strength": "medium", "forbidden_claims": ["Не обещать отсутствие переплаты."], "rendering_rules": ["Копировать значение буквально."]}
+        ]}
+      ]
+    },
+    "candidate": {"intro": "Здесь сравнение лучше держать в переданных цифрах: у вариантов отличаются цена квартиры и несколько финансовых параметров.", "options": [{"object_name": "ЖК Синтетический Финанс Север", "presentation": "Цена квартиры — 9 800 000 рублей, ставка — 8,9%, первоначальный взнос — 2 200 000 рублей, срок рассрочки — 18 месяцев. Это самый доступный вариант по цене квартиры, но финансовые условия стоит сравнить отдельно по каждому числу.", "decision_role": "lowest_price", "used_field_ids": ["apartment_price", "mortgage_rate", "down_payment", "installment_months"]}, {"object_name": "ЖК Синтетический Финанс Юг", "presentation": "Цена квартиры — 10 400 000 рублей, ставка — 7,8%, первоначальный взнос — 3 000 000 рублей, срок рассрочки — 24 месяца. Ценового преимущества нет, зато сами условия отличаются, поэтому выбор здесь не стоит сводить только к стоимости квартиры.", "decision_role": "highest_price/unique_fact", "used_field_ids": ["apartment_price", "mortgage_rate", "down_payment", "installment_months"]}], "recommendation": "Если идти от бюджета на покупку, первым выглядит северный вариант; если важнее параметры финансирования, нужно сравнивать каждое переданное число отдельно.", "final_question": "Что для вас важнее сравнить дальше: цену квартиры, ставку, взнос или срок рассрочки?"},
+    "expected_valid": true,
+    "expected_errors": [],
+    "expected_decision_roles": ["lowest_price", "highest_price/unique_fact"]
+  },
+  {
+    "case_id": "shortlist_parking_vs_lower_price",
+    "scenario": "parking",
+    "input": {
+      "schema_version": 1,
+      "answer_goal": "present_shortlist",
+      "scenario": "parking",
+      "cta_template": "Что для вас важнее: ниже цена квартиры или отдельные факты про паркинг?",
+      "options": [
+        {"object_name": "ЖК Синтетический Парковый", "fields": [
+          {"field_id": "apartment_price", "label": "цена квартиры", "value": 11200000, "literal_meaning": "Цена квартиры — 11 200 000 рублей.", "allowed_benefit": "Можно назвать цену буквально и сравнить её с другим вариантом.", "strength": "strong", "forbidden_claims": ["Не обещать сохранение цены."], "rendering_rules": ["Писать цену буквально."]},
+          {"field_id": "parking", "label": "паркинг", "value": true, "literal_meaning": "У варианта указан паркинг.", "allowed_benefit": "Можно назвать паркинг как факт без обещания бронирования.", "strength": "medium", "forbidden_claims": ["Не обещать бронирование места."], "rendering_rules": ["Писать как факт."]},
+          {"field_id": "parking_price", "label": "цена паркинга", "value": "1 200 000 рублей", "literal_meaning": "Цена паркинга — 1 200 000 рублей.", "allowed_benefit": "Можно назвать цену паркинга буквально без обещания доступности.", "strength": "medium", "forbidden_claims": ["Не обещать гарантированную доступность."], "rendering_rules": ["Копировать значение буквально."]},
+          {"field_id": "parking_inventory", "label": "остаток машиномест", "value": "7 машиномест", "literal_meaning": "Остаток машиномест — 7 машиномест.", "allowed_benefit": "Можно назвать остаток буквально без вывода о дефиците.", "strength": "medium", "forbidden_claims": ["Не обещать, что места останутся."], "rendering_rules": ["Копировать значение буквально."]}
+        ]},
+        {"object_name": "ЖК Синтетический Экономный", "fields": [
+          {"field_id": "apartment_price", "label": "цена квартиры", "value": 10500000, "literal_meaning": "Цена квартиры — 10 500 000 рублей.", "allowed_benefit": "Можно назвать цену буквально и сравнить её с другим вариантом.", "strength": "strong", "forbidden_claims": ["Не обещать сохранение цены."], "rendering_rules": ["Писать цену буквально."]}
+        ]}
+      ]
+    },
+    "candidate": {"intro": "В этой паре один вариант дешевле по квартире, а у другого отдельно указаны дополнительные факты.", "options": [{"object_name": "ЖК Синтетический Парковый", "presentation": "Цена квартиры — 11 200 000 рублей; также указан паркинг, цена паркинга — 1 200 000 рублей, остаток — 7 машиномест. Он дороже по квартире, но именно эти факты могут быть причиной смотреть его, если паркинг важнее минимальной цены.", "decision_role": "highest_price/unique_fact", "used_field_ids": ["apartment_price", "parking", "parking_price", "parking_inventory"]}, {"object_name": "ЖК Синтетический Экономный", "presentation": "Цена квартиры — 10 500 000 рублей. Это самый доступный вариант в паре; отдельных дополнительных фактов у него нет, поэтому его смысл — более низкий вход по цене квартиры.", "decision_role": "lowest_price", "used_field_ids": ["apartment_price"]}], "recommendation": "Если паркинг не критичен, проще начать с более дешёвой квартиры; если нужен именно паркинг, сравнение уже не только про цену квартиры.", "final_question": "Что для вас важнее: ниже цена квартиры или отдельные факты про паркинг?"},
+    "expected_valid": true,
+    "expected_errors": [],
+    "expected_decision_roles": ["highest_price/unique_fact", "lowest_price"]
+  },
+  {
+    "case_id": "shortlist_investment_literal_counters",
+    "scenario": "investment",
+    "input": {
+      "schema_version": 1,
+      "answer_goal": "present_shortlist",
+      "scenario": "investment",
+      "cta_template": "Что для вас важнее: цена квартиры или буквальные счётчики продаж и объявлений?",
+      "options": [
+        {"object_name": "ЖК Синтетический Инвест Первый", "fields": [
+          {"field_id": "apartment_price", "label": "цена квартиры", "value": 9200000, "literal_meaning": "Цена квартиры — 9 200 000 рублей.", "allowed_benefit": "Можно назвать цену буквально и сравнить её с другим вариантом.", "strength": "strong", "forbidden_claims": ["Не обещать сохранение цены."], "rendering_rules": ["Писать цену буквально."]},
+          {"field_id": "sales_count", "label": "счётчик продаж ЕГРН", "value": "14 продаж ЕГРН", "literal_meaning": "Счётчик продаж ЕГРН — 14 продаж ЕГРН.", "allowed_benefit": "Можно назвать счётчик буквально без вывода о спросе или будущей продаже.", "strength": "weak", "forbidden_claims": ["Не делать инвестиционные выводы."], "rendering_rules": ["Копировать значение буквально."]},
+          {"field_id": "ads_count", "label": "счётчик объявлений на витрине", "value": "38 объявлений на витрине", "literal_meaning": "Счётчик объявлений на витрине — 38 объявлений на витрине.", "allowed_benefit": "Можно назвать счётчик буквально без вывода о рынке.", "strength": "weak", "forbidden_claims": ["Не делать инвестиционные выводы."], "rendering_rules": ["Копировать значение буквально."]}
+        ]},
+        {"object_name": "ЖК Синтетический Инвест Второй", "fields": [
+          {"field_id": "apartment_price", "label": "цена квартиры", "value": 9900000, "literal_meaning": "Цена квартиры — 9 900 000 рублей.", "allowed_benefit": "Можно назвать цену буквально и сравнить её с другим вариантом.", "strength": "strong", "forbidden_claims": ["Не обещать сохранение цены."], "rendering_rules": ["Писать цену буквально."]},
+          {"field_id": "sales_count", "label": "счётчик продаж ЕГРН", "value": "21 продажа ЕГРН", "literal_meaning": "Счётчик продаж ЕГРН — 21 продажа ЕГРН.", "allowed_benefit": "Можно назвать счётчик буквально без вывода о спросе или будущей продаже.", "strength": "weak", "forbidden_claims": ["Не делать инвестиционные выводы."], "rendering_rules": ["Копировать значение буквально."]},
+          {"field_id": "ads_count", "label": "счётчик объявлений на витрине", "value": "29 объявлений на витрине", "literal_meaning": "Счётчик объявлений на витрине — 29 объявлений на витрине.", "allowed_benefit": "Можно назвать счётчик буквально без вывода о рынке.", "strength": "weak", "forbidden_claims": ["Не делать инвестиционные выводы."], "rendering_rules": ["Копировать значение буквально."]}
+        ]}
+      ]
+    },
+    "candidate": {"intro": "Для инвестиционного сравнения здесь безопасно опираться только на цену и буквальные счётчики, без прогноза по рынку.", "options": [{"object_name": "ЖК Синтетический Инвест Первый", "presentation": "Цена квартиры — 9 200 000 рублей; счётчик продаж ЕГРН — 14 продаж ЕГРН, счётчик объявлений на витрине — 38 объявлений на витрине. Это более низкая цена, а счётчики нужно читать буквально: без вывода о спросе, доходе, росте цены или будущей продаже.", "decision_role": "lowest_price", "used_field_ids": ["apartment_price", "sales_count", "ads_count"]}, {"object_name": "ЖК Синтетический Инвест Второй", "presentation": "Цена квартиры — 9 900 000 рублей; счётчик продаж ЕГРН — 21 продажа ЕГРН, счётчик объявлений на витрине — 29 объявлений на витрине. Ценового преимущества нет; это буквальные счётчики без инвестиционного вывода.", "decision_role": "no_unique_advantage", "used_field_ids": ["apartment_price", "sales_count", "ads_count"]}], "recommendation": "Если главный фильтр — входная цена, первым выглядит первый вариант; счётчики остаются справочными числами без выбора победителя.", "final_question": "Что для вас важнее: цена квартиры или буквальные счётчики продаж и объявлений?"},
+    "expected_valid": true,
+    "expected_errors": [],
+    "expected_decision_roles": ["lowest_price", "no_unique_advantage"]
+  }
+]

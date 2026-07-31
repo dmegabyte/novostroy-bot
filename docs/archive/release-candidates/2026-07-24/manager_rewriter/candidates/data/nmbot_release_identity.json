@@ -1,0 +1,51 @@
+{
+  "schema": "nmbot.release_identity.v1",
+  "release_id": "2026-07-24.v2v3-phone-first-callback.12",
+  "generated_at": "2026-07-24T08:40:52.179972Z",
+  "tracked_files": [
+    {
+      "path": "nmbot_v2/contracts.py",
+      "sha256": "611df91b4e9f91979708c40dc2a74d057ee943846b6ca7b9ef710bb4ee18ea8f"
+    },
+    {
+      "path": "nmbot_v2/ports.py",
+      "sha256": "e9808fb0773aa7f4cad4908cab170ad335070d84d98036b416755075c9806ff0"
+    },
+    {
+      "path": "nmbot_v2/runtime.py",
+      "sha256": "c37d0f2a42ffa90cd9a33b76e37119e096fb88a87ff44d6aec5031d90b936484"
+    },
+    {
+      "path": "nmbot_v2/state.py",
+      "sha256": "dea0754d657e40ebfbfb712da47dd18b742baf684acf9d8ddfc4b07d20aa9316"
+    },
+    {
+      "path": "scripts/nmbot_runtime_adapter.py",
+      "sha256": "1118a1a523e350e898406cc7022c5d7f195ee9d29f14882e081c50c80899fb8d"
+    },
+    {
+      "path": "prompts/v2_manager_rewriter.txt",
+      "sha256": "c873eacb316004a811d600cb6eea233a8e3056bb74376519f856be272e12087d"
+    },
+    {
+      "path": "nmbot_v2/manager_rewriter.py",
+      "sha256": "c78da31f8ccc6d85f5474caaa1ea421d0e293b0f51640507bd3e295027309042"
+    },
+    {
+      "path": "scripts/nmbot_manager_rewriter.py",
+      "sha256": "daf930e47aca685ce616ae752c66f1e5920012cdfda6877637d4ab668ee6775a"
+    },
+    {
+      "path": "nmbot_v2/pending.py",
+      "sha256": "edc2548fe17b8775fb300769d3ffa09197020099eb01a021dc77647266197fb8"
+    },
+    {
+      "path": "nmbot_v2/response.py",
+      "sha256": "66efba325d98a70d7e0c028221b3718618012eead63a01cfa55aa26ea2fff231"
+    },
+    {
+      "path": "nmbot_v2/scenario_recipes.py",
+      "sha256": "c702537942077e77da2a1cba74e70835254cde5ad4cf6c8876b0885686512cd0"
+    }
+  ]
+}

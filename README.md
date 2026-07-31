@@ -1,177 +1,63 @@
-# nmbot — Novostroy AI Бот
+# nmbot — Novostroy AI Bot
 
-Проект Telegram-бота для подбора квартир в новостройках Москвы и области (Ирина).
+Compact project entrypoint for navigation only. Detailed contracts, runbooks,
+release gates and dated evidence live in the owner documents linked below.
 
-## Единственная актуальная версия
+## Runtime/version map
 
-- **Прод**: `novostroy-bot.service` на VPS
-- **Путь прод-кода**: `/home/neiro/novostroy-bot`
-- **Запуск**: `python3 scripts/chat_tester_bot.py`
-- **Локальная копия**: `/home/ser/ai/projects/nmbot` — только для разработки, тестов и документации
-- **Путаться не надо**: в этой доке не используется отдельный бот `tsbot`; ориентир один — `novostroy-bot`
+Runtime contracts are documented in
+[`docs/NMBOT_RUNTIME_VERSIONS.md`](docs/NMBOT_RUNTIME_VERSIONS.md) and registered
+in [`docs/NMBOT_RUNTIME_REGISTRY.md`](docs/NMBOT_RUNTIME_REGISTRY.md). Docs can
+describe supported architecture, but they do **not** prove the current live
+selector or production readiness.
 
-## Архитектура
+| Version | Client name | Boundary |
+|---|---|---|
+| V0 | Валерия | Isolated two-prompt runtime under `nmbot_v0/*`. |
+| V1 | Татьяна | Independent typed TEST runtime under `nmbot_v1/*`; guarded GPT final-text path is not publish proof. |
+| V2 | Ирина | Typed runtime under `nmbot_v2/*` with deterministic renderer and optional validated composer. |
+| V3 | Светлана | V2 runtime plus `IntentPlanV3` semantic contract; V3 evidence must be selector-specific. |
+| V4 | Марина | Isolated one-prompt runtime under `nmbot_v4/*`; local implementation evidence is not live proof. |
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    ПРОДАКШН (VPS)                              │
-│  systemd: novostroy-bot.service                                │
-│  репо:  github.com/dmegabyte/novostroy-bot.git                 │
-│  путь:  /home/neiro/novostroy-bot                              │
-│  пуск:  python3 scripts/chat_tester_bot.py                     │
-│  хост:  neiro@193.107.155.236:1905                             │
-│                                                                │
-│  Пользователь → [Telegram Bot] → [Cloudflare Worker Proxy]     │
-│                                → [Gateway Agent] → MCP search   │
-│                                → [OpenRouter] → Gemini ответ    │
-└─────────────────────────────────────────────────────────────────┘
-                              ↑
-                              | (тесты и промпты отсюда)
-┌─────────────────────────────────────────────────────────────────┐
-│                ЛОКАЛЬНЫЙ СТЕНД                                  │
-│  путь:  /home/ser/ai/projects/nmbot                            │
-│  бот:   scripts/chat_tester_bot.py  (рабочая копия)            │
-│  тесты: scripts/nmbot_test_agent.py                            │
-│  промпты: prompts/chat_v1.txt, prompts/search_v1.txt           │
-└─────────────────────────────────────────────────────────────────┘
-```
+Live runtime/version claims require fresh runtime marker/Jivo evidence through the
+runbook route, not README text.
 
-**Двухмодельный пайплайн (общий для dev и prod):**
-1. `google/gemini-3.1-flash-lite-preview` — поиск через MCP `novostroym`, сбор фактов и ссылок.
-2. `google/gemini-2.5-flash` — финальное общение с клиентом по найденным фактам, без прямого MCP.
+## Current transport map
 
-## Диагностика (единая точка входа)
+- Client-facing transport: Jivo widget → n8n bridge → private API → selected
+  runtime → terminal `BOT_MESSAGE`.
+- Main VPS source path used by operations docs: `/home/neiro/novostroy-bot`.
+- Main local development path in this checkout: repository root.
+- Telegram runtime (`scripts/chat_tester_bot.py`, historical systemd units) is
+  legacy rollback/debug only and is not a Jivo release gate.
 
-```bash
-# Полный статус (VPS + local + лог)
-bash scripts/nmbot_diag.sh
+Do not infer current production health, active selector, composer mode, delivery
+success or client-visible UX from this map. Use the runbook/diagnostics owner and
+fresh evidence when network/VPS checks are explicitly allowed.
 
-# Только статус продакшн-бота (PID, uptime, memory, коммит)
-bash scripts/nmbot_diag.sh --quick
+## Documentation routes
 
-# Только последние строки лога
-bash scripts/nmbot_diag.sh --logs
-```
+- [`docs/README.md`](docs/README.md) — primary docs registry by lifecycle/status.
+- [`docs/CURRENT_ARCHITECTURE.md`](docs/CURRENT_ARCHITECTURE.md) — compact system map.
+- [`docs/NMBOT_RUNTIME_VERSIONS.md`](docs/NMBOT_RUNTIME_VERSIONS.md) — V0/V1/V2/V3/V4 separation passport.
+- [`docs/NMBOT_RUNTIME_REGISTRY.md`](docs/NMBOT_RUNTIME_REGISTRY.md) — runtime selector and ownership registry.
+- [`docs/NMBOT_EXTERNAL_CONTRACTS.md`](docs/NMBOT_EXTERNAL_CONTRACTS.md) — Jivo/callback contract owner.
+- [`docs/NOVOSTROYM_MCP_SCHEMA.md`](docs/NOVOSTROYM_MCP_SCHEMA.md) — canonical `novostroym` MCP/database schema reference.
+- [`docs/NMBOT_RUNBOOK.md`](docs/NMBOT_RUNBOOK.md) — operational commands, local gates, deploy/rollback boundaries.
+- [`docs/JIVO_DIAGNOSTICS.md`](docs/JIVO_DIAGNOSTICS.md) — Jivo trace, terminal delivery and diagnostics.
+- [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md) and [`docs/RESPONSE_MODEL_EVAL.md`](docs/RESPONSE_MODEL_EVAL.md) — prompt/model experiments and response-model evidence.
+- [`docs/NMBOT_ENGINEERING_LESSONS.md`](docs/NMBOT_ENGINEERING_LESSONS.md) — reusable lessons and prevention checklists.
+- [`docs/ARCHIVE_INDEX.md`](docs/ARCHIVE_INDEX.md) — historical records and old evidence.
 
-**Эквивалент вручную** (если нужно без скрипта):
-```bash
-ssh -p 1905 neiro@193.107.155.236 "systemctl --user status novostroy-bot.service --no-pager"
-ssh -p 1905 neiro@193.107.155.236 "tail -20 /home/neiro/novostroy-bot/logs/bot.log"
-```
-
-## Структура проекта
-
-```
-nmbot/
-├── .env                  # токены (заполнить из vault)
-├── .gitignore
-├── AGENTS.md             # контекст для opencode/ЧАТИ
-├── README.md
-├── requirements.txt
-├── scripts/
-│   ├── chat_cli.py            # CLI-клиент (двухшаговый запрос)
-│   ├── chat_tester_bot.py     # runtime Telegram-бота: dev и текущий prod
-│   ├── nmbot_diag.sh          # ★ единая диагностика (единственная точка входа)
-│   ├── nmbot_deploy_smoke.py  # проверка live-процесса prod/VPS по умолчанию
-│   ├── nmbot_test_agent.py    # CLI-агент автотестирования
-│   ├── nmbot_quality.py       # оперативная проверка логов
-│   ├── or_cost.py             # OpenRouter cost tracking
-│   ├── or_monitor.py          # мониторинг + auto-block
-│   └── run_bot.sh             # запуск dev-бота
-├── logs/                     # логи dev-бота
-│   ├── bot.log
-│   ├── bot.err
-│   ├── dialogs-*.jsonl
-│   └── hypotheses.jsonl
-├── prompts/
-│   ├── chat_v1.txt            # Chat-промпт (Ирина)
-│   └── search_v1.txt          # Search-промпт (MCP)
-└── docs/
-    ├── CHANGELOG.md
-    ├── CODEX.md
-    ├── EXPERIMENTS.md
-    └── GOLDEN_DIALOGS.md
-```
-
-## Prod / Staging / Dev
-
-| | Production (VPS) | Staging (VPS) | Dev (локально) |
-|---|---|---|---|
-| **Где** | `neiro@193.107.155.236:1905` | `neiro@193.107.155.236:1905` | `/home/ser/ai/projects/nmbot` |
-| **Путь** | `/home/neiro/novostroy-bot` | `/home/neiro/novostroy-bot-staging` | `/home/ser/ai/projects/nmbot` |
-| **Запуск** | `systemctl --user start novostroy-bot.service` | `systemctl --user start novostroy-bot-staging.service` | `bash scripts/run_bot.sh` |
-| **Код** | `python3 scripts/chat_tester_bot.py` | `python3 scripts/chat_tester_bot.py` | `python scripts/chat_tester_bot.py` |
-| **Git** | `master` | `staging` | рабочая копия |
-| **Telegram** | prod bot token через Cloudflare Worker proxy | отдельный тестовый bot token | dev token напрямую Bot API |
-| **Лог** | `/home/neiro/novostroy-bot/logs/bot.log` | `/home/neiro/novostroy-bot-staging/logs/bot.log` | `logs/bot.log` |
-| **Диагностика** | `bash scripts/nmbot_diag.sh` | `systemctl --user status novostroy-bot-staging.service --no-pager` | `bash scripts/nmbot_diag.sh` |
-
-Staging нужен, чтобы проверять изменения в отдельном Telegram-боте до prod. Не запускай staging на prod `TELEGRAM_BOT_TOKEN`: два poller-процесса на одном токене будут мешать друг другу.
-
-## Быстрый старт (dev)
+## Local safe checks
 
 ```bash
-cd /home/ser/ai/projects/nmbot
+# Documentation/static docs gate; no VPS/network/model/deploy route.
+python3 scripts/nmbot_check.py docs
 
-# 1. Виртуальное окружение
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# 2. Токены (из vault secret/projects/NOVOSTROY_AI)
-cat > .env << 'EOF'
-TELEGRAM_BOT_TOKEN=...     # из .env.bot основного проекта
-OVERMIND_URL=https://overmind.aiaxel.ru
-OVERMIND_TOKEN=...         # NOVOSTROY_M_TOKEN из vault
-OPENROUTER_API_KEY=...     # openrouter_token из vault
-EOF
-
-# 3. CLI-тест
-source .venv/bin/activate
-export $(grep -v '^#' .env | xargs)
-python scripts/chat_cli.py "Найди однушку до 8 млн в Москве"
-
-# 4. Telegram бот (dev)
-python scripts/chat_tester_bot.py
+# See available local gates before choosing a narrower scope.
+python3 scripts/nmbot_check.py docs --dry-run
 ```
 
-## Токены (vault)
-
-Все токены лежат в `secret/projects/NOVOSTROY_AI`:
-
-| Поле .env | Ключ vault | Описание |
-|-----------|-----------|----------|
-| `OVERMIND_TOKEN` | `NOVOSTROY_M_TOKEN` | Bearer-токен для Overmind API (gateway-agent) |
-| `OPENROUTER_API_KEY` | `openrouter_token` | Ключ OpenRouter |
-| `TELEGRAM_BOT_TOKEN` | — | Из `.env.bot` основного проекта |
-
-## Команды TG-бота (dev)
-
-- `/start` — приветствие с настройками
-- `/model` — выбрать модель поиска (inline-клавиатура)
-- `/mcp` — включить/выключить MCP novostroym
-- `/reset` — сброс настроек
-- `/status` — текущие настройки
-
-## Тестирование
-
-```bash
-# CLI-агент автотестов (12+ сценариев)
-python3 scripts/nmbot_test_agent.py
-python3 scripts/nmbot_test_agent.py --suite deploy   # + live deploy-smoke
-python3 scripts/nmbot_test_agent.py --suite dialog   # контрольный диалог
-python3 scripts/nmbot_test_agent.py --suite stateful # multi-turn: память, выбор, оператор
-python3 scripts/nmbot_test_agent.py --suite compare  # multi-turn: сравнение, рекомендация, оператор
-python3 scripts/nmbot_test_agent.py --json           # JSON для CI
-
-# Read-only health: service/env/errors/client cards/payload sizes + answer latency
-python3 scripts/nmbot_health.py
-python3 scripts/nmbot_health.py --json
-```
-
-## Документация
-
-- [`docs/CHANGELOG.md`](docs/CHANGELOG.md) — история изменений (H001–H025)
-- [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md) — реестр гипотез и метрики
-- [`docs/CODEX.md`](docs/CODEX.md) — свод правил диалога (codex)
-- [`docs/GOLDEN_DIALOGS.md`](docs/GOLDEN_DIALOGS.md) — эталонные few-shot примеры
+Broader tests, live diagnostics, deploy, promptfoo/eval and provider/model calls
+require a separate explicit decision.

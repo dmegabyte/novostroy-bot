@@ -1,0 +1,17 @@
+[Unit]
+Description=NMBOT callback Google Sheets worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/neiro/novostroy-bot
+EnvironmentFile=/home/neiro/novostroy-bot/.env
+ExecStart=/usr/bin/python3 /home/neiro/novostroy-bot/scripts/nmbot_callback_sheet_worker.py --loop --poll-seconds 5
+Restart=always
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

@@ -36,6 +36,7 @@ import scene_classifier
 import followup_intent_classifier
 from style_scenes import get_scene_rules
 import text_style_tool
+from search_profiles import safe_search_profile_payload
 
 # ── Конфигурация ─────────────────────────────────────────────
 
@@ -45,6 +46,7 @@ OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_API_BASE_URL = os.getenv("TELEGRAM_API_BASE_URL", "").rstrip("/")
 OPENROUTER_EXCLUDE_REASONING = os.getenv("NMBOT_OPENROUTER_EXCLUDE_REASONING", "0").strip().lower() in {"1", "true", "yes", "on"}
+PROVIDER_ERROR_RETRY_MODEL: Final[str] = "deepseek/deepseek-v4-flash"
 MAIN_SEARCH_FALLBACK_MODEL = os.getenv("NMBOT_MAIN_SEARCH_FALLBACK_MODEL", "google/gemini-3.5-flash").strip()
 MAIN_SEARCH_FALLBACK_MODELS = [
     model.strip()
@@ -60,8 +62,7 @@ MAIN_SEARCH_FALLBACK_ENABLED = os.getenv("NMBOT_MAIN_SEARCH_FALLBACK_ENABLED", "
 # H024: технические ошибки Overmind/OpenRouter пишем в bot.log, клиенту — только
 # безопасную человеческую фразу без 'choices', traceback, JSON и названий провайдеров.
 SAFE_UPSTREAM_ERROR_TEXT = (
-    "Сейчас поиск не ответил как надо. Попробуйте ещё раз через минуту, "
-    "а если повторится — напишите номер, и оператор проверит варианты вручную."
+    "По запросу не удалось найти информацию. Могу передать ваш контакт специалисту — он сможет обсудить этот вопрос с вами по телефону."
 )
 
 # Experiment Loop: активная гипотеза (см. docs/EXPERIMENTS.md)
@@ -123,6 +124,20 @@ def _load_prompt_path(relative_path: str) -> str:
     if not path.exists():
         return ""
     return path.read_text(encoding="utf-8").rstrip("\n")
+
+
+def _compose_search_prompt_with_profile(base_prompt: str, search_profile: Any = None) -> str:
+    selection = safe_search_profile_payload(search_profile)
+    if selection is None or not selection.overlays:
+        return base_prompt
+    blocks: list[str] = []
+    for overlay in selection.overlays:
+        text = _load_prompt_path(f"four_layer_search_profile_{overlay}_v1.txt")
+        if text:
+            blocks.append(text)
+    if not blocks:
+        return base_prompt
+    return f"{base_prompt.rstrip()}\n\n## MCP search profile overlays\n" + "\n\n".join(blocks)
 
 
 def _prompt_slug(value: Any) -> str:
@@ -206,6 +221,9 @@ SHOW_MODEL_STATS: Final[bool] = os.getenv("NMBOT_SHOW_MODEL_STATS", "1") != "0"
 # otherwise this layer overwrites live intros with canned phrases like
 # "Подобрала три варианта под инвестицию" and loses user context.
 STAGE_PRESENTER_ENABLED: Final[bool] = os.getenv("NMBOT_STAGE_PRESENTER", "0") == "1"
+FOUR_LAYER_RUNTIME_ENABLED: Final[bool] = os.getenv("NMBOT_FOUR_LAYER_RUNTIME", "0") == "1"
+FOUR_LAYER_RUNTIME_ENFORCE: Final[bool] = os.getenv("NMBOT_FOUR_LAYER_ENFORCE", "0") == "1"
+ROUTER_PROFILES_ENABLED: Final[bool] = os.getenv("NMBOT_ROUTER_PROFILES", "0").strip().lower() in {"1", "true", "yes", "on"}
 SALES_PHRASE_ENABLED: Final[bool] = os.getenv("NMBOT_SALES_PHRASE", "1") == "1"
 SALES_PHRASE_MODEL: Final[str] = os.getenv("NMBOT_SALES_PHRASE_MODEL", "google/gemini-3.5-flash")
 try:
@@ -225,6 +243,10 @@ try:
     OPTION_ENRICHMENT_SELECT_WAIT: Final[float] = float(os.getenv("NMBOT_OPTION_ENRICHMENT_SELECT_WAIT", "2.0"))
 except ValueError:
     OPTION_ENRICHMENT_SELECT_WAIT = 2.0
+try:
+    OPTION_ENRICHMENT_TOP3_WAIT: Final[float] = float(os.getenv("NMBOT_OPTION_ENRICHMENT_TOP3_WAIT", "3.5"))
+except ValueError:
+    OPTION_ENRICHMENT_TOP3_WAIT = 3.5
 
 STYLE_TOOL_ENABLED: Final[bool] = os.getenv("NMBOT_TEXT_STYLE_TOOL", "1") != "0"
 STYLE_TOOL_MODEL: Final[str] = os.getenv("NMBOT_STYLE_MODEL", "google/gemini-3.1-flash-lite-preview")
@@ -294,10 +316,68 @@ def _safe_user_error_message(error: str | None = None) -> str:
         headline += f": {reason}"
 
     return (
-        f"Сейчас поиск не сработал: {headline}.\n\n"
-        "Это не ошибка ваших условий поиска — сломался внешний LLM/API-контур. "
-        "Попробуйте ещё раз позже или напишите номер, и оператор проверит варианты вручную."
+        f"По запросу не удалось найти информацию: {headline}.\n\n"
+        "Это не проблема ваших условий. Могу передать ваш контакт специалисту — он сможет обсудить этот вопрос с вами по телефону."
     )
+
+
+def _provider_error_code(error: Any) -> str | None:
+    """Allowlisted provider/model failure classifier for gateway retry.
+
+    This intentionally does not classify valid empty/no-results search payloads.
+    It only recognizes terminal upstream/model errors that are safe to retry with
+    a different provider model.
+    """
+    if isinstance(error, (dict, list)):
+        raw = _safe_json_preview(error, limit=4000)
+    else:
+        raw = str(error or "")
+    text = raw.strip().lower()
+    if not text:
+        return None
+    if "corrupted thought signature" in text:
+        return "corrupted_thought_signature"
+    if "invalid_argument" in text and "provider" in text:
+        return "provider_invalid_argument"
+    choices_markers = ("'choices'", '"choices"', " choices", "choices ")
+    if any(marker in text for marker in choices_markers) and any(
+        marker in text
+        for marker in (
+            "missing",
+            "keyerror",
+            "key error",
+            "parse",
+            "parser",
+            "response",
+            "no choices",
+            "without choices",
+        )
+    ):
+        return "choices_response_parse"
+    if "response parse" in text or "parse response" in text or "response parsing" in text:
+        return "response_parse"
+    return None
+
+
+def _with_provider_retry_metadata(meta: dict[str, Any] | None, *, code: str, attempted: bool = True) -> dict[str, Any]:
+    metadata = dict(meta or {})
+    metadata.update({
+        "_provider_retry_attempted": attempted,
+        "_provider_retry_model": PROVIDER_ERROR_RETRY_MODEL,
+        "_provider_error_code": code,
+    })
+    return metadata
+
+
+def _provider_retry_request_data(request_data: dict[str, Any]) -> dict[str, Any]:
+    retry_request = dict(request_data)
+    retry_request["model"] = PROVIDER_ERROR_RETRY_MODEL
+    # DeepSeek fallback must not inherit model-specific reasoning controls from
+    # the failed provider payload. Keeping the query/stage/constraints intact is
+    # enough; reasoning hints are provider/model-specific.
+    retry_request.pop("reasoning", None)
+    retry_request["reasoning"] = {"exclude": True}
+    return retry_request
 
 
 def _response_payload_to_text(payload: Any) -> str:
@@ -354,6 +434,8 @@ def _response_items_to_text(items: Any) -> str:
         name = str(raw_item.get("name") or raw_item.get("title") or raw_item.get("complex") or raw_item.get("jk") or "").strip()
         location = str(raw_item.get("location") or raw_item.get("district") or raw_item.get("area") or "").strip()
         price = str(raw_item.get("price_range") or raw_item.get("price") or raw_item.get("budget") or "").strip()
+        if not price:
+            price = _format_item_price(raw_item)
         finishing = str(raw_item.get("finishing") or raw_item.get("renovation") or "").strip()
         ready = str(raw_item.get("ready") or raw_item.get("handover") or raw_item.get("status") or "").strip()
         reason = str(raw_item.get("reason") or raw_item.get("why") or raw_item.get("benefit") or raw_item.get("comment") or "").strip()
@@ -375,6 +457,44 @@ def _response_items_to_text(items: Any) -> str:
             line += f". {reason}"
         blocks.append(line)
     return "\n\n".join(blocks).strip()
+
+
+def _format_item_price(item: dict[str, Any]) -> str:
+    """Render numeric min/max price fields from chat JSON into human text.
+
+    The answer LLM may return `min_price`/`max_price` instead of `price_range`.
+    Without this, visible cards lose the actual budget signal, even when MCP/card
+    and chat JSON both contain a confirmed numeric price.
+    """
+    def _to_float(value: Any) -> float | None:
+        if value is None or value == "":
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip().replace(" ", "").replace(",", ".")
+        try:
+            return float(text)
+        except Exception:
+            return None
+
+    def _money(value: float) -> str:
+        millions = value / 1_000_000
+        if millions >= 10:
+            formatted = f"{millions:.1f}"
+        else:
+            formatted = f"{millions:.2f}"
+        formatted = formatted.rstrip("0").rstrip(".")
+        return f"{formatted} млн"
+
+    min_price = _to_float(item.get("min_price") or item.get("price_min"))
+    max_price = _to_float(item.get("max_price") or item.get("price_max"))
+    if min_price and max_price and max_price > min_price:
+        return f"{_money(min_price)}–{_money(max_price)}"
+    if min_price:
+        return f"от {_money(min_price)}"
+    if max_price:
+        return f"до {_money(max_price)}"
+    return ""
 
 
 def _attach_final_question(response: str, final_question: str) -> str:
@@ -405,9 +525,26 @@ def _is_empty_search_result(text: Any) -> bool:
     обычные ответы/ошибки парсинга. Нас интересует именно контракт search-layer:
     JSON с `facts`/`near`, где оба списка пустые.
     """
+    payload = _search_result_payload(text)
+    if payload is not None:
+        if "facts" not in payload and "near" not in payload:
+            return False
+        facts = payload.get("facts")
+        near = payload.get("near")
+        return isinstance(facts, list) and isinstance(near, list) and not facts and not near
     normalized = str(text or "").strip()
     if not normalized:
         return True
+    return False
+
+
+def _search_result_payload(text: Any) -> dict[str, Any] | None:
+    """Best-effort JSON extraction for main_search payloads."""
+    if isinstance(text, dict):
+        return text
+    normalized = str(text or "").strip()
+    if not normalized:
+        return None
     if normalized.startswith("```"):
         normalized = re.sub(r"^```(?:json)?\s*", "", normalized, flags=re.IGNORECASE).strip()
         normalized = re.sub(r"\s*```$", "", normalized).strip()
@@ -415,19 +552,1024 @@ def _is_empty_search_result(text: Any) -> bool:
         start = normalized.find("{")
         end = normalized.rfind("}")
         if start < 0 or end <= start:
-            return False
+            return None
         normalized = normalized[start : end + 1]
     try:
         payload = json.loads(normalized)
     except Exception:
-        return False
+        return None
     if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _search_planner_question(text: Any, action: str) -> str | None:
+    """Return a validated search-layer question for a typed planner action.
+
+    This accepts only the explicit JSON contract. Unknown/missing actions are not
+    routed semantically here, so legacy fallback/chat behavior remains intact.
+    """
+    payload = _search_result_payload(text)
+    if not payload or payload.get("action") != action:
+        return None
+    question = payload.get("clarification_question")
+    if not isinstance(question, str):
+        return None
+    question = question.strip()
+    if not question or len(question) > 300:
+        return None
+    return question
+
+
+def _search_clarification_question(text: Any) -> str | None:
+    return _search_planner_question(text, "clarify")
+
+
+def _search_operator_contact_question(text: Any) -> str | None:
+    return _search_planner_question(text, "operator_contact")
+
+
+def _search_turn_decision_payload(text: Any) -> dict[str, Any] | None:
+    """Return compact typed turn decision from main_search JSON, if valid enough.
+
+    This keeps semantic routing in the existing main_search path: the model may
+    choose an action, but code still validates action/target/search_policy before
+    Jivo orchestration executes anything.
+    """
+    payload = _search_result_payload(text)
+    if not payload:
+        return None
+    action = str(payload.get("action") or "").strip()
+    if action not in {"recover_dialogue", "answer_current_options"}:
+        return None
+    target = str(payload.get("target") or "none").strip() or "none"
+    search_policy = str(payload.get("search_policy") or "forbidden").strip() or "forbidden"
+    if search_policy != "forbidden":
+        return None
+    if action == "answer_current_options" and target != "current_options":
+        return None
+    if action == "recover_dialogue":
+        if target not in {"none", "current_options"}:
+            return None
+        facts = payload.get("facts")
+        near = payload.get("near")
+        if (isinstance(facts, list) and facts) or (isinstance(near, list) and near):
+            return None
+    decision = {
+        "action": action,
+        "target": target,
+        "search_policy": search_policy,
+    }
+    question = str(payload.get("clarification_question") or payload.get("response") or "").strip()
+    if action == "recover_dialogue" and (not question or len(question) > 300 or "?" not in question):
+        return None
+    if question:
+        decision["response"] = question[:300]
+    return decision
+
+
+def _safe_jsonish_context(value: Any, *, depth: int = 0) -> Any:
+    if depth > 4:
+        return None
+    if isinstance(value, str):
+        return value[:500]
+    if isinstance(value, bool) or isinstance(value, int) or isinstance(value, float) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_safe_jsonish_context(item, depth=depth + 1) for item in value[:8]]
+    if isinstance(value, dict):
+        return {
+            str(k)[:80]: _safe_jsonish_context(v, depth=depth + 1)
+            for k, v in value.items()
+            if not re.search(r"phone|телефон|contact|client_id|chat_id|site_id|sender|token|secret|raw|payload|dialog_window", str(k), re.I)
+        }
+    return str(value)[:200]
+
+
+def _safe_search_dialog_context(dialog_context: dict[str, Any] | None) -> dict[str, Any]:
+    """Allowlist only non-sensitive state hints for main_search semantic routing."""
+    if not isinstance(dialog_context, dict):
+        return {}
+    safe: dict[str, Any] = {}
+    for key in ("last_bot_question", "last_offer_type"):
+        value = str(dialog_context.get(key) or "").strip()
+        if value:
+            safe[key] = value[:300]
+    for key in ("last_answer_kind", "recovery_count"):
+        value = dialog_context.get(key)
+        if value not in (None, "", [], {}):
+            safe[key] = _safe_jsonish_context(value)
+    for key in ("scenario_context", "current_options", "selected_option", "params", "turn_contract"):
+        value = dialog_context.get(key)
+        if value not in (None, "", [], {}):
+            safe[key] = _safe_jsonish_context(value)
+    return safe
+
+
+_HARD_CONSTRAINT_ALLOWED_KEYS = {
+    "location", "locations", "district", "districts", "metro", "near_metro",
+    "rooms", "room_type", "max_price", "max_budget_m", "min_price",
+    "area_min_m2", "area_max_m2", "finishing", "renovation", "ready", "stage",
+    "purpose", "mortgage", "mortgage_type",
+}
+_HARD_CONSTRAINT_CATEGORIES = ("hard", "preferences", "unknown")
+
+
+def _safe_hard_constraint_value(value: Any) -> Any:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value if abs(value) < 100_000_000_000 else None
+    if isinstance(value, float):
+        return value if abs(value) < 100_000_000_000 else None
+    if isinstance(value, str):
+        text = re.sub(r"\s+", " ", value).strip()
+        if not text or len(text) > 120 or re.search(r"(?:\+?\d[\s()\-.]*){10,15}", text):
+            return None
+        return text
+    if isinstance(value, list):
+        if len(value) > 8:
+            return None
+        cleaned = [_safe_hard_constraint_value(item) for item in value]
+        if any(item in (None, "", [], {}) for item in cleaned):
+            return None
+        return cleaned
+    return None
+
+
+def _normalize_hard_constraints(hard_constraints: dict[str, Any] | None) -> dict[str, Any]:
+    """Sanitize search hard constraints for the main_search query envelope.
+
+    Only known non-sensitive query-condition keys are allowed. Values are shallow
+    primitives or lists of primitives; raw payloads, ids, phones and tokens are
+    intentionally dropped before the text reaches the gateway/model.
+    """
+    if not isinstance(hard_constraints, dict):
+        return {}
+
+    def clean_fields(fields: Any) -> dict[str, Any]:
+        if not isinstance(fields, dict):
+            return {}
+        out: dict[str, Any] = {}
+        for raw_key, raw_value in fields.items():
+            key = str(raw_key or "").strip()
+            if key not in _HARD_CONSTRAINT_ALLOWED_KEYS:
+                continue
+            if re.search(r"phone|телефон|contact|client_id|chat_id|site_id|sender|token|secret|raw|payload|dialog_window", key, re.I):
+                continue
+            value = _safe_hard_constraint_value(raw_value)
+            if value not in (None, "", [], {}):
+                out[key] = value
+        return out
+
+    def canonicalize_geo(fields: dict[str, Any]) -> dict[str, Any]:
+        """Use MCP's working human-readable geography representation.
+
+        ``district`` remains useful in internal state and routing, but the live
+        search replay showed that ``district=newmsk`` returns no facts while
+        ``location=["Новая Москва"]`` returns the expected inventory. An
+        explicit location always wins and prevents sending both fields.
+        """
+        out = dict(fields)
+        explicit_location = out.get("location") or out.get("locations")
+        district = str(out.get("district") or "").strip().lower()
+        if explicit_location:
+            out.pop("district", None)
+            out.pop("districts", None)
+            return out
+        if district == "newmsk":
+            out["location"] = ["Новая Москва"]
+            out.pop("district", None)
+            out.pop("districts", None)
+        return out
+
+    categorized = any(key in hard_constraints for key in _HARD_CONSTRAINT_CATEGORIES)
+    if categorized:
+        out: dict[str, Any] = {}
+        for category in _HARD_CONSTRAINT_CATEGORIES:
+            fields = clean_fields(hard_constraints.get(category))
+            fields = canonicalize_geo(fields)
+            if fields:
+                out[category] = fields
+        return out
+    hard = canonicalize_geo(clean_fields(hard_constraints))
+    return {"hard": hard} if hard else {}
+
+
+def _hard_constraints_query_envelope(hard_constraints: dict[str, Any] | None) -> str:
+    safe = _normalize_hard_constraints(hard_constraints)
+    if not safe:
+        return ""
+    envelope = {
+        "contract": "search_hard_constraints_v1",
+        "exact_match_policy": {
+            "facts": "only objects that satisfy every non_negotiable hard constraint",
+            "near": "alternatives only; never use as replacements for facts or primary suitable items",
+            "if_no_facts": "return facts=[] and explain closest alternatives only through near[].why_close",
+        },
+        "constraints": safe,
+    }
+    return "SEARCH_CONTRACT_ENVELOPE=" + json.dumps(envelope, ensure_ascii=False, sort_keys=True)
+
+
+_ROOM_CONSTRAINT_KEYS: Final[set[str]] = {"rooms", "room_type", "room_types"}
+
+
+def _hard_constraints_without_rooms(hard_constraints: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return sanitized constraints with room filters removed for evidence recovery.
+
+    The final H4 validator still receives the original constraints with rooms, so
+    this fallback can only recover candidates; it cannot make prose or broad facts
+    client-visible unless structured room evidence confirms the requested format.
+    """
+    safe = _normalize_hard_constraints(hard_constraints)
+    if not safe:
+        return None
+    out: dict[str, Any] = {}
+    for category in _HARD_CONSTRAINT_CATEGORIES:
+        fields = safe.get(category) if isinstance(safe.get(category), dict) else {}
+        cleaned = {key: value for key, value in fields.items() if key not in _ROOM_CONSTRAINT_KEYS}
+        if cleaned:
+            out[category] = cleaned
+    return out or None
+
+
+def _room_broad_evidence_query(original_query: str, requested_rooms: set[str]) -> str:
+    requested = _requested_rooms_label(requested_rooms)
+    return (
+        "Внутренний recovery-поиск для подбора: комнатность из hard-условий временно не фильтруй, "
+        "но остальные ограничения клиента сохрани строго: локация, бюджет, цель покупки, ипотека, сроки и отделка. "
+        "Верни до 5 ЖК в facts[]. Для каждого ЖК обязательно попробуй заполнить структурные поля комнатности: "
+        "rooms, room_types, apartment_types[].rooms, ads[].rooms или ads[].lot.rooms. "
+        f"Нужный формат клиента для последующей проверки: {requested}. "
+        "Не используй свободный текст как доказательство комнатности; если структурного поля нет, оставь его пустым. "
+        "Не применяй нужный формат как фильтр поиска и не возвращай пустой список только из-за отсутствия room-поля. "
+        "Ответ только в обычном JSON search-контракте с facts/near/params."
+    )
+
+
+def _without_room_constraint_keys(value: Any) -> Any:
+    """Remove room constraints from safe recovery context at every nesting level."""
+    if isinstance(value, dict):
+        return {
+            key: _without_room_constraint_keys(item)
+            for key, item in value.items()
+            if key not in _ROOM_CONSTRAINT_KEYS
+        }
+    if isinstance(value, list):
+        return [_without_room_constraint_keys(item) for item in value]
+    return value
+
+
+def _room_recovery_underfilled(search_result: Any, hard_constraints: dict[str, Any] | None) -> bool:
+    requested_rooms = _four_layer_requested_rooms(hard_constraints)
+    if not requested_rooms:
         return False
-    if "facts" not in payload and "near" not in payload:
+    if _is_empty_search_result(search_result):
+        return True
+    decision_context, diag, _visible = _four_layer_decision_context(search_result, hard_constraints=hard_constraints)
+    if decision_context is None:
         return False
-    facts = payload.get("facts")
-    near = payload.get("near")
-    return isinstance(facts, list) and isinstance(near, list) and not facts and not near
+    matched = int(diag.get("four_layer_matched_count") or 0)
+    return matched < 3
+
+
+_FOUR_LAYER_LOCATION_KEYS: Final[tuple[str, ...]] = ("location", "locations", "district", "districts", "metro", "near_metro")
+_FOUR_LAYER_CLAIM_KEYS: Final[tuple[str, ...]] = (
+    "liquidity", "demand", "yield", "why_family", "why_investment", "why_invest", "why_rental", "why_mortgage"
+)
+_FOUR_LAYER_PRESENTATION_KEYS: Final[tuple[str, ...]] = (
+    "finishing",
+    "ready",
+    "delivered",
+    "area",
+    "metro",
+    "infrastructure",
+    "schools",
+    "kindergartens",
+    "parks",
+    "clinics",
+    "yards",
+    "playgrounds",
+    "shops",
+    "services",
+    "room_evidence",
+)
+
+
+def _four_layer_safe_query(value: Any) -> str:
+    """Small client-query hint for the restricted presenter, with obvious sensitive data removed."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()[:400]
+    text = re.sub(r"(?:\+?\d[\s()\-.]*){10,15}", "[redacted-phone]", text)
+    text = re.sub(r"(?i)\b(token|secret|api[_-]?key)\s*[:=]\s*\S+", r"\1=[redacted]", text)
+    return text
+
+
+def _four_layer_price_min(value: Any) -> int | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value) if value >= 0 else None
+    if not isinstance(value, str) or len(value) > 120:
+        return None
+    return _price_min(value)
+
+
+_FOUR_LAYER_BROAD_GEO_ALIASES: Final[dict[str, str]] = {
+    "москва": "msk",
+    "msk": "msk",
+    "moscow": "msk",
+    "московская область": "mo",
+    "мо": "mo",
+    "mo": "mo",
+    "новая москва": "newmsk",
+    "newmsk": "newmsk",
+}
+
+
+def _four_layer_clean_geo_value(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return re.sub(r"\s+", " ", value).strip()[:120]
+    return None
+
+
+def _four_layer_geo_values(value: Any) -> list[str]:
+    if isinstance(value, list):
+        out: list[str] = []
+        for item in value:
+            cleaned = _four_layer_clean_geo_value(item)
+            if cleaned:
+                out.append(cleaned)
+        return out
+    cleaned = _four_layer_clean_geo_value(value)
+    return [cleaned] if cleaned else []
+
+
+def _four_layer_broad_geo_scope(value: Any) -> str | None:
+    cleaned = _four_layer_clean_geo_value(value)
+    if not cleaned:
+        return None
+    return _FOUR_LAYER_BROAD_GEO_ALIASES.get(_compact_option_text(cleaned))
+
+
+def _four_layer_geo_evidence(item: dict[str, Any]) -> dict[str, Any]:
+    """Structured MCP geography evidence; district code is not used as display label."""
+    locations = _four_layer_geo_values(item.get("location")) + _four_layer_geo_values(item.get("locations"))
+    districts = _four_layer_geo_values(item.get("district")) + _four_layer_geo_values(item.get("districts"))
+    metros = _four_layer_geo_values(item.get("metro"))
+    near_metros = _four_layer_geo_values(item.get("near_metro"))
+    display_location = next((value for value in locations if value), None)
+    if not display_location:
+        display_location = next((value for value in metros + near_metros if value), None)
+    return {
+        "display_location": display_location,
+        "location": locations,
+        "district": districts,
+        "metro": metros,
+        "near_metro": near_metros,
+    }
+
+
+def _four_layer_location_value(item: dict[str, Any]) -> str | None:
+    evidence = _four_layer_geo_evidence(item)
+    value = evidence.get("display_location")
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _four_layer_price_value(item: dict[str, Any]) -> tuple[int | None, Any]:
+    for key in ("price_min", "from_price", "min_price", "price_range"):
+        if item.get(key) not in (None, "", [], {}):
+            return _four_layer_price_min(item.get(key)), item.get(key)
+    return None, None
+
+
+def _normalize_room_request(value: Any) -> set[str]:
+    """Conservative room normalizer for explicit client constraints.
+
+    Returns canonical tokens: ``s`` for studio, ``1``..``5`` for room count.
+    It intentionally does not infer rooms from broad prose unless the value is a
+    room-like field supplied by planner/search params.
+    """
+    if value in (None, "", [], {}):
+        return set()
+    if isinstance(value, bool):
+        return set()
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        number = int(value)
+        return {str(number)} if 0 <= number <= 5 else set()
+    if isinstance(value, dict):
+        out: set[str] = set()
+        for key in ("rooms", "room", "room_type", "room_types"):
+            if key in value:
+                out.update(_normalize_room_request(value.get(key)))
+        return out
+    if isinstance(value, (list, tuple, set)):
+        out: set[str] = set()
+        for item in value:
+            out.update(_normalize_room_request(item))
+        return out
+
+    text = str(value or "").strip().lower().replace("ё", "е")
+    if not text:
+        return set()
+    text = re.sub(
+        r"\b([0-5])\s*[-–—]?\s*комнат(?:а|ы|ную|ные|ная|ный|ность)?\b",
+        r"\1 ",
+        text,
+    )
+    text = re.sub(r"\b(?:комнат(?:а|ы|ную|ные|ная|ный|ность)?|квартир(?:а|ы)?|apt|apartment)\b", " ", text)
+    aliases = {
+        "s": "s",
+        "studio": "s",
+        "ст": "s",
+        "студия": "s",
+        "студии": "s",
+        "студию": "s",
+        "0": "s",
+        "one": "1",
+        "однушка": "1",
+        "однушки": "1",
+        "однокомнатная": "1",
+        "однокомнатные": "1",
+        "1к": "1",
+        "1-к": "1",
+        "1кк": "1",
+        "two": "2",
+        "двушка": "2",
+        "двушки": "2",
+        "двухкомнатная": "2",
+        "двухкомнатные": "2",
+        "2к": "2",
+        "2-к": "2",
+        "2кк": "2",
+        "three": "3",
+        "трешка": "3",
+        "трехкомнатная": "3",
+        "трехкомнатные": "3",
+        "трехкомнатная": "3",
+        "трехкомнатные": "3",
+        "3к": "3",
+        "3-к": "3",
+        "3кк": "3",
+    }
+    out: set[str] = set()
+    for token in re.split(r"[^0-9a-zа-я+-]+", text):
+        token = token.strip(" .,:;()[]{}")
+        if not token:
+            continue
+        if token in aliases:
+            out.add(aliases[token])
+            continue
+        match = re.fullmatch(r"([0-5])(?:\s*[-+]?\s*к|кк?)?", token)
+        if match:
+            number = match.group(1)
+            out.add("s" if number == "0" else number)
+    return out
+
+
+def _four_layer_requested_rooms(hard_constraints: dict[str, Any] | None) -> set[str]:
+    safe = _normalize_hard_constraints(hard_constraints)
+    out: set[str] = set()
+    for category in _HARD_CONSTRAINT_CATEGORIES:
+        fields = safe.get(category) if isinstance(safe.get(category), dict) else {}
+        for key in ("rooms", "room_type", "room_types"):
+            if key in fields:
+                out.update(_normalize_room_request(fields.get(key)))
+    return out
+
+
+def _room_tokens_from_structured_value(value: Any) -> set[str]:
+    if value in (None, "", [], {}):
+        return set()
+    if isinstance(value, dict):
+        out: set[str] = set()
+        for key, child in value.items():
+            if str(key).strip().lower().replace("ё", "е") in {"rooms", "room", "room_type", "room_types"}:
+                out.update(_normalize_room_request(child))
+        return out
+    if isinstance(value, (list, tuple, set)):
+        out: set[str] = set()
+        for item in value:
+            if isinstance(item, dict):
+                out.update(_room_tokens_from_structured_value(item))
+            else:
+                out.update(_normalize_room_request(item))
+        return out
+    return _normalize_room_request(value)
+
+
+def _nested_room_tokens(value: Any) -> set[str]:
+    if isinstance(value, dict):
+        out: set[str] = set()
+        for key, child in value.items():
+            key_norm = str(key).strip().lower().replace("ё", "е")
+            if key_norm in {"rooms", "room", "room_type", "room_types"}:
+                out.update(_room_tokens_from_structured_value(child))
+            elif isinstance(child, (dict, list, tuple, set)):
+                out.update(_nested_room_tokens(child))
+        return out
+    if isinstance(value, (list, tuple, set)):
+        out: set[str] = set()
+        for item in value:
+            out.update(_nested_room_tokens(item))
+        return out
+    return set()
+
+
+def _four_layer_room_evidence(raw: dict[str, Any]) -> dict[str, Any]:
+    """Structured room evidence only; free prose fields are deliberately ignored."""
+    tokens: set[str] = set()
+    sources: list[str] = []
+    for key in ("rooms", "room_types"):
+        value = raw.get(key)
+        found = _room_tokens_from_structured_value(value)
+        if found:
+            tokens.update(found)
+            sources.append(key)
+    for key in ("apartment_types", "ads"):
+        value = raw.get(key)
+        found = _nested_room_tokens(value)
+        if found:
+            tokens.update(found)
+            sources.append(key)
+    return {"rooms": sorted(tokens), "sources": sources}
+
+
+def _four_layer_safe_presentation_facts(raw: dict[str, Any]) -> dict[str, Any]:
+    """Allowlisted presentation facts from search_response.facts[] only."""
+    family_infra = raw.get("family_infrastructure") if isinstance(raw.get("family_infrastructure"), dict) else {}
+    infra_family = raw.get("infrastructure_family") if isinstance(raw.get("infrastructure_family"), dict) else {}
+    room_evidence = _four_layer_room_evidence(raw)
+    values: dict[str, Any] = {
+        "finishing": raw.get("finishing") or raw.get("renovation"),
+        "ready": raw.get("ready") or raw.get("status") or raw.get("deadline"),
+        "delivered": raw.get("delivered"),
+        "area": raw.get("area") or raw.get("square") or raw.get("площадь"),
+        "metro": raw.get("metro"),
+        "infrastructure": _join_fact_values(raw.get("infrastructure"), raw.get("infrastructure_family"), raw.get("family_infrastructure")),
+        "schools": _join_fact_values(raw.get("schools"), raw.get("school"), raw.get("школы"), raw.get("школа"), family_infra.get("schools"), family_infra.get("school"), infra_family.get("schools"), infra_family.get("school")),
+        "kindergartens": _join_fact_values(raw.get("kindergartens"), raw.get("kindergarten"), raw.get("детские_сады"), raw.get("детский_сад"), family_infra.get("kindergartens"), family_infra.get("kindergarten"), infra_family.get("kindergartens"), infra_family.get("kindergarten")),
+        "parks": _join_fact_values(raw.get("parks"), raw.get("park"), raw.get("green_area"), raw.get("forest"), raw.get("embankment"), raw.get("парки"), raw.get("парк"), raw.get("лес"), raw.get("набережная"), family_infra.get("parks"), family_infra.get("park"), {"park_near": family_infra.get("park_near"), "forest": family_infra.get("forest"), "embankment": family_infra.get("embankment"), "water_near": family_infra.get("water_near")}, infra_family.get("parks"), {"park_near": infra_family.get("park_near")}),
+        "clinics": _join_fact_values(raw.get("clinics"), raw.get("clinic"), raw.get("polyclinic"), raw.get("pharmacies"), raw.get("поликлиника"), raw.get("аптеки"), family_infra.get("clinics"), family_infra.get("clinic"), family_infra.get("pharmacies"), infra_family.get("clinics")),
+        "yards": _join_fact_values(raw.get("yards"), raw.get("yard_without_cars"), raw.get("двор"), {"yard_without_cars": family_infra.get("yard_without_cars"), "children_ground": family_infra.get("children_ground"), "sports_ground": family_infra.get("sports_ground")}, {"yard_without_cars": infra_family.get("yard_without_cars"), "children_ground": infra_family.get("children_ground"), "sports_ground": infra_family.get("sports_ground")}),
+        "playgrounds": _join_fact_values(raw.get("playgrounds"), raw.get("площадки"), family_infra.get("playgrounds"), infra_family.get("playgrounds")),
+        "shops": _join_fact_values(raw.get("shops"), raw.get("retail"), raw.get("магазины")),
+        "services": _join_fact_values(raw.get("services"), raw.get("сервисы")),
+        "room_evidence": room_evidence if room_evidence.get("rooms") else {},
+    }
+    out: dict[str, Any] = {}
+    for key in _FOUR_LAYER_PRESENTATION_KEYS:
+        value = values.get(key)
+        if _looks_missing(value):
+            continue
+        if isinstance(value, (str, int, float)) and not isinstance(value, bool):
+            out[key] = re.sub(r"\s+", " ", str(value)).strip()[:220]
+        elif isinstance(value, dict) and key == "room_evidence":
+            rooms = [str(item) for item in value.get("rooms", []) if str(item).strip()]
+            sources = [str(item) for item in value.get("sources", []) if str(item).strip()]
+            if rooms:
+                out[key] = {"rooms": rooms[:8], "sources": sources[:4]}
+        elif isinstance(value, list):
+            cleaned = [re.sub(r"\s+", " ", str(item)).strip()[:120] for item in value if isinstance(item, (str, int, float)) and str(item).strip()]
+            if cleaned:
+                out[key] = cleaned[:6]
+    return out
+
+
+def _four_layer_hard_constraints(hard_constraints: dict[str, Any] | None) -> dict[str, Any]:
+    safe = _normalize_hard_constraints(hard_constraints)
+    hard = safe.get("hard") if isinstance(safe.get("hard"), dict) else {}
+    out: dict[str, Any] = {}
+    expected_locations: list[str] = []
+    for key in _FOUR_LAYER_LOCATION_KEYS:
+        value = hard.get(key)
+        values = value if isinstance(value, list) else [value]
+        for item in values:
+            if isinstance(item, str) and item.strip():
+                expected_locations.append(item.strip())
+    if expected_locations:
+        out["location"] = expected_locations
+    max_price = hard.get("max_price")
+    if max_price is None:
+        max_budget_m = hard.get("max_budget_m")
+        if isinstance(max_budget_m, (int, float)) and not isinstance(max_budget_m, bool):
+            max_price = int(max_budget_m * 1_000_000) if max_budget_m < 1000 else int(max_budget_m)
+    if isinstance(max_price, (int, float)) and not isinstance(max_price, bool):
+        out["max_price"] = int(max_price)
+    min_price = hard.get("min_price")
+    if isinstance(min_price, (int, float)) and not isinstance(min_price, bool):
+        out["min_price"] = int(min_price)
+    requested_rooms = _four_layer_requested_rooms(hard_constraints)
+    if requested_rooms:
+        out["rooms"] = sorted(requested_rooms)
+    return out
+
+
+def _four_layer_location_matches(evidence: dict[str, Any], expected: list[str]) -> bool:
+    specific_actuals: list[str] = []
+    for key in ("location", "metro", "near_metro"):
+        values = evidence.get(key)
+        if isinstance(values, list):
+            specific_actuals.extend(str(value) for value in values if isinstance(value, str) and value.strip())
+    district_scopes = {
+        scope
+        for value in evidence.get("district", [])
+        if (scope := _four_layer_broad_geo_scope(value))
+    } if isinstance(evidence.get("district"), list) else set()
+    location_values = evidence.get("location") if isinstance(evidence.get("location"), list) else []
+    actual_broad_scopes = {
+        scope
+        for value in location_values
+        if (scope := _four_layer_broad_geo_scope(value))
+    }
+
+    for value in expected:
+        expected_scope = _four_layer_broad_geo_scope(value)
+        if expected_scope:
+            if expected_scope in district_scopes or expected_scope in actual_broad_scopes:
+                return True
+            # facts[] already passed the search contract for the requested broad
+            # region.  A project card may expose only its area name (for example,
+            # "Лефортово") and omit the MCP region code.  Do not turn that missing
+            # copy-through field into a false negative.  Explicit conflicting
+            # broad scopes remain rejected.
+            if not district_scopes and not actual_broad_scopes and specific_actuals:
+                return True
+            continue
+        norm_expected = _compact_option_text(value)
+        if not norm_expected:
+            continue
+        for actual in specific_actuals:
+            norm_actual = _compact_option_text(actual)
+            if norm_actual and (norm_actual == norm_expected or norm_expected in norm_actual or norm_actual in norm_expected):
+                return True
+    return False
+
+
+def _four_layer_location_diagnostic(evidence: dict[str, Any], expected: list[str], *, has_display_location: bool) -> dict[str, Any]:
+    """Safe geography diagnostic for H4 without using it as a blocking filter."""
+    if not expected:
+        return {}
+    district_scopes = sorted({
+        scope
+        for value in evidence.get("district", [])
+        if (scope := _four_layer_broad_geo_scope(value))
+    } if isinstance(evidence.get("district"), list) else set())
+    location_scopes = sorted({
+        scope
+        for value in evidence.get("location", [])
+        if (scope := _four_layer_broad_geo_scope(value))
+    } if isinstance(evidence.get("location"), list) else set())
+    expected_scopes = sorted({scope for value in expected if (scope := _four_layer_broad_geo_scope(value))})
+    has_specific_evidence = any(
+        isinstance(evidence.get(key), list) and bool(evidence.get(key))
+        for key in ("location", "metro", "near_metro")
+    )
+    matched = has_display_location and _four_layer_location_matches(evidence, expected)
+    if matched:
+        status = "matched"
+    elif not has_display_location and not district_scopes and not location_scopes and not has_specific_evidence:
+        status = "missing_evidence"
+    elif expected_scopes and (district_scopes or location_scopes):
+        status = "broad_scope_mismatch"
+    else:
+        status = "specific_mismatch"
+    out: dict[str, Any] = {
+        "status": status,
+        "matched": matched,
+        "expected_count": len(expected),
+        "has_display_location": has_display_location,
+        "has_specific_evidence": has_specific_evidence,
+    }
+    if expected_scopes:
+        out["expected_scopes"] = expected_scopes[:5]
+    if district_scopes:
+        out["district_scopes"] = district_scopes[:5]
+    if location_scopes:
+        out["location_scopes"] = location_scopes[:5]
+    return out
+
+
+def _four_layer_safe_option(candidate: dict[str, Any], *, visible_idx: int) -> dict[str, Any]:
+    facts = candidate.get("facts") if isinstance(candidate.get("facts"), dict) else {}
+    option = {
+        "idx": visible_idx,
+        "visible_idx": visible_idx,
+        "source": "facts",
+        "option_id": candidate.get("option_id"),
+        "name": candidate.get("label") or "вариант",
+        "location": facts.get("location") or "",
+        "price": facts.get("price_label") or facts.get("price_min") or "",
+        "price_range": facts.get("price_label") or "",
+        "price_min": facts.get("price_min"),
+    }
+    for key in _FOUR_LAYER_PRESENTATION_KEYS:
+        if facts.get(key) not in (None, "", [], {}):
+            option[key] = facts[key]
+    return option
+
+
+def _room_label(token: str) -> str:
+    if token == "s":
+        return "студии"
+    if token == "1":
+        return "однокомнатные"
+    if token == "2":
+        return "двухкомнатные"
+    if token == "3":
+        return "трёхкомнатные"
+    return f"{token}-комнатные"
+
+
+def _requested_rooms_label(tokens: set[str] | list[str] | tuple[str, ...]) -> str:
+    order = {"s": 0, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5}
+    normalized = sorted({str(token) for token in tokens if str(token).strip()}, key=lambda item: order.get(item, 99))
+    if not normalized:
+        return "нужный формат квартир"
+    labels = [_room_label(token) for token in normalized]
+    if len(labels) == 1:
+        return labels[0]
+    return ", ".join(labels[:-1]) + " или " + labels[-1]
+
+
+def _room_unconfirmed_note(room_unconfirmed: list[dict[str, Any]], requested_rooms: set[str] | list[str] | tuple[str, ...]) -> str:
+    items = [item for item in room_unconfirmed if isinstance(item, dict) and str(item.get("label") or "").strip()]
+    if not items:
+        return ""
+    names = [str(item.get("label") or "").strip() for item in items[:3]]
+    requested = _requested_rooms_label(requested_rooms)
+    if len(names) == 1:
+        return f"По {names[0]} точный формат {requested} и цену сейчас не удалось подтвердить, поэтому не показываю его как точное совпадение."
+    return f"Ещё есть варианты, где точный формат {requested} и цену сейчас не удалось подтвердить: {', '.join(names)}. Их не показываю как точные совпадения."
+
+
+def _manual_room_check_offer() -> str:
+    return "Могу предложить менеджеру вручную проверить наличие и цену по нужному формату — передать запрос менеджеру?"
+
+
+def _append_room_unconfirmed_note(response: str, decision_context: dict[str, Any]) -> str:
+    room_unconfirmed = decision_context.get("room_unconfirmed") if isinstance(decision_context.get("room_unconfirmed"), list) else []
+    requested_rooms = decision_context.get("requested_rooms") if isinstance(decision_context.get("requested_rooms"), list) else []
+    note = _room_unconfirmed_note(room_unconfirmed, requested_rooms)
+    if not note:
+        return response
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", str(response or "").strip()) if block.strip()]
+    if blocks and blocks[-1].endswith("?"):
+        blocks = blocks[:-1]
+    return _format_numbered_list_spacing("\n\n".join([*blocks, note, _manual_room_check_offer()]))
+
+
+def _four_layer_safe_search_meta(search_meta: dict[str, Any]) -> dict[str, Any]:
+    """Keep non-payload metadata only; shadow diagnostics must not expose raw search data."""
+    unsafe_keys = {"_response_text", "_raw_payload", "raw", "payload", "request", "response"}
+    return {k: v for k, v in search_meta.items() if k not in unsafe_keys}
+
+
+def _safe_option_enrichment_runtime_meta(meta: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(meta, dict):
+        return {}
+    safe = {
+        "enabled": bool(meta.get("enabled")),
+        "applied": bool(meta.get("applied")),
+        "count": int(meta.get("count") or 0),
+        "applied_count": int(meta.get("applied_count") or 0),
+        "timeout": meta.get("timeout"),
+    }
+    items = meta.get("items") if isinstance(meta.get("items"), list) else []
+    safe_items: list[dict[str, Any]] = []
+    for item in items[:5]:
+        if not isinstance(item, dict):
+            continue
+        safe_items.append({
+            "idx": item.get("idx"),
+            "applied": bool(item.get("applied")),
+            "source": str(item.get("source") or "")[:60],
+            "skipped": str(item.get("skipped") or "")[:80],
+        })
+    if safe_items:
+        safe["items"] = safe_items
+    return safe
+
+
+def _four_layer_decision_context(
+    search_result: str,
+    *,
+    hard_constraints: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any], list[dict[str, Any]]]:
+    """Build presenter-safe context from structured facts only.
+
+    Fallback statuses are deliberately conservative during the additive rollout:
+    no facts, near-only, malformed candidates, or unknown required hard fields all
+    return None so the legacy main_answer path stays in charge.
+    """
+    data = _json_from_text(search_result)
+    facts_raw = data.get("facts") if isinstance(data, dict) and isinstance(data.get("facts"), list) else []
+    near_raw = data.get("near") if isinstance(data, dict) and isinstance(data.get("near"), list) else []
+    diag: dict[str, Any] = {
+        "four_layer_enabled": True,
+        "four_layer_facts_count": len(facts_raw),
+        "four_layer_near_count": len(near_raw),
+        "four_layer_matched_count": 0,
+        "four_layer_rejected_count": 0,
+        "four_layer_unknown_count": 0,
+    }
+    if not isinstance(data, dict) or not data:
+        return None, {**diag, "four_layer_status": "fallback:no_structured_json"}, []
+    if not facts_raw:
+        decision_context = {
+            "version": "four_layer_decision_context_v1",
+            "matched": [],
+            "rejected_count": 0,
+            "relaxation_needed": True,
+            "allowed_claims": {},
+            "do_not_say": [
+                "Do not present near[] as suitable options",
+                "Do not invent options or claims",
+            ],
+            "source_refs": {},
+        }
+        return decision_context, {**diag, "four_layer_status": "no_exact_matches"}, []
+
+    constraints = _four_layer_hard_constraints(hard_constraints)
+    candidates: list[dict[str, Any]] = []
+    unknown_count = 0
+    rejected_count = 0
+    matched: list[dict[str, Any]] = []
+    visible_options: list[dict[str, Any]] = []
+    requested_rooms = set(constraints.get("rooms") or [])
+    room_unconfirmed: list[dict[str, Any]] = []
+    room_rejected_count = 0
+    geo_diagnostics: list[dict[str, Any]] = []
+    geo_missing_count = 0
+    geo_mismatch_count = 0
+    for idx, raw in enumerate(facts_raw, start=1):
+        if not isinstance(raw, dict):
+            return None, {**diag, "four_layer_status": "fallback:malformed_fact"}, []
+        label = re.sub(r"\s+", " ", str(raw.get("name") or raw.get("title") or raw.get("label") or f"вариант {idx}")).strip()[:120]
+        geo_evidence = _four_layer_geo_evidence(raw)
+        location = _four_layer_location_value(raw)
+        price_min, price_original = _four_layer_price_value(raw)
+        facts: dict[str, Any] = {}
+        if label:
+            facts["label"] = label
+        if location:
+            facts["location"] = location
+        if price_min is not None:
+            facts["price_min"] = price_min
+        if price_original is not None and isinstance(price_original, (str, int, float)):
+            facts["price_label"] = str(price_original)[:80]
+        facts.update(_four_layer_safe_presentation_facts(raw))
+        allowed_claims: list[dict[str, str]] = []
+        for key in _FOUR_LAYER_CLAIM_KEYS:
+            value = raw.get(key)
+            if isinstance(value, (str, int, float)) and str(value).strip():
+                allowed_claims.append({"field": key, "value": str(value).strip()[:180]})
+
+        unknown_fields: list[str] = []
+        failed_fields: list[str] = []
+        if constraints.get("location"):
+            geo_diag = _four_layer_location_diagnostic(
+                geo_evidence,
+                constraints["location"],
+                has_display_location=bool(location),
+            )
+            if geo_diag:
+                geo_diag["source_ref"] = f"search:facts:{idx}"
+                geo_diagnostics.append(geo_diag)
+                if geo_diag.get("status") == "missing_evidence":
+                    geo_missing_count += 1
+                elif not geo_diag.get("matched"):
+                    geo_mismatch_count += 1
+        if constraints.get("max_price") is not None:
+            if price_min is None:
+                unknown_fields.append("price_min")
+            elif price_min > int(constraints["max_price"]):
+                failed_fields.append("max_price")
+        if constraints.get("min_price") is not None:
+            if price_min is None:
+                unknown_fields.append("price_min")
+            elif price_min < int(constraints["min_price"]):
+                failed_fields.append("min_price")
+        if requested_rooms:
+            evidence = facts.get("room_evidence") if isinstance(facts.get("room_evidence"), dict) else {}
+            evidence_rooms = set(str(item) for item in (evidence.get("rooms") or []) if str(item).strip())
+            if not evidence_rooms or not (evidence_rooms & requested_rooms):
+                room_rejected_count += 1
+                room_unconfirmed.append({"label": label or f"вариант {idx}", "source_ref": f"search:facts:{idx}"})
+                continue
+        if unknown_fields:
+            unknown_count += 1
+            continue
+        if failed_fields:
+            rejected_count += 1
+            continue
+
+        candidate = {
+            "option_id": f"fact_{idx}",
+            "label": label or f"вариант {idx}",
+            "facts": facts,
+            "allowed_claims": allowed_claims,
+            "source_ref": f"search:facts:{idx}",
+        }
+        candidates.append(candidate)
+        if len(matched) < 3:
+            matched.append(candidate)
+            visible_options.append(_four_layer_safe_option(candidate, visible_idx=len(visible_options) + 1))
+
+    if unknown_count:
+        return None, {**diag, "four_layer_status": "fallback:unknown_hard_fact", "four_layer_unknown_count": unknown_count, "four_layer_rejected_count": rejected_count}, []
+
+    four_layer_status = "ok" if matched else "no_exact_matches"
+    decision_context = {
+        "version": "four_layer_decision_context_v1",
+        "matched": matched,
+        "rejected_count": rejected_count,
+        "room_unconfirmed": room_unconfirmed[:5],
+        "requested_rooms": sorted(requested_rooms),
+        "relaxation_needed": not matched,
+        "allowed_claims": {item["option_id"]: item.get("allowed_claims", []) for item in matched if item.get("allowed_claims")},
+        "do_not_say": ["Do not mention rejected or unknown candidates", "Do not use near[] as primary options"],
+        "safe_sources": {item["option_id"]: item.get("source_ref") for item in matched},
+    }
+    if geo_diagnostics:
+        decision_context["geo_diagnostics"] = geo_diagnostics[:5]
+    return decision_context, {
+        **diag,
+        "four_layer_status": four_layer_status,
+        "four_layer_matched_count": len(matched),
+        "four_layer_rejected_count": rejected_count,
+        "four_layer_geo_mismatch_count": geo_mismatch_count,
+        "four_layer_geo_missing_count": geo_missing_count,
+        "four_layer_geo_diagnostics": geo_diagnostics[:5],
+        "four_layer_room_unconfirmed_count": room_rejected_count,
+        "four_layer_requested_rooms": sorted(requested_rooms),
+        "four_layer_unknown_count": 0,
+        "resolved_action": "search",
+    }, visible_options
+
+
+def _four_layer_presenter_mentions_matched(response_text: Any, decision_context: dict[str, Any]) -> bool:
+    """Require a useful matched-card response, not merely syntactically valid JSON."""
+    matched = decision_context.get("matched") if isinstance(decision_context.get("matched"), list) else []
+    if not matched:
+        return bool(str(response_text or "").strip())
+    normalized = re.sub(r"\s+", " ", str(response_text or "")).strip().casefold()
+    labels = [
+        re.sub(r"\s+", " ", str(item.get("label") or "")).strip().casefold()
+        for item in matched
+        if isinstance(item, dict) and str(item.get("label") or "").strip()
+    ]
+    return bool(normalized and labels and any(label in normalized for label in labels))
+
+
+def _four_layer_deterministic_presenter(decision_context: dict[str, Any], *, scenario: str = "self_use", params_context: str = "") -> str:
+    """Render only validator-approved values from decision_context.matched."""
+    matched = decision_context.get("matched") if isinstance(decision_context.get("matched"), list) else []
+    if not matched:
+        requested_rooms = decision_context.get("requested_rooms") if isinstance(decision_context.get("requested_rooms"), list) else []
+        if requested_rooms:
+            return (
+                f"Сейчас не смогла надёжно подтвердить наличие и цену для формата {_requested_rooms_label(requested_rooms)}. "
+                "Это не значит, что таких квартир точно нет — просто их нужно проверить отдельно.\n\n"
+                f"{_manual_room_check_offer()}"
+            )
+        return "Точных совпадений по заданным условиям не нашлось. Какое условие можно немного смягчить?"
+    options: list[dict[str, Any]] = []
+    for idx, item in enumerate(matched[:3], start=1):
+        if not isinstance(item, dict):
+            continue
+        label = re.sub(r"\s+", " ", str(item.get("label") or "вариант")).strip()[:120]
+        facts = item.get("facts") if isinstance(item.get("facts"), dict) else {}
+        option = _four_layer_safe_option({"option_id": item.get("option_id"), "label": label, "facts": facts}, visible_idx=idx)
+        options.append(option)
+    if not options:
+        return "Точных совпадений по заданным условиям не нашлось. Какое условие можно немного смягчить?"
+    response = _render_stage_first_list(options, scenario, params_context=params_context)
+    return _append_room_unconfirmed_note(response, decision_context)
+
+
+def _is_out_of_region_empty_search_result(text: Any) -> bool:
+    """True when search correctly reports an empty card because the city is outside Moscow/MO coverage."""
+    if not _is_empty_search_result(text):
+        return False
+    payload = _search_result_payload(text)
+    if not payload:
+        return False
+    missing = payload.get("missing")
+    missing_text = " ".join(str(item) for item in missing) if isinstance(missing, list) else str(missing or "")
+    params = payload.get("params") if isinstance(payload.get("params"), dict) else {}
+    params_text = json.dumps(params, ensure_ascii=False)
+    haystack = f"{missing_text} {params_text}".lower()
+    signals = (
+        "санкт-петербург",
+        "петербург",
+        "спб",
+        "вне рабочего региона",
+        "вне региона",
+        "москвы и московской области",
+        "москва и московская область",
+        "каталог ограничен",
+        "база данных ограничена",
+    )
+    return any(signal in haystack for signal in signals)
 
 
 _BROAD_SEARCH_PURPOSES = {"search", "repeat_search", "family", "investment", "rental"}
@@ -494,7 +1636,44 @@ def _is_underfilled_broad_search_result(text: Any, params: dict[str, Any] | None
     return 0 < (len(facts) + len(near)) < 2
 
 
-def _is_usable_search_result(text: Any, meta: dict[str, Any] | None = None, *, params: dict[str, Any] | None = None) -> bool:
+def _is_underfilled_validated_search_result(
+    text: Any,
+    *,
+    params: dict[str, Any] | None = None,
+    hard_constraints: dict[str, Any] | None = None,
+) -> bool:
+    """Detect a shortlist that becomes too short after exact-match validation.
+
+    The raw model response can contain two or more facts while H4 rejects all
+    but one (for example, because one price is above max_price).  Raw counting
+    misses that case and prevents the search fallback from running.
+    """
+    if not _is_broad_search_params(params or {}):
+        return False
+    data = _json_from_text(text)
+    facts = data.get("facts") if isinstance(data, dict) else None
+    near = data.get("near") if isinstance(data, dict) else None
+    if not isinstance(facts, list) or not facts:
+        return False
+    if not isinstance(near, list):
+        near = []
+    if len(facts) + len(near) < 2:
+        return False
+    _context, diag, visible = _four_layer_decision_context(
+        text,
+        hard_constraints=hard_constraints,
+    )
+    matched_count = int(diag.get("four_layer_matched_count") or len(visible))
+    return 0 < matched_count < 2
+
+
+def _is_usable_search_result(
+    text: Any,
+    meta: dict[str, Any] | None = None,
+    *,
+    params: dict[str, Any] | None = None,
+    hard_constraints: dict[str, Any] | None = None,
+) -> bool:
     """True, если search-result можно отдавать в answer stage.
 
     Для fallback-race нельзя брать самый быстрый ответ слепо: быстрый provider может
@@ -504,8 +1683,15 @@ def _is_usable_search_result(text: Any, meta: dict[str, Any] | None = None, *, p
     if meta.get("_safe_fallback") or _is_safe_upstream_fallback(text):
         return False
     if _is_empty_search_result(text):
-        return False
-    if _is_underfilled_broad_search_result(text, params=params or {}):
+        return _is_out_of_region_empty_search_result(text)
+    if (
+        _is_underfilled_broad_search_result(text, params=params or {})
+        or _is_underfilled_validated_search_result(
+            text,
+            params=params or {},
+            hard_constraints=hard_constraints,
+        )
+    ):
         return False
     if str(text or "").startswith("❌") or str(text or "").startswith("⏱️"):
         return False
@@ -563,6 +1749,9 @@ class OvermindClient:
         use_mcp: bool = True,
         timeout: int = 600,
         params: dict | None = None,
+        dialog_context: dict[str, Any] | None = None,
+        hard_constraints: dict[str, Any] | None = None,
+        search_profile: Any = None,
     ) -> tuple[str, dict, dict, dict]:
         """Возвращает (ответ модели, обновлённые параметры, search_metadata, chat_metadata)."""
         session = await self.ensure_session()
@@ -574,14 +1763,31 @@ class OvermindClient:
         # Добавляем параметры в запрос
         full_query = query
         if params:
-            full_query = f"Текущие параметры: {json.dumps(params, ensure_ascii=False)}\n\nКлиент: {query}"
+            display_params = _normalize_hard_constraints({"hard": params}).get("hard") or {}
+            full_query = f"Текущие параметры: {json.dumps(display_params, ensure_ascii=False)}\n\nКлиент: {query}"
+        hard_constraints_envelope = _hard_constraints_query_envelope(hard_constraints)
+        if hard_constraints_envelope:
+            full_query = (
+                f"{hard_constraints_envelope}\n"
+                "Правило exact-match: constraints.hard являются обязательными и не обсуждаются. "
+                "facts[] можно заполнять только точными совпадениями по всем hard-условиям; "
+                "near[] — только явно помеченные альтернативы с why_close, не primary shortlist.\n\n"
+                f"{full_query}"
+            )
+        safe_dialog_context = _safe_search_dialog_context(dialog_context)
+        if safe_dialog_context:
+            full_query = (
+                "Безопасный контекст диалога для выбора action: "
+                f"{json.dumps(safe_dialog_context, ensure_ascii=False)}\n\n{full_query}"
+            )
 
+        search_system_prompt = _compose_search_prompt_with_profile(SEARCH_SYSTEM_PROMPT, search_profile) if ROUTER_PROFILES_ENABLED else SEARCH_SYSTEM_PROMPT
         search_request_data = {
             "_payload_stage": "main_search",
             "query": full_query,
             "service": "openrouter",
             "model": search_model,
-            "system_prompt": SEARCH_SYSTEM_PROMPT,
+            "system_prompt": search_system_prompt,
             "parameters": {
                 "temperature": 0.3,
                 "max_tokens": int(os.getenv("NMBOT_SEARCH_MAX_TOKENS", "5000")),
@@ -593,12 +1799,135 @@ class OvermindClient:
 
         search_result, search_meta = await self._run_gateway_request(search_request_data, headers, timeout)
         search_meta = {**search_meta, "_response_text": search_result, "_search_attempt": 1}
+        clarification_question = _search_clarification_question(search_result)
+        if clarification_question is not None:
+            new_params = self._extract_params(search_result)
+            safe_search_meta = {k: v for k, v in search_meta.items() if k != "_response_text"}
+            return clarification_question, new_params, {**safe_search_meta, "_planner_action": "clarify"}, {}
+        operator_contact_question = _search_operator_contact_question(search_result)
+        if operator_contact_question is not None:
+            new_params = self._extract_params(search_result)
+            safe_search_meta = {k: v for k, v in search_meta.items() if k != "_response_text"}
+            return operator_contact_question, new_params, {**safe_search_meta, "_planner_action": "operator_contact"}, {}
+        turn_decision = _search_turn_decision_payload(search_result)
+        if turn_decision is not None:
+            new_params = self._extract_params(search_result)
+            safe_search_meta = {k: v for k, v in search_meta.items() if k != "_response_text"}
+            return (
+                str(turn_decision.get("response") or ""),
+                new_params,
+                {**safe_search_meta, "_planner_action": turn_decision.get("action"), "_turn_decision": turn_decision},
+                {},
+            )
+        first_list_enrichment_state: dict[str, Any] = {}
+        separated_initial_options = _extract_search_result_options(search_result)
+        initial_stage_options = separated_initial_options["facts"][:5]
+        if initial_stage_options:
+            initial_stage_scenario = _reason_layer_scenario(query, {**(params or {}), **self._extract_params(search_result)})
+            enriched_initial_options, initial_enrichment_meta = await _enrich_top_options_for_first_list(
+                self,
+                first_list_enrichment_state,
+                initial_stage_options,
+                initial_stage_scenario,
+                max_options=5,
+            )
+            search_result = _search_result_with_enriched_facts(search_result, enriched_initial_options)
+            search_meta = {
+                **search_meta,
+                "_response_text": search_result,
+                "_candidate_full_card_enrichment": {
+                    **_safe_option_enrichment_runtime_meta(initial_enrichment_meta),
+                    "stage": "before_strict_validation",
+                    "broad_candidates": len(initial_stage_options),
+                    "max_candidates": 5,
+                },
+            }
+        room_evidence_recovery_applied = False
+        requested_rooms_for_recovery = _four_layer_requested_rooms(hard_constraints)
+        if requested_rooms_for_recovery and _room_recovery_underfilled(search_result, hard_constraints):
+            original_room_recovery_empty = _is_empty_search_result(search_result)
+            roomless_constraints = _hard_constraints_without_rooms(hard_constraints)
+            roomless_envelope = _hard_constraints_query_envelope(roomless_constraints)
+            recovery_query = _room_broad_evidence_query(query, requested_rooms_for_recovery)
+            recovery_full_query = recovery_query
+            if roomless_envelope:
+                recovery_full_query = (
+                    f"{roomless_envelope}\n"
+                    "Правило evidence-recovery: constraints.hard без комнатности остаются обязательными. "
+                    "Комнатность собрать только как структурные evidence-поля внутри facts[], не как hard-фильтр. "
+                    "Верни до 5 ЖК, если они подходят по остальным hard-условиям.\n\n"
+                    f"{recovery_query}"
+                )
+            roomless_dialog_context = _without_room_constraint_keys(safe_dialog_context)
+            if roomless_dialog_context:
+                recovery_full_query = (
+                    "Безопасный контекст диалога для выбора action: "
+                    f"{json.dumps(roomless_dialog_context, ensure_ascii=False)}\n\n{recovery_full_query}"
+                )
+            recovery_request_data = {
+                **search_request_data,
+                "_payload_stage": "main_search_room_evidence_recovery",
+                "query": recovery_full_query,
+                "parameters": {
+                    **(search_request_data.get("parameters") if isinstance(search_request_data.get("parameters"), dict) else {}),
+                    "max_tokens": int(os.getenv("NMBOT_SEARCH_MAX_TOKENS", "5000")),
+                },
+            }
+            recovery_result, recovery_meta = await self._run_gateway_request(recovery_request_data, headers, timeout)
+            recovery_options = _extract_search_result_options(recovery_result)["facts"][:5]
+            recovery_enrichment_meta: dict[str, Any] = {"enabled": OPTION_ENRICHMENT_ENABLED, "applied": False, "count": 0}
+            if recovery_options:
+                recovery_stage_scenario = _reason_layer_scenario(query, {**(params or {}), **self._extract_params(recovery_result)})
+                enriched_recovery_options, recovery_enrichment_meta = await _enrich_top_options_for_first_list(
+                    self,
+                    first_list_enrichment_state,
+                    recovery_options,
+                    recovery_stage_scenario,
+                    max_options=5,
+                )
+                recovery_result = _search_result_with_enriched_facts(recovery_result, enriched_recovery_options)
+            recovery_diag_context, recovery_diag, _recovery_visible = _four_layer_decision_context(
+                recovery_result,
+                hard_constraints=hard_constraints,
+            )
+            recovery_facts = _search_result_payload(recovery_result) or {}
+            if isinstance(recovery_facts.get("facts"), list) and recovery_diag_context is not None:
+                first_meta = {k: v for k, v in search_meta.items() if k != "_response_text"}
+                search_result = recovery_result
+                search_meta = {
+                    **recovery_meta,
+                    "_response_text": recovery_result,
+                    "_search_attempt": 2,
+                    "_room_evidence_recovery": True,
+                    "_room_evidence_recovery_requested_rooms": sorted(requested_rooms_for_recovery),
+                    "_room_evidence_recovery_first": {
+                        **first_meta,
+                        "empty": original_room_recovery_empty,
+                    },
+                    "_room_evidence_recovery_matched_count": int(recovery_diag.get("four_layer_matched_count") or 0),
+                    "_room_evidence_recovery_facts_count": len(recovery_facts.get("facts") or []),
+                    "_room_evidence_recovery_enrichment": {
+                        **_safe_option_enrichment_runtime_meta(recovery_enrichment_meta),
+                        "stage": "before_strict_validation",
+                        "broad_candidates": len(recovery_options),
+                        "max_candidates": 5,
+                    },
+                }
+                room_evidence_recovery_applied = True
         first_attempt_empty_search = _is_empty_search_result(search_result)
-        first_attempt_underfilled = _is_underfilled_broad_search_result(search_result, params=params or {})
-        if MAIN_SEARCH_FALLBACK_ENABLED and MAIN_SEARCH_FALLBACK_MODELS and (
+        first_attempt_out_of_region_empty = _is_out_of_region_empty_search_result(search_result)
+        first_attempt_underfilled = (
+            _is_underfilled_broad_search_result(search_result, params=params or {})
+            or _is_underfilled_validated_search_result(
+                search_result,
+                params=params or {},
+                hard_constraints=hard_constraints,
+            )
+        )
+        if (not room_evidence_recovery_applied) and MAIN_SEARCH_FALLBACK_ENABLED and MAIN_SEARCH_FALLBACK_MODELS and (
             search_meta.get("_safe_fallback")
             or _is_safe_upstream_fallback(search_result)
-            or first_attempt_empty_search
+            or (first_attempt_empty_search and not first_attempt_out_of_region_empty)
             or first_attempt_underfilled
         ):
             async def _run_fallback_model(model: str) -> tuple[str, str, dict[str, Any]]:
@@ -620,14 +1949,26 @@ class OvermindClient:
                         except Exception as exc:
                             fallback_attempts.append({"model": "unknown", "ok": False, "error": str(exc)[:200]})
                             continue
-                        usable = _is_usable_search_result(result, meta, params=params or {})
+                        usable = _is_usable_search_result(
+                            result,
+                            meta,
+                            params=params or {},
+                            hard_constraints=hard_constraints,
+                        )
                         last_completed = (model, result, meta)
                         fallback_attempts.append({
                             "model": model,
                             "ok": usable,
                             "safe": bool(meta.get("_safe_fallback") or _is_safe_upstream_fallback(result)),
                             "empty": _is_empty_search_result(result),
-                            "underfilled": _is_underfilled_broad_search_result(result, params=params or {}),
+                            "underfilled": (
+                                _is_underfilled_broad_search_result(result, params=params or {})
+                                or _is_underfilled_validated_search_result(
+                                    result,
+                                    params=params or {},
+                                    hard_constraints=hard_constraints,
+                                )
+                            ),
                         })
                         if usable:
                             chosen = (model, result, meta)
@@ -663,22 +2004,131 @@ class OvermindClient:
                 "_search_fallback_attempts": fallback_attempts,
                 "_first_attempt_error": search_meta.get("_upstream_error") or search_meta.get("_safe_fallback"),
                 "_first_attempt_empty_search": first_attempt_empty_search,
+                "_first_attempt_out_of_region_empty": first_attempt_out_of_region_empty,
                 "_first_attempt_underfilled_shortlist": first_attempt_underfilled,
             }
         empty_search_result = _is_empty_search_result(search_result)
-        underfilled_search_result = _is_underfilled_broad_search_result(search_result, params=params or {})
+        out_of_region_empty_result = _is_out_of_region_empty_search_result(search_result)
+        underfilled_search_result = (
+            _is_underfilled_broad_search_result(search_result, params=params or {})
+            or _is_underfilled_validated_search_result(
+                search_result,
+                params=params or {},
+                hard_constraints=hard_constraints,
+            )
+        )
         if underfilled_search_result:
             search_meta = {**search_meta, "_underfilled_shortlist": True}
-        if search_meta.get("_safe_fallback") or _is_safe_upstream_fallback(search_result) or empty_search_result:
+        if search_meta.get("_safe_fallback") or _is_safe_upstream_fallback(search_result) or (empty_search_result and not out_of_region_empty_result):
             if empty_search_result:
                 search_result = SAFE_UPSTREAM_ERROR_TEXT
                 search_meta = {**search_meta, "_empty_search_result": True}
             return search_result or SAFE_UPSTREAM_ERROR_TEXT, {}, {**search_meta, "_safe_fallback": True}, {}
+        if out_of_region_empty_result:
+            search_meta = {**search_meta, "_empty_search_result": True, "_out_of_region_empty_search": True}
         if search_result.startswith("❌") or search_result.startswith("⏱️"):
             return search_result, {}, search_meta, {}
 
         new_params = self._extract_params(search_result)
         effective_params = {**(params or {}), **new_params}
+        if FOUR_LAYER_RUNTIME_ENABLED:
+            decision_context, four_layer_diag, four_layer_visible_options = _four_layer_decision_context(
+                search_result,
+                hard_constraints=hard_constraints,
+            )
+            four_layer_diag = {
+                **four_layer_diag,
+                "four_layer_mode": "enforce" if FOUR_LAYER_RUNTIME_ENFORCE else "shadow",
+            }
+            if decision_context is not None and FOUR_LAYER_RUNTIME_ENFORCE:
+                matched_items = decision_context.get("matched") if isinstance(decision_context.get("matched"), list) else []
+                requested_rooms = decision_context.get("requested_rooms") if isinstance(decision_context.get("requested_rooms"), list) else []
+                if matched_items or requested_rooms:
+                    stage_scenario = _reason_layer_scenario(query, effective_params)
+                    response_text = _four_layer_deterministic_presenter(
+                        decision_context,
+                        scenario=stage_scenario,
+                        params_context=_first_list_params_context(effective_params),
+                    )
+                    safe_search_meta = _four_layer_safe_search_meta(search_meta)
+                    safe_search_meta.update(four_layer_diag)
+                    safe_search_meta["_four_layer_visible_options"] = four_layer_visible_options
+                    return response_text, new_params, safe_search_meta, {
+                        "_four_layer_presenter": {
+                            "enabled": True,
+                            "applied": True,
+                            "deterministic": True,
+                            "llm_called": False,
+                            "retries": 0,
+                            "semantic_retries": 0,
+                        },
+                        "_stage_presenter": {
+                            "enabled": True,
+                            "applied": True,
+                            "stage": "first_list",
+                            "scenario": stage_scenario,
+                            "options_count": min(len(four_layer_visible_options), 3),
+                            "source": "four_layer_decision_context",
+                        },
+                        "_visible_options": four_layer_visible_options,
+                    }
+                presenter_query = json.dumps(
+                    {
+                        "client_query_hint": _four_layer_safe_query(query),
+                        "decision_context": decision_context,
+                        "response_contract": {"shape": "chat_json", "fields": ["response", "params", "visible_options", "final_question"]},
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                chat_request_data = {
+                    "_payload_stage": "four_layer_presenter",
+                    "query": presenter_query,
+                    "service": "openrouter",
+                    "model": chat_model,
+                    "system_prompt": _load_prompt("four_layer_presenter_v2"),
+                    "parameters": {
+                        "temperature": 0.2,
+                        "max_tokens": int(os.getenv("NMBOT_CHAT_MAX_TOKENS", "10000")),
+                    },
+                    "external_api_key": OPENROUTER_API_KEY,
+                }
+                response_text, chat_params, retries, chat_meta = await self._chat_with_retry(
+                    chat_request_data, headers, timeout, uid=0
+                )
+                semantic_retries = 0
+                if not _four_layer_presenter_mentions_matched(response_text, decision_context):
+                    semantic_retries = 1
+                    retry_payload = json.loads(presenter_query)
+                    retry_payload["validation_feedback"] = (
+                        "Previous response omitted every matched label. Render at least one exact label from decision_context.matched."
+                    )
+                    retry_request_data = {
+                        **chat_request_data,
+                        "query": json.dumps(retry_payload, ensure_ascii=False, separators=(",", ":")),
+                    }
+                    response_retry, params_retry, retry_count, meta_retry = await self._chat_with_retry(
+                        retry_request_data, headers, timeout, uid=0
+                    )
+                    retries += retry_count + 1
+                    if _four_layer_presenter_mentions_matched(response_retry, decision_context):
+                        response_text, chat_params, chat_meta = response_retry, params_retry, meta_retry
+                    else:
+                        response_text = _four_layer_deterministic_presenter(decision_context)
+                        chat_params = {}
+                        chat_meta = {**meta_retry, "_four_layer_deterministic_fallback": True}
+                safe_search_meta = _four_layer_safe_search_meta(search_meta)
+                safe_search_meta.update(four_layer_diag)
+                safe_search_meta["_four_layer_visible_options"] = four_layer_visible_options
+                return response_text, {**new_params, **chat_params}, safe_search_meta, {
+                    **chat_meta,
+                    "_four_layer_presenter": {"enabled": True, "applied": True, "retries": retries, "semantic_retries": semantic_retries},
+                    "_visible_options": four_layer_visible_options,
+                }
+            if FOUR_LAYER_RUNTIME_ENFORCE:
+                search_meta = {**search_meta, **four_layer_diag}
+            else:
+                search_meta = {**_four_layer_safe_search_meta(search_meta), **four_layer_diag}
         compact_facts = _compact_answer_facts_payload(search_result, params=params or {}, new_params=new_params)
         compact_search_result = json.dumps(compact_facts, ensure_ascii=False, separators=(",", ":"))
         chat_query = (
@@ -711,9 +2161,11 @@ class OvermindClient:
         # фактов deterministic-слоем, чтобы Telegram handler, CLI и test-agent
         # видели одну и ту же воронку: список ЖК → выбор ЖК → оператор.
         if STAGE_PRESENTER_ENABLED:
-            stage_options = _extract_options(search_result)
+            separated_options = _extract_search_result_options(search_result)
+            stage_options = separated_options["facts"]
             if len(stage_options) >= 2:
                 stage_scenario = _reason_layer_scenario(query, effective_params)
+                stage_options, enrichment_meta = await _enrich_top_options_for_first_list(self, first_list_enrichment_state, stage_options, stage_scenario)
                 response_text = _render_stage_first_list(
                     stage_options,
                     stage_scenario,
@@ -728,6 +2180,7 @@ class OvermindClient:
                         "scenario": stage_scenario,
                         "options_count": min(len(stage_options), 3),
                         "source": "OvermindClient.ask",
+                        "enrichment": enrichment_meta,
                     },
                     "_visible_options": stage_options[:3],
                 }
@@ -1032,14 +2485,59 @@ class OvermindClient:
         return _json_from_text(raw_text), {**meta, "_response_text": raw_text, "model": model}
 
     async def _run_gateway_request(self, request_data: dict, headers: dict, timeout: int) -> tuple[str, dict]:
-        """Возвращает (response_text, metadata). При ошибке возвращает (error_text, {})."""
+        """Возвращает (response_text, metadata). При ошибке возвращает безопасный текст."""
+        original_request_data = dict(request_data)
+        first_text, first_meta = await self._run_gateway_request_once(original_request_data, headers, timeout)
+        provider_error_code = first_meta.get("_provider_error_code") if isinstance(first_meta, dict) else None
+        requested_model = str(original_request_data.get("model") or "")
+        if provider_error_code and requested_model != PROVIDER_ERROR_RETRY_MODEL:
+            retry_request_data = _provider_retry_request_data(original_request_data)
+            retry_text, retry_meta = await self._run_gateway_request_once(retry_request_data, headers, timeout, metrics_retry=1)
+            retry_provider_code = retry_meta.get("_provider_error_code") if isinstance(retry_meta, dict) else None
+            if not (retry_meta.get("_safe_fallback") or retry_provider_code or _is_safe_upstream_fallback(retry_text)):
+                return retry_text, {
+                    **retry_meta,
+                    "_provider_retry_attempted": True,
+                    "_provider_retry_model": PROVIDER_ERROR_RETRY_MODEL,
+                    "_provider_error_code": provider_error_code,
+                    "_provider_retry_success": True,
+                }
+            safe_meta = {
+                **retry_meta,
+                "_provider_retry_attempted": True,
+                "_provider_retry_model": PROVIDER_ERROR_RETRY_MODEL,
+                "_provider_error_code": provider_error_code,
+                "_provider_retry_failed": True,
+                "_provider_retry_error_code": retry_provider_code or retry_meta.get("_provider_error_code"),
+                "_first_provider_error_code": provider_error_code,
+                "_safe_fallback": True,
+                "_upstream_error": True,
+            }
+            return SAFE_UPSTREAM_ERROR_TEXT, safe_meta
+        if provider_error_code:
+            first_meta = {
+                **first_meta,
+                "_provider_retry_attempted": False,
+                "_provider_retry_model": PROVIDER_ERROR_RETRY_MODEL,
+            }
+        return first_text, first_meta
+
+    async def _run_gateway_request_once(
+        self,
+        request_data: dict,
+        headers: dict,
+        timeout: int,
+        *,
+        metrics_retry: int | None = None,
+    ) -> tuple[str, dict]:
+        """Single gateway attempt. Provider retry orchestration lives in _run_gateway_request."""
         session = await self.ensure_session()
         request_data = dict(request_data)
         model = str(request_data.get("model") or "")
         if OPENROUTER_EXCLUDE_REASONING and model.startswith("google/gemini"):
             request_data.setdefault("reasoning", {"exclude": True})
         payload_stage = str(request_data.pop("_payload_stage", "gateway"))
-        _log_model_payload_metrics(payload_stage, request_data)
+        _log_model_payload_metrics(payload_stage, request_data, retry=metrics_retry)
         payload = {
             "agent_name": "gateway-agent",
             "endpoint": "/process",
@@ -1064,7 +2562,12 @@ class OvermindClient:
                     "http_status": resp.status,
                     "payload_preview": _safe_json_preview(task),
                 })
-                return _safe_user_error_message(), {"_upstream_error": True, "_safe_fallback": True}
+                provider_error_code = _provider_error_code(task)
+                return SAFE_UPSTREAM_ERROR_TEXT, _with_provider_retry_metadata(
+                    {"_upstream_error": True, "_safe_fallback": True},
+                    code=provider_error_code,
+                    attempted=False,
+                ) if provider_error_code else {"_upstream_error": True, "_safe_fallback": True}
 
         task_id = task.get("id")
         if not task_id:
@@ -1075,7 +2578,12 @@ class OvermindClient:
                 "stage": "gateway_create_task",
                 "payload_preview": _safe_json_preview(task),
             })
-            return _safe_user_error_message(), {"_upstream_error": True, "_safe_fallback": True}
+            provider_error_code = _provider_error_code(task)
+            return SAFE_UPSTREAM_ERROR_TEXT, _with_provider_retry_metadata(
+                {"_upstream_error": True, "_safe_fallback": True},
+                code=provider_error_code,
+                attempted=False,
+            ) if provider_error_code else {"_upstream_error": True, "_safe_fallback": True}
 
         base = OVERMIND_URL.rstrip("/")
         start = time.time()
@@ -1095,6 +2603,7 @@ class OvermindClient:
                     error = result_obj.get("error", "")
                     metadata = result_obj.get("metadata", {}) or {}
                     if error:
+                        provider_error_code = _provider_error_code(error)
                         LOGGER.error(
                             "gateway task returned error: task_id=%s error=%s result=%s",
                             task_id,
@@ -1105,17 +2614,28 @@ class OvermindClient:
                             "error_type": "gateway_task_error",
                             "severity": "error",
                             "stage": "gateway_result",
+                            "payload_stage": payload_stage,
                             "task_id": task_id,
                             "task_status": status,
                             "exception": str(error),
                             "payload_preview": _safe_json_preview(result_obj),
                         })
-                        return _safe_user_error_message(error), {**metadata, "_upstream_error": True, "_safe_fallback": True}
+                        safe_meta = {
+                            **metadata,
+                            "_payload_stage": payload_stage,
+                            "_upstream_error": True,
+                            "_upstream_error_text": str(error)[:1000],
+                            "_safe_fallback": True,
+                        }
+                        if provider_error_code:
+                            safe_meta = _with_provider_retry_metadata(safe_meta, code=provider_error_code, attempted=False)
+                        return SAFE_UPSTREAM_ERROR_TEXT, safe_meta
 
                     response_text = _response_payload_to_text(response_payload)
                     if response_text:
                         return response_text, metadata
                     if response_payload:
+                        provider_error_code = _provider_error_code(response_payload)
                         LOGGER.error(
                             "gateway task returned non-text response payload: task_id=%s status=%s payload=%s",
                             task_id,
@@ -1131,7 +2651,10 @@ class OvermindClient:
                             "payload_type": type(response_payload).__name__,
                             "payload_preview": _safe_json_preview(response_payload),
                         })
-                        return _safe_user_error_message(), {**metadata, "_upstream_error": True, "_safe_fallback": True}
+                        safe_meta = {**metadata, "_upstream_error": True, "_safe_fallback": True}
+                        if provider_error_code:
+                            safe_meta = _with_provider_retry_metadata(safe_meta, code=provider_error_code, attempted=False)
+                        return SAFE_UPSTREAM_ERROR_TEXT, safe_meta
                     LOGGER.error(
                         "gateway task returned empty response: task_id=%s status=%s result=%s",
                         task_id,
@@ -1146,7 +2669,11 @@ class OvermindClient:
                         "task_status": status,
                         "payload_preview": _safe_json_preview(result_obj),
                     })
-                    return _safe_user_error_message(), {**metadata, "_upstream_error": True, "_safe_fallback": True}
+                    provider_error_code = _provider_error_code(result_obj)
+                    safe_meta = {**metadata, "_upstream_error": True, "_safe_fallback": True}
+                    if provider_error_code:
+                        safe_meta = _with_provider_retry_metadata(safe_meta, code=provider_error_code, attempted=False)
+                    return SAFE_UPSTREAM_ERROR_TEXT, safe_meta
 
             await asyncio.sleep(3)
 
@@ -1216,6 +2743,15 @@ class OvermindClient:
         # Признак невалидного JSON: не нашли JSON response/buttons/params, и это не служебная ошибка.
         parsed_ok = response_text != chat_result or bool(chat_params) or bool(chat_buttons)
         is_invalid = not parsed_ok and not response_text.startswith("❌") and not response_text.startswith("⏱️")
+        if is_invalid and os.getenv("NMBOT_ACCEPT_PLAIN_CHAT", "0").strip().lower() in {"1", "true", "yes", "on"}:
+            _log_event({
+                "kind": "user_message_retry_skipped",
+                "uid": uid,
+                "stage": "chat",
+                "reason": "plain_text_allowed",
+                "raw_len": len(chat_result),
+            })
+            return response_text, chat_params, retries, chat_meta
         while is_invalid and retries < 2:
             retries += 1
             chat_result, chat_meta = await self._run_gateway_request(chat_request_data, headers, timeout)
@@ -1336,8 +2872,40 @@ def _format_paragraph_spacing(text: str) -> str:
     out = re.sub(r"\s+(Оставите\b)", r"\n\n\1", out)
     out = re.sub(r"\s+(Что\s+(?:для вас|вам|из этого)\b)", r"\n\n\1", out, flags=re.I)
     out = re.sub(r"\s+(Какой\s+(?:вариант|ЖК)\b)", r"\n\n\1", out, flags=re.I)
-    out = re.sub(r"\s+(Для инвестиц[а-яё]*\b)", r"\n\n\1", out, flags=re.I)
+    # Split an investment explanation only at a real sentence boundary.
+    # A broad replacement used to break a normal intro such as
+    # "Подобрала три варианта для инвестиций" in the middle of the sentence.
+    out = re.sub(r"(?<=[.!?])\s+(Для инвестиц[а-яё]*\b)", r"\n\n\1", out, flags=re.I)
     return re.sub(r"\n{3,}", "\n\n", out)
+
+
+def _remove_canned_phrases(text: str) -> str:
+    """Final UX guard against banned canned phrases from prompt/test contract."""
+    cleaned = str(text or "")
+    replacements = {
+        "Вот что удалось найти по вашему запросу:": "Вот что удалось найти:",
+        "Вот что удалось найти по вашему запросу": "Вот что удалось найти",
+        "по вашему запросу": "по этим условиям",
+        "под ваш запрос": "под ваши условия",
+        "подходит под запрос": "подходит под условия",
+    }
+    for old, new in replacements.items():
+        cleaned = cleaned.replace(old, new)
+        cleaned = cleaned.replace(old.capitalize(), new.capitalize())
+    return re.sub(r"\s+([,.!?])", r"\1", cleaned)
+
+
+_UNSUPPORTED_SALES_CLAIM_RE = re.compile(
+    r"[^.!?\n]*(?:доходност\w*|окупаемост\w*|ликвидност\w*|рост\s+цен\w*|прибыл\w*|"
+    r"начать\s+получать\s+доход\w*\s+от\s+аренд\w*|сразу\s+сдавать\s+в\s+аренд\w*)[^.!?\n]*[.!?]?",
+    re.IGNORECASE,
+)
+
+
+def _remove_unsupported_sales_claims(text: str) -> str:
+    cleaned = _UNSUPPORTED_SALES_CLAIM_RE.sub("", str(text or ""))
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip() or str(text or "")
 
 
 def _prepare_response_text(text: str) -> str:
@@ -1357,7 +2925,8 @@ def _prepare_response_text(text: str) -> str:
                 raw = data["response"]
     except json.JSONDecodeError:
         pass
-    raw = _format_paragraph_spacing(_fix_complex_name_artifacts(raw))
+    raw = _remove_unsupported_sales_claims(_remove_canned_phrases(_fix_complex_name_artifacts(raw)))
+    raw = _format_paragraph_spacing(raw)
     return _format_numbered_list_spacing(raw)
 
 
@@ -1810,7 +3379,7 @@ def _scenario_iteration_handoff_text(state: dict[str, Any], user_text: str) -> s
         reason = "наличие, цены и спецусловия быстро меняются, а у нас уже есть контекст вашего запроса"
     return (
         f"Мы уже сузили задачу до {name} и вопроса про {subject}.\n\n"
-        f"Дальше лучше не гадать: {reason}. Оператор проверит это по актуальной базе и увидит весь контекст диалога.\n\n"
+        f"Дальше лучше не гадать: {reason}. Специалист проверит это по актуальной базе и увидит всю переписку.\n\n"
         "Хотите оставить номер для связи?"
     )
 
@@ -1861,6 +3430,70 @@ def _last_bot_text(state: dict[str, Any]) -> str:
     return ""
 
 
+def _is_short_positive_answer(text: str) -> bool:
+    compact = re.sub(r"\s+", " ", str(text or "").lower().replace("ё", "е")).strip()
+    return bool(re.fullmatch(r"(да|ага|угу|ок|окей|хорошо|давай|хочу|можно|готов|готова|конечно)", compact))
+
+
+def _dialog_planner_expected_action_class(
+    *,
+    bot_question: str,
+    client_answer: str,
+    offer_type: str,
+    answer_kind: str,
+    selected_option: dict[str, Any],
+) -> str:
+    """Small deterministic hint for the LLM planner.
+
+    It does not execute anything by itself. It only labels the previous bot
+    question + current short client answer when this is clearly a selected ЖК
+    live-check consent. The merge guard still remains the final safety net.
+    """
+    if not _is_short_positive_answer(client_answer):
+        return ""
+    if not isinstance(selected_option, dict) or not str(selected_option.get("name") or "").strip():
+        return ""
+    question = re.sub(r"\s+", " ", str(bot_question or "").lower().replace("ё", "е")).strip()
+    offer = str(offer_type or "")
+    kind = str(answer_kind or "")
+    selected_offer = offer in {"selected_option_details", "operator_for_selected"} or kind in {
+        "selected_option_details",
+        "default_selected_option",
+        "selected_option_financing_manager_offer",
+    }
+    live_check_question = bool(re.search(
+        r"доступн|услови|приобрести|покупк|брон|корпус|этаж|квартир|актуаль|ипот|первоначальн|взнос|рассроч|скидк|акци|налич|показ",
+        question,
+    ))
+    if selected_offer and live_check_question:
+        return "operator_live_check"
+    return ""
+
+
+def _dialog_planner_last_turn_payload(state: dict[str, Any]) -> dict[str, Any]:
+    """Structured previous bot question + current client answer for planner."""
+    selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
+    bot_question = str(state.get("last_bot_question") or "")
+    client_answer = _last_dialog_user_text(state)
+    offer_type = str(state.get("last_offer_type") or "")
+    answer_kind = str(state.get("last_answer_kind") or "")
+    selected_name = str(selected.get("name") or "") if isinstance(selected, dict) else ""
+    return {
+        "bot_question": bot_question,
+        "client_answer": client_answer,
+        "offer_type": offer_type,
+        "answer_kind": answer_kind,
+        "selected_option": selected_name,
+        "expected_action_class": _dialog_planner_expected_action_class(
+            bot_question=bot_question,
+            client_answer=client_answer,
+            offer_type=offer_type,
+            answer_kind=answer_kind,
+            selected_option=selected,
+        ),
+    }
+
+
 def _dialog_planner_state_payload(state: dict[str, Any]) -> dict[str, Any]:
     """Компактный state для LLM-orchestrator без сырых больших объектов."""
     selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
@@ -1874,11 +3507,58 @@ def _dialog_planner_state_payload(state: dict[str, Any]) -> dict[str, Any]:
         "last_bot_question": state.get("last_bot_question") or "",
         "last_offer_type": state.get("last_offer_type") or "",
         "last_answer_kind": state.get("last_answer_kind") or "",
+        "last_turn": _dialog_planner_last_turn_payload(state),
         "active_task": _active_task(state),
         "active_scenario": _active_scenario(state),
         "scenario_context": _scenario_context_payload(user_text, state),
         "numeric_choice_policy": state.get("numeric_choice_policy") or "accept",
         "conversation_followup": _extract_conversation_followup_signals(user_text, state),
+    }
+
+
+def _dialog_trace_event(
+    *,
+    uid: int,
+    user_text: str,
+    state: dict[str, Any],
+    dialog_plan: dict[str, Any],
+    followup_meta: dict[str, Any],
+    applied_plan: dict[str, Any],
+    mcp_request_patch: dict[str, Any],
+) -> dict[str, Any]:
+    """Safe trace for follow-up/reference-resolution debugging.
+
+    Do not log raw user text here: `dialog_plan` events already carry it in
+    legacy logs. This event is intentionally compact and safe for Jivo checks.
+    """
+    selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
+    visible_names = [str(o.get("name") or "") for o in (state.get("visible_options") or [])[:5] if isinstance(o, dict)]
+    last_names = [str(o.get("name") or "") for o in (state.get("last_options") or [])[:5] if isinstance(o, dict)]
+    try:
+        confidence = float(dialog_plan.get("confidence") or 0.0) if isinstance(dialog_plan, dict) else 0.0
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return {
+        "kind": "dialog_trace",
+        "uid": uid,
+        "user_text_len": len(str(user_text or "")),
+        "user_text_has_digits": bool(re.search(r"\d", str(user_text or ""))),
+        "visible_option_names": visible_names,
+        "last_option_names": last_names,
+        "selected_option_name": str(selected.get("name") or "") if isinstance(selected, dict) else "",
+        "last_offer_type": str(state.get("last_offer_type") or ""),
+        "last_answer_kind": str(state.get("last_answer_kind") or ""),
+        "last_bot_question_len": len(str(state.get("last_bot_question") or "")),
+        "planner_action": str(dialog_plan.get("dialog_action") or "") if isinstance(dialog_plan, dict) else "",
+        "planner_confidence": confidence,
+        "planner_selected_option_action": str(dialog_plan.get("selected_option_action") or "") if isinstance(dialog_plan, dict) else "",
+        "planner_selected_option_name": str(dialog_plan.get("selected_option_name") or "") if isinstance(dialog_plan, dict) else "",
+        "planner_fallback_used": bool(dialog_plan.get("fallback_used")) if isinstance(dialog_plan, dict) else False,
+        "followup_intent": str(followup_meta.get("intent") or "") if isinstance(followup_meta, dict) else "",
+        "visible_options_policy": str(dialog_plan.get("visible_options_policy") or "") if isinstance(dialog_plan, dict) else "",
+        "numeric_choice_policy": str(dialog_plan.get("numeric_choice_policy") or "") if isinstance(dialog_plan, dict) else "",
+        "mcp_patch_purpose": str(mcp_request_patch.get("purpose") or "") if isinstance(mcp_request_patch, dict) else "",
+        "applied": applied_plan,
     }
 
 
@@ -2087,10 +3767,10 @@ def _reject_operator_response(state: dict[str, Any]) -> str:
     name = selected.get("name") if isinstance(selected, dict) else "этот ЖК"
     options = state.get("visible_options") or state.get("last_options") or []
     other_count = max(0, len(options) - 1) if selected else len(options)
-    tail = "Могу сравнить его с другими вариантами или продолжить подбор здесь."
+    tail = "Могу сравнить его с похожими вариантами или продолжить здесь."
     if other_count:
-        tail = "Можем сравнить его с другими вариантами из подборки или поменять условия поиска."
-    return f"Хорошо, тогда остаёмся здесь. По {name} можем спокойно продолжить без звонка.\n\n{tail}\n\nЧто удобнее: сравнить варианты или изменить условия?"
+        tail = "Можем сравнить его с похожими вариантами или чуть поменять условия."
+    return f"Хорошо, остаёмся здесь. По {name} можем спокойно продолжить без звонка.\n\n{tail}\n\nЧто удобнее: сравнить варианты или изменить условия?"
 
 
 def _reject_selected_option_response(state: dict[str, Any]) -> str:
@@ -2104,14 +3784,14 @@ def _reject_selected_option_response(state: dict[str, Any]) -> str:
     if remaining:
         return _format_options_summary_response(
             remaining,
-            "Поняла, этот ЖК убираем. Из оставшихся можно посмотреть",
-            "Что именно не подошло в прошлом варианте — цена, район, срок или формат проекта?",
+            "Поняла, этот вариант убираю. Из оставшихся можно посмотреть",
+            "Что именно не подошло в прошлом варианте — цена, район, срок или формат?",
         )
-    return "Поняла, этот ЖК убираем. Что именно не подошло — цена, район, срок сдачи или сам формат проекта?"
+    return "Поняла, этот вариант убираю. Что именно не подошло — цена, район, срок сдачи или сам формат?"
 
 
 def _reject_similar_options_response(state: dict[str, Any]) -> str:
-    return "Хорошо, похожие варианты не показываю. Можем либо подробнее разобрать выбранный ЖК, либо поменять условия поиска — бюджет, район, срок или отделку. Что важнее изменить?"
+    return "Хорошо, похожие варианты не показываю. Можем либо подробнее разобрать этот вариант, либо чуть поменять условия — бюджет, район, срок или отделку. Что важнее?"
 
 
 def _negation_clarification_response(meta: dict[str, Any], state: dict[str, Any]) -> str:
@@ -2120,8 +3800,8 @@ def _negation_clarification_response(meta: dict[str, Any], state: dict[str, Any]
         return question
     selected = state.get("selected_option") or {}
     if isinstance(selected, dict) and selected.get("name"):
-        return "Поняла. Что именно не подошло в этом варианте — цена, район, срок сдачи, отделка или сам формат ЖК?"
-    return "Поняла. Что меняем в подборе — район, бюджет, отделку, срок сдачи или формат квартиры?"
+        return "Поняла. Что именно не подошло в этом варианте — цена, район, срок сдачи, отделка или сам формат?"
+    return "Поняла. Что меняем — район, бюджет, отделку, срок сдачи или формат квартиры?"
 
 
 def _is_short_yes_to_contact_offer(text: str, state: dict[str, Any]) -> bool:
@@ -2140,16 +3820,16 @@ def _is_short_yes_to_contact_offer(text: str, state: dict[str, Any]) -> bool:
 
 
 def _operator_contact_request_text() -> str:
-    return "Отлично. Напишите, пожалуйста, сам номер телефона — специалист проверит этот ЖК и ваш запрос уже с контекстом диалога."
+    return "Отлично. Пришлите номер телефона — специалист проверит этот вариант и свяжется с вами."
 
 
 def _awaiting_phone_reprompt_text(user_text: str = "") -> str:
     text = str(user_text or "").lower().replace("ё", "е").strip()
     if re.fullmatch(r"(да|ага|угу|ок|хорошо|давай|хочу|можно|готов|готова)", text):
-        return "Поняла. Напишите сам номер телефона, пожалуйста — без него специалист не сможет связаться."
+        return "Поняла. Просто пришлите номер телефона — без него специалист не сможет связаться."
     if _awaiting_phone_should_cancel(text):
-        return "Хорошо, без номера не передаю. Продолжим здесь — что ещё посмотреть по подбору?"
-    return "Похоже, это не номер. Напишите телефон в формате +7XXXXXXXXXX или просто продиктуйте цифрами."
+        return "Хорошо, без номера не передаю. Тогда продолжим здесь — что ещё посмотреть?"
+    return "Похоже, это не номер. Пришлите телефон в формате +7XXXXXXXXXX или просто цифрами."
 
 
 def _awaiting_phone_should_cancel(user_text: str = "") -> bool:
@@ -2212,7 +3892,16 @@ def resolve_modal_state(state: dict[str, Any], user_text: str) -> ModalDecision:
 def _safe_option_payload(option: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(option, dict):
         return {}
-    allowed = {"idx", "name", "location", "price", "area", "finishing", "ready", "developer", "metro", "why_close"}
+    allowed = {
+        "idx", "name", "location", "price", "price_min", "price_range", "area", "area_range",
+        "finishing", "ready", "developer", "metro", "property_metro", "why_close",
+        "schools", "kindergartens", "parks", "shops", "infrastructure", "family_infrastructure",
+        "house", "houses_info", "stage", "ready_quarter",
+        "mortgage", "mortgage_calc", "discount", "payment_by_installments",
+        "ads", "counter_novos", "apartment_types", "why_family", "why_investment", "why_rental",
+        "rooms", "transport", "class", "property_class", "clinics", "yards", "egrn_top_novos",
+        "stat_price", "price_history", "services",
+    }
     safe: dict[str, Any] = {}
     for key, value in option.items():
         if key not in allowed or _looks_missing(value):
@@ -2262,6 +3951,147 @@ _SCENARIO_CONTEXT_HINTS: dict[str, dict[str, Any]] = {
         "answer_angles": ["удобство жизни", "срок и формат покупки"],
     },
 }
+
+
+@dataclass(frozen=True)
+class ScenarioEnrichmentProfile:
+    label: str
+    fields: tuple[str, ...]
+    utp_priority: tuple[str, ...]
+    intro: str
+    criteria: tuple[tuple[str, str, str], ...]
+    benefit_rules: tuple[str, ...]
+    forbidden_claims: tuple[str, ...]
+
+
+_COMMON_ENRICHMENT_FIELDS: Final[tuple[str, ...]] = (
+    "название ЖК и точная локация / район",
+    "цены, минимальная цена и ценовой диапазон",
+    "площади и диапазон площадей",
+    "типы квартир / комнатность / room formats",
+    "отделка",
+    "готовность, корпуса и сроки",
+    "метро, минуты пешком и транспорт",
+    "застройщик и класс проекта",
+)
+
+
+SCENARIO_ENRICHMENT_PROFILES: Final[dict[str, ScenarioEnrichmentProfile]] = {
+    "investment": ScenarioEnrichmentProfile(
+        label="инвестиционный выбор без обещаний доходности",
+        fields=(
+            "rooms / apartment_types / compact lots",
+            "ads и counter_novos: количество объявлений и скидок",
+            "цены, price_min, price_range, stat_price и price history только если есть в MCP",
+            "готовность, отделка, застройщик, класс проекта",
+            "метро и транспорт",
+            "ипотека, рассрочка, discounts",
+            "egrn_top_novos: sales/contracts, mortgages, position, last deal date",
+        ),
+        utp_priority=("egrn_top_novos", "counter_novos", "ads", "apartment_types", "price", "metro", "ready", "finishing"),
+        intro="Для покупки как инвестиции смотрела понятный вход и факты, по которым можно сравнить ЖК между собой без прогнозов",
+        criteria=(
+            ("price", "цену входа", "это показывает стартовый бюджет"),
+            ("apartment_types", "конкретные форматы квартир", "так проще сравнить вход по лотам"),
+            ("ready", "готовность", "она задаёт горизонт ожидания"),
+            ("egrn_top_novos", "данные сделок", "это наблюдаемая история сделок, а не прогноз"),
+            ("counter_novos", "объявления и скидки", "они показывают текущую витрину"),
+            ("metro", "метро и локацию", "это помогает сравнивать объект с альтернативами"),
+        ),
+        benefit_rules=(
+            "price -> visible entry threshold; no profit/yield promise",
+            "apartment_types/rooms -> comparable lot formats",
+            "ready -> waiting horizon or no construction wait",
+            "egrn_top_novos/counter_novos/ads -> observable deal/market data only, not demand/growth/liquidity guarantees",
+        ),
+        forbidden_claims=("доходность", "прибыль", "окупаемость", "рост цены", "ликвидность", "гарантированный спрос"),
+    ),
+    "family": ScenarioEnrichmentProfile(
+        label="семья с детьми",
+        fields=(
+            "школы",
+            "детские сады",
+            "парки, лес, зелёные зоны, набережные",
+            "поликлиники, аптеки и бытовые сервисы",
+            "дворы без машин, игровые и спортивные площадки",
+            "магазины и сервисы на первых этажах",
+        ),
+        utp_priority=("schools", "kindergartens", "parks", "yards", "clinics", "infrastructure", "ready", "finishing"),
+        intro="Для семьи смотрела факты, которые влияют на обычный день с ребёнком",
+        criteria=(
+            ("schools", "школы", "это упрощает ежедневную логистику"),
+            ("kindergartens", "детские сады", "это удобнее для маленького ребёнка"),
+            ("parks", "парки и зелёные зоны", "будет куда выйти погулять"),
+            ("yards", "двор и площадки", "ребёнку спокойнее проводить время рядом с домом"),
+            ("ready", "готовность", "переезд проще планировать"),
+            ("finishing", "отделку", "меньше ремонтных хлопот после покупки"),
+        ),
+        benefit_rules=(
+            "schools/kindergartens -> simpler child logistics",
+            "parks -> walks",
+            "yards/playgrounds/security -> calmer child environment only when present",
+            "ready/finishing -> second-layer moving convenience, not main point while family facts exist",
+        ),
+        forbidden_claims=("престижная школа", "безопасный двор без факта", "экология без факта", "лучший для семьи"),
+    ),
+    "rental": ScenarioEnrichmentProfile(
+        label="квартира под аренду без обещаний ставки, спроса или окупаемости",
+        fields=(
+            "компактные форматы: rooms, apartment_types, студии и однокомнатные если есть",
+            "площади и минимальная цена",
+            "отделка и готовность / ready",
+            "метро, транспорт и минуты пешком",
+            "ads, counter_novos и egrn_top_novos только как факты активности, без обещаний спроса",
+        ),
+        utp_priority=("apartment_types", "area", "finishing", "ready", "metro", "counter_novos", "ads", "price"),
+        intro="Для аренды смотрела то, что влияет на вход, подготовку квартиры и удобство будущего жильца",
+        criteria=(
+            ("apartment_types", "компактный формат", "его проще сравнивать по бюджету входа"),
+            ("price", "цену входа", "это помогает понять стартовый бюджет"),
+            ("finishing", "отделку", "меньше подготовки перед показами и заселением"),
+            ("ready", "готовность", "не нужно ждать стройку перед использованием квартиры"),
+            ("metro", "метро", "будущему жильцу проще каждый день добираться"),
+            ("counter_novos", "объявления и скидки", "это только видимая активность на витрине, без обещания спроса"),
+        ),
+        benefit_rules=(
+            "compact rooms -> clearer entry budget/comparable format, not demand/easy rental",
+            "finishing -> less preparation before offering the apartment",
+            "ready -> no construction wait before using/preparing it",
+            "metro -> daily convenience for future resident, not guaranteed demand",
+            "ads/counters/egrn -> exact visible activity/transactions only",
+        ),
+        forbidden_claims=("доходность", "окупаемость", "быстро сдать", "высокий спрос", "гарантированный спрос", "ставка аренды"),
+    ),
+    "self_use": ScenarioEnrichmentProfile(
+        label="покупка для себя",
+        fields=(
+            "общая карточка ЖК: локация, цены, площади, отделка, готовность",
+            "метро и повседневный транспорт",
+            "инфраструктура рядом: парки, магазины, сервисы, клиники",
+            "двор, безопасность и повседневные удобства если есть",
+        ),
+        utp_priority=("location", "metro", "infrastructure", "parks", "shops", "ready", "finishing", "price"),
+        intro="Для покупки для себя смотрела повседневное удобство: где находится ЖК, как добираться, когда можно пользоваться квартирой и что есть рядом",
+        criteria=(
+            ("location", "локацию", "это база для ежедневного маршрута"),
+            ("metro", "метро", "проще планировать поездки каждый день"),
+            ("infrastructure", "инфраструктуру", "часть бытовых дел можно решать рядом"),
+            ("parks", "парки", "есть место для прогулок"),
+            ("ready", "готовность", "понятнее срок переезда"),
+            ("finishing", "отделку", "меньше ремонта после покупки"),
+        ),
+        benefit_rules=(
+            "location/metro -> practical daily routes",
+            "infrastructure/shops/parks -> named daily usefulness",
+            "ready/finishing -> practical moving convenience",
+        ),
+        forbidden_claims=("идеально", "лучший", "престиж", "центр без факта"),
+    ),
+}
+
+
+def _scenario_enrichment_profile(scenario: str) -> ScenarioEnrichmentProfile:
+    return SCENARIO_ENRICHMENT_PROFILES.get(scenario) or SCENARIO_ENRICHMENT_PROFILES["self_use"]
 
 
 def _stable_primary_scenario(user_text: str, state: dict[str, Any]) -> str:
@@ -2420,6 +4250,14 @@ def _build_conversation_answer_prompt(
         "selected_option": _safe_option_payload(state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}),
         "visible_options": [_safe_option_payload(option) for option in options[:5] if isinstance(option, dict)],
         "dialog_window": (state.get("dialog_window") or [])[-6:],
+        "conversation_context": state.get("conversation_context") or {},
+        "pending_followup": state.get("pending_followup") or {},
+        "already_asked": state.get("already_asked") or [],
+        "already_answered": state.get("already_answered") or [],
+        "client_context": state.get("client_context") or {},
+        "knowledge": state.get("knowledge") or {},
+        "capabilities": state.get("capabilities") or {},
+        "response_policy": state.get("response_policy") or {},
         "planner": dialog_plan or {},
         "scenario_context": _scenario_context_payload(user_text, state),
         "active_conversation_topic": _active_conversation_topic(state),
@@ -2437,7 +4275,7 @@ def _build_conversation_answer_prompt(
         "- Используй scenario_context как карточку сценария: primary_scenario — главная потребность клиента, facet_request — дополнительный вопрос поверх неё, action_request — действие.\n"
         "- Если scenario_context.facet_request.target=current_options, отвечай именно по текущим visible_options/current_options и не подменяй список ЖК.\n"
         "- Если scenario_context.facet_request.type=mortgage и evidence_status=no_current_mortgage_facts, не пиши «все подходят под ипотеку» и не обещай доступность ипотеки. Скажи мягко: по этим ЖК можно проверить ипотечные условия; точные условия зависят от банка, программы, объекта и клиента.\n"
-        "- Если scenario_context.action_request.type=operator_handoff, не запускай новый поиск в тексте и не придумывай новые ЖК; подготовь передачу текущего контекста или попроси телефон.\n"
+        "- Если scenario_context.action_request.type=operator_handoff, не запускай новый поиск в тексте и не придумывай новые ЖК; мягко подтверди передачу текущего контекста, упомяни выбранный ЖК или текущую подборку, а в конце попроси телефон клиента для связи.\n"
         "- Не давай клиенту номера телефонов, контакты менеджеров/операторов/отдела продаж, WhatsApp/Telegram-ссылки или любые внешние контакты. Единственный телефонный сценарий — попросить номер самого клиента для обратной связи; если клиент спрашивает наш номер, предложи оставить свой номер или продолжить в чате.\n"
         "- Учитывай conversation_topic: если это payment_terms или financing, отвечай про первоначальный взнос, ипотеку или рассрочку, а не про аренду; если это rental, отвечай про аренду; если living, отвечай про жизнь.\n"
         "- Учитывай conversation_followup: если subtopic_hint=family_mortgage, отвечай именно про семейную ипотеку; если subtopic_hint=down_payment, отвечай про первоначальный взнос; не превращай это в generic financing.\n"
@@ -2529,8 +4367,16 @@ def _consultation_answer_guidance(user_text: str, state: dict[str, Any] | None =
         ]
     elif topic == "rental":
         focus_points = [
-            "критерии аренды: спрос, метро, отделка, готовность",
-            "как текущий ЖК вписывается в аренду",
+            "критерии аренды: бюджет покупки, формат квартиры, метро, отделка, готовность",
+            "как текущий ЖК вписывается в аренду только по фактам текущих карточек",
+        ]
+        avoid += [
+            "tenant_attractiveness_claims_without_structured_fields",
+            "demand_claims_without_structured_fields",
+            "rent_price_impact_claims_without_structured_fields",
+            "audience_claims_without_structured_fields",
+            "ecology_or_parks_claims_without_structured_fields",
+            "quick_tenant_search_claims_without_structured_fields",
         ]
     elif topic == "investment":
         focus_points = [
@@ -2577,6 +4423,14 @@ def _build_consultation_answer_prompt(
         "selected_option": _safe_option_payload(state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}),
         "visible_options": [_safe_option_payload(option) for option in options[:5] if isinstance(option, dict)],
         "dialog_window": (state.get("dialog_window") or [])[-6:],
+        "conversation_context": state.get("conversation_context") or {},
+        "pending_followup": state.get("pending_followup") or {},
+        "already_asked": state.get("already_asked") or [],
+        "already_answered": state.get("already_answered") or [],
+        "client_context": state.get("client_context") or {},
+        "knowledge": state.get("knowledge") or {},
+        "capabilities": state.get("capabilities") or {},
+        "response_policy": state.get("response_policy") or {},
         "planner": dialog_plan or {},
         "scenario_context": _scenario_context_payload(user_text, state),
         "active_conversation_topic": _active_conversation_topic(state),
@@ -2596,15 +4450,22 @@ def _build_consultation_answer_prompt(
         "Реальное действие бывает только таким: новый поиск по MCP, выбор конкретного ЖК для live-check, или передача оператору/менеджеру. "
         "Не создавай четвёртый режим 'я уточню и потом сообщу': у Ирины нет фонового ожидания и отложенных сообщений.\n\n"
         "RULES:\n"
+        "- Главная задача — ответить именно на conversation_context.current_turn / user_text, не на старый вопрос из истории.\n"
+        "- Сохраняй выбранный ЖК, primary_intent, constraints/preferences и pending_followup; не сбрасывай их и не начинай подбор заново.\n"
+        "- Используй dialog_window только как короткую память последних реплик: если клиент отказался от оператора или спрашивает 'зачем оператор?', объясни по контексту и не дави на оператора повторно.\n"
+        "- Если response_policy.do_not_offer_operator_after_rejection=true или already_answered содержит reject_operator/continue_selection, не предлагай оператора снова без прямой просьбы клиента.\n"
+        "- Если response_policy.do_not_repeat_shortlist_by_default=true, не повторяй уже показанный shortlist; упоминай выбранный ЖК/варианты только точечно для ответа.\n"
+        "- Если conversation_context.answer_goal=clarify_cash_on_hand_down_payment_before_financing_answer или conversation_context.ambiguity.type=cash_on_hand_vs_budget: задай ровно один короткий вопрос подтверждения, например «10 млн — это первоначальный взнос, а остальную сумму планируете в ипотеку?». Не повторяй shortlist и не превращай max_price в down_payment без явного подтверждения клиента.\n"
         "- Используй scenario_context как карточку сценария: primary_scenario остаётся основной потребностью, facet_request только добавляет тему проверки, action_request только задаёт следующий шаг.\n"
         "- Если scenario_context.facet_request.target=current_options, не превращай ипотеку/оплату в новый подбор и не меняй список ЖК.\n"
         "- Если scenario_context.facet_request.type=mortgage и evidence_status=no_current_mortgage_facts, не пиши «все подходят под ипотеку» и не обещай доступность ипотеки. Скажи мягко: по этим ЖК можно проверить ипотечные условия; точные условия зависят от банка, программы, объекта и клиента.\n"
-        "- Если scenario_context.action_request.type=operator_handoff, отвечай как про передачу текущего контекста оператору, а не как про поиск новых объектов.\n"
+        "- Если scenario_context.action_request.type=operator_handoff, отвечай как про передачу текущего контекста оператору, а не как про поиск новых объектов; в конце обязательно попроси телефон клиента для связи.\n"
         "- Не давай клиенту номера телефонов, контакты менеджеров/операторов/отдела продаж, WhatsApp/Telegram-ссылки или любые внешние контакты. Единственный телефонный сценарий — попросить номер самого клиента для обратной связи; если клиент спрашивает наш номер, предложи оставить свой номер или продолжить в чате.\n"
         "- Используй answer_guidance: answer_priority=direct_answer_first, tone=live_sales_manager, focus_points и operator_policy.\n"
         "- Если есть answer_guidance.payment_financing_playbook — прямо используй его как сценарий ответа по ипотеке/ПВ/условиям оплаты.\n"
         "- Если answer_guidance.subtopic_hint=family_mortgage, отвечай именно про семейную ипотеку в контексте текущего ЖК; не превращай это в generic financing и не начинай с оператора.\n"
         "- Если answer_guidance.subtopic_hint=down_payment, отвечай про первоначальный взнос; если payment_terms — про оплату; если rental — про аренду; если investment — про инвестиционный сценарий.\n"
+        "- Для rental нельзя писать про привлекательность для арендаторов, спрос, влияние на стоимость аренды, целевые аудитории, экологию/парки или быстрый поиск жильца, если ровно такие структурированные поля отсутствуют в visible_options/selected_option.\n"
         "- Не повторяй shortlist как основной ответ и не сравнивай варианты по умолчанию, если клиент спросил о покупке/условиях.\n"
         "- Если точных условий нет в контексте, скажи это спокойно и по-человечески, а не как системную ошибку. Оператор — только как опциональный следующий шаг после прямого ответа, если без него не обойтись.\n"
         "- Нельзя обещать отложенное действие: не пиши 'я уточню', 'я проверю и сообщу', 'как только будет информация', 'пока я уточняю'. Вместо этого предложи конкретный следующий шаг сейчас: выбрать ЖК, запустить новый поиск или передать оператору.\n"
@@ -2998,8 +4859,8 @@ def _selection_logic_response(state: dict[str, Any]) -> str:
         bits = ["бюджет", "локацию", "готовность дома", "отделку"]
     criteria = ", ".join(dict.fromkeys(bits))
     return (
-        f"Подбираю не просто по цене. Сначала смотрю на {criteria}, а потом сравниваю, какой вариант понятнее для вашего сценария.\n\n"
-        "Если важно быстрее заехать, сильнее готовый дом или отделка. Если важнее входной бюджет, смотрю, где ниже стартовая цена и какие компромиссы есть по срокам или району.\n\n"
+        f"Смотрю не только на цену. Ещё сравниваю {criteria}, а потом выбираю, что будет понятнее именно для вас.\n\n"
+        "Если важнее быстрее заехать — сильнее смотрю на готовность дома и отделку. Если важнее стартовый бюджет — смотрю, где вход попроще и какие компромиссы есть по срокам или району.\n\n"
         "Хотите, я коротко объясню, почему в прошлой подборке показала именно эти варианты?"
     )
 
@@ -3046,17 +4907,16 @@ def _consultation_question_response(state: dict[str, Any], user_text: str = "") 
 
     if purpose in {"rental", "rent", "аренда", "аренду", "сдача"}:
         return (
-            "Для аренды я бы смотрела не просто на цену. Важнее понять, насколько легко квартиру будет сдать живому человеку.\n\n"
-            "Главные критерии такие: локация и понятная точка спроса, транспорт или метро, готовность дома, отделка и формат квартиры. "
-            "Чем меньше арендатору нужно доделывать самому и чем проще объяснить, почему здесь удобно жить каждый день, тем спокойнее такой вариант под сдачу.\n\n"
-            "Ещё важно заранее понимать, кому сдаём: одному человеку, паре, студенту, сотруднику рядом с работой или семье. От этого зависит, что важнее — компактность, ремонт, метро или район.\n\n"
+            "Для аренды я бы смотрела не просто на цену. По подтверждённым фактам важны транспорт или метро, готовность дома, отделка и формат квартиры.\n\n"
+            "Если есть отделка, меньше стартовых работ. Если дом готов, проще планировать сроки. Если рядом метро, это понятный плюс для повседневной жизни жильца.\n\n"
+            "Дальше лучше сравнивать уже конкретные квартиры: площадь, цену входа и состояние отделки.\n\n"
             f"{next_step}"
         )
 
     if purpose in {"investment", "invest", "инвестиция", "инвестиции"}:
         return (
-            "Для инвестиции я бы сначала отделяла проверяемые вещи от обещаний. Смотреть стоит на цену входа, срок готовности, локацию, формат квартиры, отделку и понятность будущего сценария: сдавать, перепродавать или держать как актив.\n\n"
-            "Я не буду обещать доходность или рост цены без подтверждённых данных, но могу помочь сравнить варианты по тому, где меньше стартовых работ, понятнее спрос и проще объяснить ценность объекта.\n\n"
+            "Для инвестиции я бы сначала смотрела только на подтверждённые вещи: цену входа, срок готовности, локацию, формат квартиры и отделку.\n\n"
+            "Если есть отделка — меньше стартовых работ. Если дом готов — проще оценивать вариант без ожидания сдачи. Если рядом метро — это понятный аргумент при сравнении локаций.\n\n"
             f"{next_step}"
         )
 
@@ -3069,7 +4929,7 @@ def _consultation_question_response(state: dict[str, Any], user_text: str = "") 
 
     return (
         "Я бы смотрела на задачу клиента, а не только на список ЖК. Обычно важны бюджет, локация, транспорт, срок готовности, отделка, формат квартиры и то, для чего покупаем: жить, сдавать или инвестировать.\n\n"
-        "Если цель понятна, подбор получается точнее: для жизни важнее ежедневное удобство, для аренды — спрос и быстрый запуск, для инвестиций — проверяемые опоры без обещаний доходности.\n\n"
+        "Если цель понятна, подбор получается точнее: для жизни важнее ежедневное удобство, для аренды — готовность, отделка и транспорт, для инвестиций — цена входа, срок и локация без прогнозов.\n\n"
         f"{next_step}"
     )
 
@@ -3158,6 +5018,25 @@ def _followup_intent_from_dialog_action(
     if dialog_action in {"reject_offer", "reject_operator", "reject_phone", "reject_selected_option", "reject_similar_options", "clarify_negation"}:
         return dialog_action
     return None
+
+
+def _merge_followup_intent_with_planner(
+    classifier_intent: Any,
+    planner_mapped_intent: str | None,
+    dialog_action: str = "",
+) -> str:
+    """Merge old followup classifier intent with dialog planner output.
+
+    Safety invariant: action intents must not be downgraded into generic
+    conversation/consultation answers. This keeps short «да» after a selected
+    ЖК live-check offer on the operator path even if the planner phrases it as
+    consultation/conversation.
+    """
+    original = str(classifier_intent or "")
+    mapped = str(planner_mapped_intent or "")
+    if original == "operator_for_selected" and mapped in {"conversation_answer", "consultation_answer"}:
+        return original
+    return mapped or original
 
 
 def _followup_expansion_option_names(state: dict[str, Any]) -> list[str]:
@@ -3335,6 +5214,11 @@ def _compact_answer_facts_payload(
         "source_format": "structured",
         "current_params": params or {},
         "new_params": new_params or {},
+        "presentation_policy": {
+            "facts": "primary exact matches only",
+            "near": "alternatives only; never describe as exact, suitable, or primary when facts exist",
+            "primary_items": "use facts for the main shortlist; if facts is empty, say zero exact matches before optional near alternatives",
+        },
         "facts": [row for row in (_compact_answer_fact_item(item) for item in facts[:3]) if row],
         "near": [row for row in (_compact_answer_fact_item(item) for item in near[:2]) if row],
     }
@@ -3531,10 +5415,10 @@ def _split_houses_by_status(houses: Any) -> tuple[str, str]:
 def _building_status_unknown_response(option: dict[str, Any] | None) -> str:
     name = (option or {}).get("name") or (option or {}).get("complex_name") or "этому ЖК"
     return (
-        f"По {name} у меня сейчас есть только общий срок по проекту, но нет точной разбивки по корпусам. "
-        "Поэтому я не буду делать вывод по готовности корпусов: общий срок ЖК — это не статус каждого корпуса.\n\n"
-        "Лучше уточню у оператора, какие корпуса уже сданы, где идёт выдача ключей и куда можно быстрее заехать. "
-        "Хотите, передам вопрос оператору?"
+        f"По {name} у меня сейчас есть только общий срок по проекту, без разбивки по корпусам. "
+        "Поэтому не буду гадать по каждому корпусу отдельно.\n\n"
+        "Лучше уточню у специалиста, какие корпуса уже сданы, где идут ключи и куда можно заехать быстрее. "
+        "Хотите, передам вопрос?"
     )
 
 
@@ -3574,15 +5458,8 @@ def _building_status_response_from_search(search_text: str, fallback_option: dic
     return "\n\n".join(line for line in lines if line.strip())
 
 
-def _extract_options(search_text: str) -> list[dict[str, Any]]:
-    """H016: превращает facts+near в индексированный список вариантов для follow-up."""
-    data = _json_from_text(search_text)
-    raw: list[Any] = []
-    for key in ("facts", "near"):
-        items = data.get(key, []) if isinstance(data, dict) else []
-        if isinstance(items, list):
-            raw.extend(items)
-
+def _options_from_raw_items(raw: list[Any], *, source: str, start_idx: int = 1) -> list[dict[str, Any]]:
+    """Normalize raw search result rows into option dicts without mixing sources."""
     options: list[dict[str, Any]] = []
     for item in raw:
         if not isinstance(item, dict):
@@ -3594,10 +5471,12 @@ def _extract_options(search_text: str) -> list[dict[str, Any]]:
             for key in _SCENARIO_BLOCK_KEYS
             if not _looks_missing(item.get(key))
         }
-        price_range = item.get("price_range") or item.get("prices") or ""
-        price = price_range or item.get("price") or item.get("cost") or item.get("min_price")
+        formatted_price = _format_item_price(item)
+        price_range = item.get("price_range") or item.get("prices") or formatted_price or ""
+        price = price_range or item.get("price") or item.get("cost") or formatted_price or item.get("min_price")
         opt = {
-            "idx": len(options) + 1,
+            "idx": start_idx + len(options),
+            "source": source,
             "name": item.get("name") or item.get("title") or "вариант",
             "location": item.get("location") or item.get("district") or "",
             "price": price or "",
@@ -3627,6 +5506,50 @@ def _extract_options(search_text: str) -> list[dict[str, Any]]:
         opt.update(_building_status_fields_from_item(item))
         opt.update(scenario_blocks)
         options.append(opt)
+    return options
+
+
+def _extract_search_result_options(search_text: str) -> dict[str, list[dict[str, Any]]]:
+    """Return exact facts separately from near alternatives."""
+    data = _json_from_text(search_text)
+    facts_raw = data.get("facts", []) if isinstance(data, dict) else []
+    near_raw = data.get("near", []) if isinstance(data, dict) else []
+    facts = _options_from_raw_items(facts_raw if isinstance(facts_raw, list) else [], source="facts", start_idx=1)
+    near = _options_from_raw_items(near_raw if isinstance(near_raw, list) else [], source="near", start_idx=len(facts) + 1)
+    return {"facts": facts[:8], "near": near[:8]}
+
+
+def _search_fact_from_option_card(option: dict[str, Any]) -> dict[str, Any]:
+    raw = dict(option.get("raw") or {}) if isinstance(option.get("raw"), dict) else {}
+    for key, value in option.items():
+        if key in {"raw", "idx", "visible_idx", "source"}:
+            continue
+        if _looks_missing(value):
+            continue
+        raw[key] = value
+    if option.get("name") and not raw.get("name"):
+        raw["name"] = option.get("name")
+    return raw
+
+
+def _search_result_with_enriched_facts(search_text: str, options: list[dict[str, Any]]) -> str:
+    data = _json_from_text(search_text)
+    if not isinstance(data, dict) or not isinstance(data.get("facts"), list) or not options:
+        return search_text
+    enriched_facts = [_search_fact_from_option_card(option) for option in options[:5] if isinstance(option, dict)]
+    if not enriched_facts:
+        return search_text
+    merged = dict(data)
+    merged["facts"] = enriched_facts
+    return json.dumps(merged, ensure_ascii=False)
+
+
+def _extract_options(search_text: str, *, include_near: bool = True) -> list[dict[str, Any]]:
+    """H016: превращает facts(+near by default) в индексированный список вариантов для follow-up."""
+    separated = _extract_search_result_options(search_text)
+    options = list(separated["facts"])
+    if include_near:
+        options.extend(separated["near"])
     return options[:8]
 
 
@@ -3781,6 +5704,23 @@ def _resolve_dialog_intent(text: str, state: dict) -> dict[str, Any]:
     return {"intent": "new_search"}
 
 
+def _is_explicit_operator_request(text: str) -> bool:
+    """Явный запрос на передачу оператору должен обходить общий поиск.
+
+    Это не про обычный follow-up по ЖК, а про фразы вроде «позови оператора»
+    / «менеджер» / «свяжи с человеком».
+    """
+    normalized = (text or "").lower().replace("ё", "е").strip()
+    if not normalized:
+        return False
+    return bool(
+        re.search(
+            r"\b(?:позови|позовите|оператор|менеджер|живой\s+человек|соедините|связ[ьи]|контакт|номер)\b",
+            normalized,
+        )
+    )
+
+
 def _needs_operator_for_selected_option(text_l: str) -> bool:
     """После выбора ЖК живые данные не придумываем: наличие/бронь/показ/ипотека — к оператору."""
     triggers = (
@@ -3867,8 +5807,8 @@ def _operator_funnel_sentence() -> str:
 
 def _phone_captured_farewell() -> str:
     return (
-        "Спасибо, номер получила. Передам оператору ваш запрос вместе с тем, что уже обсудили, "
-        "чтобы не начинать всё заново. Он свяжется с вами и проверит актуальные варианты, наличие и условия."
+        "Спасибо, номер получила. Заявку на обратный звонок сохранила вместе с тем, что мы уже обсудили, "
+        "чтобы не начинать всё заново. Специалист свяжется с вами и проверит актуальные варианты, наличие и условия."
     )
 
 
@@ -4574,6 +6514,8 @@ def _client_finishing_fact(value: Any) -> str:
     low = text.lower().replace("ё", "е")
     if "без отдел" in low:
         return "без отделки"
+    if "white box" in low or "вайт бокс" in low or "предчист" in low:
+        return "предчистовая отделка"
     if "отдел" in low or low in {"есть", "да", "true", "1"}:
         return "есть квартиры с отделкой"
     return text
@@ -4607,9 +6549,12 @@ def _client_price_fact(option: dict[str, Any]) -> str:
                 item = f"{value:.2f}".replace(".", ",").rstrip("0").rstrip(",")
                 pretty.append(item)
             return f"цены от {pretty[0]} до {pretty[1]} млн рублей"
-    price = re.sub(r"(\d)\.(\d)", r"\1,\2", str(price)).replace(" - ", " до ").replace(" – ", " до ")
+    price = re.sub(r"(\d)\.(\d)", r"\1,\2", str(price))
+    price = re.sub(r"(?<=\d)\s*[-–—]\s*(?=\d)", " до ", price)
     if " до " in price and not price.lower().startswith("от "):
         price = f"от {price}"
+    if "млн" in price.lower() and not re.search(r"руб|₽", price, re.IGNORECASE):
+        price = f"{price} рублей"
     return f"цены {price}" if str(price).startswith("от ") else f"цены {price}"
 
 
@@ -4664,6 +6609,15 @@ _FACT_KEY_LABELS: Final[dict[str, str]] = {
     "discount": "скидки",
     "payment_by_installments": "рассрочка",
     "demand": "подтверждённый спрос",
+    "mortgages": "ипотечные сделки",
+    "mortgage_deals": "ипотечные сделки",
+    "contracts": "договоры",
+    "position": "позиция в топе",
+    "last_deal_date": "последняя сделка",
+    "stat_price": "ценовая статистика",
+    "price_history": "история цены",
+    "class": "класс проекта",
+    "property_class": "класс проекта",
 }
 
 
@@ -4677,6 +6631,11 @@ _SCENARIO_BLOCK_KEYS: Final[tuple[str, ...]] = (
     "mortgage",
     "discount",
     "payment_by_installments",
+    "rooms",
+    "stat_price",
+    "price_history",
+    "class",
+    "property_class",
 )
 
 
@@ -4703,6 +6662,10 @@ def _fact_value_chunks(value: Any, key: Any = None) -> list[str]:
     if isinstance(value, (int, float)) and key is not None:
         if value == 0:
             return []
+        key_raw = str(key or "").strip().lower()
+        numeric_fact_keys = {"count", "count_ads", "count_discounts", "sales", "contracts", "mortgages", "mortgage_deals", "position"}
+        if key_raw in numeric_fact_keys:
+            return [f"{label}: {value}" if label else str(value)]
         return [label] if label and key in _FACT_KEY_LABELS else [f"{label}: {value}" if label else str(value)]
     if isinstance(value, dict):
         chunks: list[str] = []
@@ -4757,6 +6720,79 @@ def _infra_text(option: dict[str, Any]) -> str:
     return "; ".join(chunks)
 
 
+def _stage_confirmed_infra_items(option: dict[str, Any]) -> list[str]:
+    """Short confirmed infrastructure facts for first-list benefits.
+
+    The renderer must not invent names of schools/parks/yards. It can only re-use
+    facts already present in the option card, including generic but confirmed
+    facts such as "парк рядом" or "охрана / безопасность".
+    """
+    raw_items: list[str] = []
+    for key in ("schools", "kindergartens", "parks", "clinics", "yards", "playgrounds", "infrastructure", "shops", "services"):
+        raw_items.extend(_split_fact_text(option.get(key)))
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in raw_items:
+        text = re.sub(r"\s+", " ", str(raw or "")).strip(" ,;.")
+        if not text:
+            continue
+        low = text.lower().replace("ё", "е")
+        if "школ" in low:
+            label = text
+        elif re.search(r"детск\w*\s+сад|садик|садов", low):
+            label = text
+        elif re.search(r"парк|лес|зелен|набережн|водоем", low):
+            label = text
+        elif re.search(r"двор|без\s+машин", low):
+            label = text
+        elif re.search(r"детск\w*\s+площад", low):
+            label = text
+        elif re.search(r"спорт\w*\s+площад", low):
+            label = text
+        elif re.search(r"охран|безопас", low):
+            label = text
+        elif re.search(r"поликлиник|клиник|аптек", low):
+            label = text
+        else:
+            continue
+        compact = _compact_option_text(label)
+        if compact and compact not in seen:
+            seen.add(compact)
+            out.append(label)
+        if len(out) >= 3:
+            break
+    return out
+
+
+def _stage_self_use_infra_benefit(items: list[str]) -> str:
+    """Turn confirmed infrastructure labels into natural client copy."""
+    amenities: list[str] = []
+    security = ""
+    for raw in items:
+        text = str(raw or "").strip(" ,;.")
+        low = text.lower().replace("ё", "е")
+        if re.search(r"охран|безопас", low):
+            security = text
+            continue
+        if low == "парк рядом":
+            text = "парк"
+        amenities.append(text)
+
+    if amenities:
+        if len(amenities) == 1:
+            joined = amenities[0]
+        else:
+            joined = ", ".join(amenities[:-1]) + f" и {amenities[-1]}"
+        phrase = f"Рядом есть {joined}"
+        if security:
+            phrase += f", а в проекте предусмотрена {security}"
+        return phrase + "."
+    if security:
+        return f"В проекте предусмотрена {security}."
+    return ""
+
+
 def _scenario_fact_text(option: dict[str, Any], *keys: str) -> str:
     return _join_fact_values(*(option.get(key) for key in keys))
 
@@ -4766,6 +6802,24 @@ def _split_fact_text(value: Any) -> list[str]:
     if not text:
         return []
     return [part.strip() for part in re.split(r"\s*;\s*", text) if part.strip()]
+
+
+def _natural_fact_list(value: Any) -> str:
+    items = _split_fact_text(value)
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + f" и {items[-1]}"
+
+
+def _client_room_formats(value: Any) -> str:
+    natural = _natural_fact_list(value)
+    low = natural.lower().replace("ё", "е")
+    required = ("студи", "1-комнат", "2-комнат", "3-комнат", "4-комнат")
+    if all(token in low for token in required):
+        return "студии и квартиры от одной до четырёх комнат"
+    return natural
 
 
 def _investment_fact_text(option: dict[str, Any]) -> str:
@@ -4794,6 +6848,58 @@ def _rental_fact_text(option: dict[str, Any]) -> str:
         "counter_novos",
         "egrn_top_novos",
     )
+
+
+def _first_compact_fact(option: dict[str, Any], *keys: str, limit: int = 150) -> str:
+    for key in keys:
+        text = _join_fact_values(option.get(key))
+        if text:
+            return re.sub(r"\s+", " ", text).strip(" ,;.")[:limit]
+    return ""
+
+
+def _investment_transactions_summary(option: dict[str, Any]) -> str:
+    """Render only structured transaction facts in natural client language."""
+    raw = option.get("egrn_top_novos")
+    if not isinstance(raw, dict):
+        return ""
+    parts: list[str] = []
+    contracts = raw.get("contracts") or raw.get("sales")
+    mortgages = raw.get("mortgages") or raw.get("mortgage_deals")
+    last_deal = str(raw.get("last_deal_date") or "").strip()
+    if isinstance(contracts, (int, float)) and contracts > 0:
+        parts.append(f"договоры — {int(contracts):,}".replace(",", " "))
+    if isinstance(mortgages, (int, float)) and mortgages > 0:
+        parts.append(f"ипотечные сделки — {int(mortgages):,}".replace(",", " "))
+    if last_deal:
+        match = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", last_deal)
+        if match:
+            year, month, day = match.groups()
+            months = ("", "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря")
+            month_name = months[int(month)] if 1 <= int(month) <= 12 else month
+            last_deal = f"{int(day)} {month_name} {year} года"
+        parts.append(f"последняя сделка — {last_deal}")
+    return ", ".join(parts)
+
+
+def _investment_counter_summary(option: dict[str, Any]) -> str:
+    raw = option.get("counter_novos")
+    if not isinstance(raw, dict):
+        return ""
+    parts: list[str] = []
+    ads = raw.get("count_ads") or raw.get("count")
+    discounts = raw.get("count_discounts")
+    def counted(value: int, one: str, few: str, many: str) -> str:
+        mod100 = value % 100
+        mod10 = value % 10
+        noun = one if mod10 == 1 and mod100 != 11 else few if mod10 in {2, 3, 4} and mod100 not in {12, 13, 14} else many
+        return f"{value:,} {noun}".replace(",", " ")
+
+    if isinstance(ads, (int, float)) and ads > 0:
+        parts.append(counted(int(ads), "объявление", "объявления", "объявлений"))
+    if isinstance(discounts, (int, float)) and discounts > 0:
+        parts.append(f"{counted(int(discounts), 'предложение', 'предложения', 'предложений')} со скидкой")
+    return " и ".join(parts)
 
 
 def _has_fact_kind(option: dict[str, Any], kind: str) -> bool:
@@ -4857,17 +6963,26 @@ def _stage_option_fact_parts(option: dict[str, Any], scenario: str = "self_use")
         for key in ("schools", "kindergartens", "parks", "clinics", "yards", "infrastructure"):
             add_infra(parts, key)
     elif scenario == "investment":
-        investment = _investment_fact_text(option)
-        if investment:
-            parts.extend(_split_fact_text(investment)[:4])
-        for key in ("price", "area", "ready", "finishing", "location", "metro"):
+        for key in ("location", "price", "ready"):
+            if base.get(key):
+                parts.append(base[key])
+        ads = _first_compact_fact(option, "ads", "counter_novos")
+        if ads:
+            parts.append(ads)
+        apartment_types = _first_compact_fact(option, "apartment_types", "rooms")
+        if apartment_types:
+            parts.append(_client_room_formats(apartment_types))
+        for key in ("metro", "finishing"):
             if base.get(key):
                 parts.append(base[key])
     elif scenario == "rental":
-        rental = _rental_fact_text(option)
-        if rental:
-            parts.extend(_split_fact_text(rental)[:4])
-        for key in ("area", "finishing", "metro", "ready", "location", "price"):
+        for key in ("location", "price"):
+            if base.get(key):
+                parts.append(base[key])
+        apartment_types = _first_compact_fact(option, "apartment_types", "rooms")
+        if apartment_types:
+            parts.append(_client_room_formats(apartment_types))
+        for key in ("ready", "metro", "finishing"):
             if base.get(key):
                 parts.append(base[key])
     elif scenario == "fast_move":
@@ -4875,13 +6990,13 @@ def _stage_option_fact_parts(option: dict[str, Any], scenario: str = "self_use")
             if base.get(key):
                 parts.append(base[key])
     else:
-        for key in ("location", "ready", "finishing", "area", "price", "metro"):
+        for key in ("location", "price", "metro", "finishing", "ready", "area"):
             if base.get(key):
                 parts.append(base[key])
         infra = _infra_text(option)
         if infra:
             parts.append(infra)
-    return _compact_stage_fact_parts(parts, limit=5 if scenario == "family" else 4)
+    return _compact_stage_fact_parts(parts, limit=5)
 
 
 def _compact_stage_fact_parts(parts: list[str], limit: int = 4) -> list[str]:
@@ -4914,20 +7029,68 @@ def _stage_option_benefit(option: dict[str, Any], scenario: str, used: set[str])
     parks = _join_fact_values(option.get("parks"))
     clinics = _join_fact_values(option.get("clinics"))
     yards = _join_fact_values(option.get("yards"))
+    confirmed_infra = _stage_confirmed_infra_items(option)
+    apt_types = _first_compact_fact(option, "apartment_types", "rooms")
+    counters = _first_compact_fact(option, "counter_novos", "ads")
+    counter_summary = _investment_counter_summary(option)
+    no_finishing = _client_finishing_fact(option.get("finishing")).lower().startswith("без отдел")
+
+    role_key, _role_label = _stage_supported_strategy(option, scenario)
+    role_benefits: dict[str, str] = {}
+    if scenario == "investment":
+        if role_key == "horizon" and ready and price:
+            role_benefits["role_invest_horizon"] = f"{price.capitalize()}, а по срокам {ready}. Это честно показывает компромисс: бюджет понятен сейчас, но до использования квартиры нужно ждать сдачу."
+        elif role_key == "entry" and price:
+            role_benefits["role_invest_entry"] = f"Диапазон цены: {price}. Так вариант можно сравнить с другими ЖК по бюджету без прогнозов и обещаний."
+        elif role_key == "showcase" and counters:
+            role_benefits["role_invest_showcase"] = f"Сейчас в проекте представлено {counter_summary or counters}. Это помогает оценить доступный выбор и действующие условия покупки."
+    elif scenario == "family":
+        if role_key == "green" and (parks or yards):
+            green_text = _natural_fact_list(_join_fact_values(parks, yards))
+            role_benefits["role_family_green"] = f"{green_text.capitalize()} дают семейный плюс для прогулок и игр рядом с домом. Компромисс в том, что школу и сад лучше отдельно сверить по конкретному корпусу."
+        elif role_key == "ready_transport" and ready and metro:
+            role_benefits["role_family_ready_transport"] = f"{ready.capitalize()}, а метро {metro}. Это удобно, если семье важны понятный срок переезда и ежедневная дорога."
+        elif role_key == "daily" and infra:
+            role_benefits["role_family_daily"] = f"{infra} помогают закрывать повседневные семейные дела рядом с домом."
+    elif scenario == "rental":
+        if role_key == "ready_transport" and ready and metro:
+            role_benefits["role_rental_ready_transport"] = f"{ready.capitalize()}, метро {metro}. Квартиру можно рассматривать без ожидания стройки, а дорогу удобно объяснить будущему жильцу."
+        elif role_key == "compact_entry" and apt_types and price:
+            role_benefits["role_rental_compact_entry"] = f"Доступны {_client_room_formats(apt_types)}, {price}. Это помогает сравнить компактный формат и стартовый бюджет без обещаний по аренде."
+        elif role_key == "prep" and no_finishing:
+            role_benefits["role_rental_prep"] = "Без отделки — это не плюс сам по себе: перед использованием квартиры нужно заранее учесть подготовку и расходы на ремонт."
+    elif scenario == "self_use":
+        if role_key == "ready_green" and ready:
+            green_text = _natural_fact_list(_join_fact_values(parks, yards)) or "рядом есть место для прогулок"
+            role_benefits["role_self_ready_green"] = f"{ready.capitalize()}. {green_text.capitalize()}. Это удобно, если хочется понятный срок переезда и место для прогулок рядом."
+        elif role_key == "quarter" and infra:
+            role_benefits["role_self_quarter"] = f"{infra.capitalize()} помогают решать бытовые дела рядом с домом, без лишних поездок по району."
+
+    for key, phrase in role_benefits.items():
+        if key not in used:
+            used.add(key)
+            return phrase
 
     candidates: list[tuple[str, str]] = []
+    profile = _scenario_enrichment_profile(scenario)
     if scenario == "family":
         edu = _join_fact_values(schools, kindergartens)
         if edu:
-            candidates.append((f"edu_family:{_compact_option_text(edu)}", f"Для семьи это удобно: {edu} помогают закрыть ежедневную рутину рядом с домом."))
+            school_low = schools.lower().replace("ё", "е")
+            kindergarten_low = kindergartens.lower().replace("ё", "е")
+            if "территор" in school_low and "территор" in kindergarten_low and "ряд" in school_low:
+                edu_client = "На территории комплекса есть школа и детские сады, а другие школы находятся рядом"
+            else:
+                edu_client = f"Рядом или на территории комплекса есть {_natural_fact_list(edu)}"
+            candidates.append((f"schools_kindergartens_family:{_compact_option_text(edu)}", f"{edu_client}. Это позволит тратить меньше времени на ежедневные поездки между домом, садом и школой."))
         if parks:
-            candidates.append((f"park_family:{_compact_option_text(parks)}", f"Для прогулок с детьми рядом есть {parks}."))
+            candidates.append((f"park_family:{_compact_option_text(parks)}", f"{parks} дают понятный семейный плюс: рядом есть место для прогулок с детьми, а не только двор у дома."))
         if clinics:
             candidates.append((f"clinic_family:{_compact_option_text(clinics)}", f"{clinics} рядом — полезный плюс, когда важно быстро решать бытовые вопросы семьи."))
         if yards:
-            candidates.append((f"yard_family:{_compact_option_text(yards)}", f"{yards} добавляют удобства для прогулок и игр рядом с домом."))
+            candidates.append((f"yard_family:{_compact_option_text(yards)}", f"{yards} важны для семьи тем, что ребёнку есть где играть рядом с домом, без лишней дороги до площадок."))
         if infra:
-            candidates.append((f"infra_family:{_compact_option_text(infra)}", f"Для семьи здесь важны повседневные опоры: {infra}."))
+            candidates.append((f"infra_family:{_compact_option_text(infra)}", f"{infra} помогают закрывать повседневные семейные дела рядом с домом."))
         if ready == "дом уже сдан":
             candidates.append(("ready_family", "Готовый дом проще планировать для переезда семьи."))
         if finishing:
@@ -4937,59 +7100,87 @@ def _stage_option_benefit(option: dict[str, Any], scenario: str, used: set[str])
         if price:
             candidates.append(("price_family", "По цене сразу понятно, с какого бюджета смотреть этот вариант."))
     elif scenario == "investment":
-        why = str(option.get("why_investment") or "").strip()
-        if len(why) >= 25:
-            candidates.append((f"why_invest:{_compact_option_text(why)}", why))
-        invest = _investment_fact_text(option)
-        if invest:
-            candidates.append((f"facts_invest:{_compact_option_text(invest)}", f"Для инвестиционного сценария здесь есть проверяемые опоры: {invest}."))
-        if price:
-            candidates.append(("price_invest", "По цене сразу понятно, с чем сравнивать этот вариант."))
+        egrn = _first_compact_fact(option, "egrn_top_novos")
+        transactions = _investment_transactions_summary(option)
+        counters = _first_compact_fact(option, "counter_novos", "ads")
+        counter_summary = _investment_counter_summary(option)
+        apt_types = _first_compact_fact(option, "apartment_types", "rooms")
+        if egrn:
+            transaction_text = transactions or egrn
+            candidates.append((f"egrn_top_novos_invest:{_compact_option_text(egrn)}", f"По проекту есть данные о сделках: {transaction_text}. Они показывают фактическую активность покупателей и помогают сопоставить проект с другими ЖК."))
+        if counters:
+            counter_text = counter_summary or counters
+            candidates.append((f"counter_novos_invest:{_compact_option_text(counters)}", f"Сейчас в проекте представлено {counter_text}. Это помогает оценить доступный выбор и действующие условия покупки."))
+        if apt_types:
+            candidates.append((f"apartment_types_invest:{_compact_option_text(apt_types)}", f"Доступны {_client_room_formats(apt_types)}. Это позволяет выбрать формат под запланированный бюджет покупки."))
         if finishing:
-            candidates.append(("finish_invest", "Отделка уменьшает объём работ и вложений после покупки."))
+            candidates.append(("finish_invest", "Отделка помогает спокойнее планировать старт после покупки: меньше вопросов с ремонтом."))
         if ready == "дом уже сдан":
-            candidates.append(("ready_invest", "Готовый дом проще оценивать без долгого ожидания сдачи."))
-    elif scenario == "rental":
-        why = str(option.get("why_rental") or "").strip()
-        if len(why) >= 25:
-            candidates.append((f"why_rental:{_compact_option_text(why)}", why))
-        rental = _rental_fact_text(option)
-        if rental:
-            candidates.append((f"facts_rental:{_compact_option_text(rental)}", f"Под аренду здесь важны проверяемые опоры: {rental}."))
-        if finishing:
-            candidates.append(("finish_rental", "Отделка снижает стартовые работы перед заселением арендатора."))
+            candidates.append(("ready_invest", "Готовый дом меняет горизонт сделки: не нужно закладывать ожидание строительства перед дальнейшим использованием квартиры."))
         if metro:
-            candidates.append(("metro_rental", "Метро рядом проще объяснить будущему арендатору как ежедневное удобство."))
+            candidates.append(("metro_invest", "Метро рядом даёт понятный аргумент при сравнении локаций."))
+        if area:
+            candidates.append(("area_invest", f"По площади есть ориентир {area}, можно сравнивать конкретные планировки."))
+        if finishing:
+            candidates.append(("finish_invest_2", "С отделкой меньше стартовых работ после сделки."))
+        if price:
+            price_sentence = price[:1].upper() + price[1:]
+            candidates.append(("price_invest", f"{price_sentence} показывает порог входа: можно сразу сравнить стартовый бюджет с другими ЖК без прогнозов."))
+    elif scenario == "rental":
+        rental = _rental_fact_text(option)
+        apt_types = _first_compact_fact(option, "apartment_types", "rooms")
+        counters = _first_compact_fact(option, "counter_novos", "ads")
+        if apt_types:
+            candidates.append((f"apartment_types_rental:{_compact_option_text(apt_types)}", f"В проекте доступны {_client_room_formats(apt_types)}. Разнообразие планировок помогает выбрать формат под запланированный бюджет и подготовку квартиры."))
+        if finishing:
+            candidates.append(("finish_rental", f"{finishing} снижает объём подготовки перед тем, как показывать квартиру будущему жильцу."))
+        if metro:
+            candidates.append(("metro_rental", f"Метро {metro} важно для будущего жильца: проще планировать ежедневную дорогу, но это не обещает финансовый результат."))
         if ready == "дом уже сдан":
-            candidates.append(("ready_rental", "Готовый дом можно рассматривать без ожидания сдачи."))
+            candidates.append(("ready_rental", "Готовый дом означает, что квартиру можно готовить к использованию без ожидания завершения строительства."))
+        if rental:
+            candidates.append((f"facts_rental:{_compact_option_text(rental)}", f"Для аренды здесь важны факты {rental}: они помогают сравнить формат, подготовку и дорогу будущего жильца."))
+        if counters:
+            candidates.append((f"counter_novos_rental:{_compact_option_text(counters)}", f"На витрине видно {counters}; это можно учитывать как текущую карточку выбора, но не как обещание финансового результата."))
     elif scenario == "metro_access":
         if metro:
             candidates.append(("metro", "Метро рядом — это удобно для ежедневных поездок."))
         if price:
             candidates.append(("price_metro", "Цена помогает сразу сравнить варианты по бюджету и локации."))
     else:
-        if _has_fact_kind(option, "park"):
-            candidates.append(("park_self", "Зелёная зона рядом — приятный плюс для прогулок и повседневной жизни."))
-        if _has_fact_kind(option, "clinic") or _has_fact_kind(option, "school") or _has_fact_kind(option, "kindergarten"):
-            candidates.append(("infra_self", "Инфраструктура рядом помогает проще решать повседневные дела."))
-        if _has_fact_kind(option, "yard"):
-            candidates.append(("yard_self", "Дворовая инфраструктура добавляет удобства рядом с домом."))
+        if confirmed_infra:
+            infra_text = ", ".join(confirmed_infra)
+            infra_benefit = _stage_self_use_infra_benefit(confirmed_infra)
+            if infra_benefit:
+                candidates.append((f"infra_self:{_compact_option_text(infra_text)}", infra_benefit))
         if ready == "дом уже сдан":
-            candidates.append(("ready", "Готовый дом проще планировать для переезда."))
+            candidates.append(("ready", "Готовый дом полезен для себя тем, что срок переезда понятнее и не завязан на ожидание стройки."))
         if finishing:
-            candidates.append(("finish", "С отделкой меньше ремонтных хлопот после покупки."))
+            candidates.append(("finish", f"{finishing} означает меньше ремонтных работ после покупки и более понятный старт жизни в квартире."))
         if area:
             candidates.append(("area", f"По площади есть ориентир {area}, проще выбрать подходящий формат."))
         if price:
-            candidates.append(("price", "По цене сразу понятен стартовый бюджет."))
+            candidates.append(("price", f"{price} сразу задаёт рамку бюджета, чтобы не сравнивать варианты вслепую."))
         if metro:
-            candidates.append(("metro", "Метро рядом — удобно для ежедневных поездок."))
+            candidates.append(("metro", f"Близость метро помогает экономить время на ежедневных поездках на работу, учёбу и встречи."))
 
-    for key, phrase in candidates:
+    if profile.utp_priority and candidates:
+        def priority(item: tuple[str, str]) -> int:
+            candidate_key = item[0]
+            for pos, source_key in enumerate(profile.utp_priority):
+                if source_key in candidate_key:
+                    return pos
+            return len(profile.utp_priority)
+        candidates = sorted(enumerate(candidates), key=lambda item: (priority(item[1]), item[0]))
+        ordered_candidates = [item for _idx, item in candidates]
+    else:
+        ordered_candidates = candidates
+
+    for key, phrase in ordered_candidates:
         if key not in used:
             used.add(key)
             return phrase
-    return candidates[0][1] if candidates else "Можно выбрать этот вариант и дальше проверить конкретные квартиры."
+    return ordered_candidates[0][1] if ordered_candidates else "Можно выбрать этот вариант и дальше проверить конкретные квартиры."
 
 
 _SALES_PHRASE_BAD_RE = re.compile(
@@ -5028,15 +7219,14 @@ def _stage_sales_allowed_angles(option: dict[str, Any], scenario: str) -> list[s
         if price:
             angles.append("цена даёт понятный ориентир для семейного бюджета")
     elif scenario == "investment":
-        invest = _investment_fact_text(option)
-        if invest:
-            angles.append(f"использовать только проверяемые инвестиционные факты: {invest}")
         if price:
             angles.append("цена даёт понятную точку входа для сравнения")
         if finishing:
             angles.append("отделка уменьшает объём работ после покупки")
         if ready == "дом уже сдан":
             angles.append("готовый дом проще оценивать без ожидания сдачи")
+        if metro:
+            angles.append("метро рядом можно использовать только как подтверждённый факт локации")
         angles.append("не обещать доходность, аренду или рост цены")
     elif scenario == "rental":
         rental = _rental_fact_text(option)
@@ -5155,6 +7345,142 @@ def _stage_lead_for_first_list(scenario: str, count: int, options: list[dict[str
     return _stage_lead_for_first_list_context(scenario, word, options)
 
 
+def _criterion_has_fact(option: dict[str, Any], key: str) -> bool:
+    if key == "price":
+        return bool(_client_price_fact(option))
+    if key == "ready":
+        return bool(_client_ready_fact(option.get("ready") or option.get("status") or option.get("delivered")))
+    if key == "finishing":
+        return bool(_client_finishing_fact(option.get("finishing")))
+    if key == "area":
+        return bool(_client_area_fact(option.get("area")))
+    if key == "infrastructure":
+        return bool(_infra_text(option))
+    return not _looks_missing(option.get(key))
+
+
+def _scenario_criteria_intro(scenario: str, word: str, options: list[dict[str, Any]] | None, params_context: str = "") -> str:
+    profile = _scenario_enrichment_profile(scenario)
+    visible = [option for option in (options or [])[:3] if isinstance(option, dict)]
+    backed: list[tuple[str, str]] = []
+    for key, label, meaning in profile.criteria:
+        if any(_criterion_has_fact(option, key) for option in visible):
+            backed.append((label, meaning))
+        if len(backed) >= 4:
+            break
+    context = f" {params_context}" if params_context else ""
+    singular = len(visible) == 1
+    selection = "вариант" if singular else word
+    prefix = {
+        "investment": f"Подобрала {selection}{context} для инвестиций.",
+        "family": f"Подобрала {selection}{context} для семейной жизни.",
+        "rental": f"Подобрала {selection}{context} для покупки под сдачу.",
+        "self_use": f"Подобрала {selection}{context} для комфортной жизни.",
+    }.get(scenario, f"Нашла {word}{context} для сравнения.")
+    if not backed:
+        return f"{prefix} {profile.intro}."
+    labels = ", ".join(label for label, _meaning in backed)
+    explanation = {
+        "investment": "Эти параметры помогают понять необходимый бюджет, доступные форматы и срок ожидания квартиры.",
+        "family": "Эти критерии показывают, насколько удобно будет организовать обычный день с ребёнком.",
+        "rental": "Эти критерии помогают оценить бюджет покупки, объём подготовки квартиры и удобство будущего жильца.",
+        "self_use": "Эти критерии помогают оценить ежедневные маршруты, бытовое удобство и срок возможного переезда.",
+    }.get(scenario, "Они помогают выбрать подходящий вариант под задачу клиента.")
+    return f"{prefix} В первую очередь обращала внимание на {labels}. {explanation}"
+
+
+def _stage_next_question(scenario: str, visible: list[dict[str, Any]]) -> str:
+    if len(visible) == 1:
+        return "Рассказать подробнее о доступных квартирах и актуальных ценах в этом ЖК?"
+    return "Какой из этих ЖК вас заинтересовал больше всего — рассказать о нём подробнее?"
+
+
+def _stage_supported_strategy(option: dict[str, Any], scenario: str) -> tuple[str, str]:
+    """Conservative, fact-backed role label for a visible shortlist card.
+
+    The label is only based on structured fields already present in the option.
+    It must not imply yield, demand, liquidity, developer quality or promises.
+    """
+    ready = _client_ready_fact(option.get("ready") or option.get("status") or option.get("delivered"))
+    finishing = _client_finishing_fact(option.get("finishing"))
+    price = _client_price_fact(option)
+    apt_types = _first_compact_fact(option, "apartment_types", "rooms")
+    metro = "" if _looks_missing(option.get("metro")) else str(option.get("metro"))
+    egrn = _investment_transactions_summary(option) or _first_compact_fact(option, "egrn_top_novos")
+    counters = _investment_counter_summary(option) or _first_compact_fact(option, "counter_novos", "ads")
+    has_education = bool(_join_fact_values(option.get("schools"), option.get("kindergartens")))
+    has_green = bool(_join_fact_values(option.get("parks"), option.get("yards")))
+    has_daily_infra = bool(_join_fact_values(option.get("shops"), option.get("clinics"), option.get("infrastructure")))
+    ready_future = "сдача запланирована" in ready
+    ready_done = ready == "дом уже сдан"
+    no_finishing = "без отдел" in finishing.lower()
+    compact = bool(apt_types and re.search(r"студи|1-комнат|однокомнат", apt_types.lower().replace("ё", "е")))
+
+    if scenario == "investment":
+        if egrn:
+            return "history", "вариант с фактической историей сделок"
+        if price and ready_future:
+            return "horizon", "вариант с понятным бюджетом и горизонтом строительства"
+        if counters:
+            return "showcase", "вариант с текущим выбором квартир"
+        if price:
+            return "entry", "вариант для сравнения по бюджету покупки"
+    elif scenario == "family":
+        if has_education:
+            return "education", "семейная инфраструктура рядом или на территории"
+        if has_green:
+            return "green", "прогулки, двор и зелёная среда"
+        if ready_done and metro:
+            return "ready_transport", "готовность и удобная ежедневная дорога"
+        if has_daily_infra:
+            return "daily", "повседневные сервисы для семьи"
+    elif scenario == "rental":
+        if ready_done and metro:
+            return "ready_transport", "готовый вариант с удобной дорогой"
+        if compact and price:
+            return "compact_entry", "компактный формат и понятный бюджет покупки"
+        if no_finishing:
+            return "prep", "вариант, где нужно заранее учесть подготовку квартиры"
+        if compact:
+            return "compact", "компактный формат для сравнения"
+    elif scenario == "self_use":
+        if metro:
+            return "city", "городская повседневность и метро"
+        if ready_done and has_green:
+            return "ready_green", "готовый вариант рядом с прогулочными местами"
+        if has_daily_infra:
+            return "quarter", "квартальная инфраструктура для обычного дня"
+        if ready_done:
+            return "ready", "понятный срок переезда"
+    return "neutral", "вариант для сравнения по доступным фактам"
+
+
+def _select_stage_visible_options(options: list[dict[str, Any]], scenario: str, max_options: int = 3) -> list[dict[str, Any]]:
+    """Pick up to three deterministic cards, preferring supported role diversity."""
+    valid = [option for option in options if isinstance(option, dict)]
+    if len(valid) <= max_options:
+        return valid[:max_options]
+    selected: list[dict[str, Any]] = []
+    selected_ids: set[int] = set()
+    seen_roles: set[str] = set()
+    for idx, option in enumerate(valid):
+        role_key, _label = _stage_supported_strategy(option, scenario)
+        if role_key == "neutral" or role_key in seen_roles:
+            continue
+        selected.append(option)
+        selected_ids.add(idx)
+        seen_roles.add(role_key)
+        if len(selected) >= max_options:
+            return selected
+    for idx, option in enumerate(valid):
+        if idx in selected_ids:
+            continue
+        selected.append(option)
+        if len(selected) >= max_options:
+            break
+    return selected[:max_options]
+
+
 def _first_list_params_context(params: dict[str, Any] | None) -> str:
     p = params or {}
     parts: list[str] = []
@@ -5182,11 +7508,11 @@ def _stage_lead_for_first_list_context(scenario: str, word: str, options: list[d
     context = f" {params_context}" if params_context else ""
     count = min(len(options or []), 3) or (3 if "три" in word else 2)
     if scenario == "family":
-        return f"Подобрала {word}{context} для семьи."
+        return _scenario_criteria_intro(scenario, word, options, params_context)
     if scenario == "investment":
-        return f"Подобрала {word}{context} под инвестицию."
+        return _scenario_criteria_intro(scenario, word, options, params_context)
     if scenario == "rental":
-        return f"Подобрала {word}{context} под аренду."
+        return _scenario_criteria_intro(scenario, word, options, params_context)
     if scenario == "metro_access":
         metro_count = sum(1 for option in (options or [])[:3] if not _looks_missing(option.get("metro")))
         if metro_count >= min(2, count):
@@ -5194,6 +7520,8 @@ def _stage_lead_for_first_list_context(scenario: str, word: str, options: list[d
         return f"Нашла {word}{context}, которые можно сравнить по цене и локации."
     if scenario == "budget":
         return f"Нашла {word}{context} по бюджету."
+    if scenario == "self_use":
+        return _scenario_criteria_intro(scenario, word, options, params_context)
     return f"Нашла {word}{context} для сравнения."
 
 
@@ -5223,23 +7551,56 @@ async def _sales_phrases_for_stage(
 
 
 def _render_stage_first_list(options: list[dict[str, Any]], scenario: str, sales_benefits: dict[int, str] | None = None, params_context: str = "") -> str:
-    visible = options[:3]
+    visible = _select_stage_visible_options(options, scenario, max_options=3)
     used: set[str] = set()
     sales_benefits = sales_benefits or {}
     word = "три варианта" if len(visible) >= 3 else "несколько вариантов"
     blocks = [_stage_lead_for_first_list_context(scenario, word, visible, params_context)]
     for idx, option in enumerate(visible, start=1):
         facts = ", ".join(_stage_option_fact_parts(option, scenario))
-        benefit = sales_benefits.get(idx) or _stage_option_benefit(option, scenario, used)
+        deterministic_scenario = scenario in SCENARIO_ENRICHMENT_PROFILES
+        benefit = _stage_option_benefit(option, scenario, used) if deterministic_scenario else sales_benefits.get(idx) or _stage_option_benefit(option, scenario, used)
         name = option.get("name") or f"вариант {idx}"
+        _role_key, role_label = _stage_supported_strategy(option, scenario)
         line = f"{idx}. {name}"
+        if role_label:
+            line += f" — {role_label}"
         if facts:
-            line += f" — {facts}"
+            line += f". {facts}"
         # Комментарий к ЖК должен быть отдельным абзацем, а не «прилипшей» строкой
         # под пунктом списка. Так Telegram-ответ читается как карточка: факт → польза.
         blocks.append(f"{_ensure_sentence_period(line)}\n\n{benefit}")
-    blocks.append("Какой ЖК хотите рассмотреть подробнее?")
+    blocks.append(_stage_next_question(scenario, visible))
     return _format_numbered_list_spacing("\n\n".join(blocks))
+
+
+def render_current_options_answer(
+    options: list[dict[str, Any]],
+    scenario: str,
+    selected_option: dict[str, Any] | None = None,
+    scope: str = "all",
+) -> str:
+    """Deterministic current-options answer for canonical scenario follow-ups.
+
+    Public-ish wrapper for the scenario renderer: no LLM, no extra facts.  It is
+    intentionally limited to scenarios whose first-list renderer is conservative
+    and fact-backed.
+    """
+    scenario_key = str(scenario or "").strip().lower()
+    if scenario_key not in {"rental", "investment"}:
+        return ""
+
+    scope_key = str(scope or "all").strip().lower()
+    if scope_key == "one":
+        if not isinstance(selected_option, dict) or not selected_option:
+            return ""
+        visible = [selected_option]
+    else:
+        visible = [option for option in (options or []) if isinstance(option, dict) and option]
+
+    if not visible:
+        return ""
+    return _render_stage_first_list(visible[:3], scenario_key)
 
 
 def _render_stage_single_first_result(option: dict[str, Any], scenario: str) -> str:
@@ -5548,6 +7909,7 @@ def _reason_layer_fact_payload(option: dict[str, Any]) -> dict[str, Any]:
         "location", "price", "price_min", "price_range", "finishing", "ready", "area", "metro", "why_close",
         "why_family", "why_investment", "why_rental", "schools", "kindergartens", "parks", "yards", "infrastructure",
         "ads", "apartment_types", "egrn_top_novos", "counter_novos", "mortgage_calc", "mortgage", "discount",
+        "payment_by_installments",
     ):
         value = option.get(key)
         if not _looks_missing(value):
@@ -6127,10 +8489,28 @@ def _infer_scenario(state: dict, search_meta: dict) -> str:
 
 def _refresh_search_state(state: dict, search_meta: dict) -> None:
     """Обновляет память по последнему поиску: raw search_response, options, counters."""
+    four_layer_options = search_meta.get("_four_layer_visible_options") if isinstance(search_meta, dict) else None
+    if isinstance(four_layer_options, list):
+        safe_options = [item for item in four_layer_options[:3] if isinstance(item, dict)]
+        state["last_search_response"] = {}
+        state["last_options"] = safe_options
+        state["last_near_options"] = []
+        state["last_result"] = {
+            "found": bool(safe_options),
+            "exact_count": len(safe_options),
+            "near_count": 0,
+            "geo_mismatch": False,
+        }
+        return
     search_text = search_meta.get("_response_text") or ""
     search_resp = _json_from_text(search_text)
     state["last_search_response"] = search_resp if isinstance(search_resp, dict) else {}
-    state["last_options"] = _filter_rejected_options(_extract_options(search_text), state)
+    separated = _extract_search_result_options(search_text)
+    # Exact facts remain the only primary dialog memory. Near alternatives are
+    # intentionally retained separately so a later follow-up cannot mistake
+    # them for matches to the client's non-negotiable conditions.
+    state["last_options"] = _filter_rejected_options(separated["facts"], state)
+    state["last_near_options"] = _filter_rejected_options(separated["near"], state)
     facts = search_resp.get("facts", []) if isinstance(search_resp, dict) else []
     near = search_resp.get("near", []) if isinstance(search_resp, dict) else []
     state["last_result"] = {
@@ -6151,52 +8531,26 @@ def _option_enrichment_key(option: dict[str, Any], scenario: str) -> str:
 def _build_option_enrichment_query(option: dict[str, Any], scenario: str) -> str:
     name = _display_complex_name(option.get("name") or "")
     location = _format_location_value(option.get("location")) if not _looks_missing(option.get("location")) else ""
-    scenario_label = {
-        "family": "семья с детьми",
-        "investment": "инвестиционный выбор без обещаний доходности",
-        "metro_access": "важна транспортная доступность и метро",
-        "budget": "важен бюджет и честные компромиссы",
-        "fast_move": "важно быстрее переехать",
-    }.get(scenario, "покупка для себя")
-    common_fields = [
-        "район / локация",
-        "цены и минимальная цена",
-        "площади",
-        "типы квартир / комнатность",
-        "отделка",
-        "готовность / сдан ли дом",
-        "метро, расстояние до метро и транспорт",
-        "застройщик",
-    ]
-    scenario_fields = {
-        "family": [
-            "школы",
-            "детские сады",
-            "парки, лес, зелёные зоны, набережные",
-            "поликлиники и аптеки",
-            "дворы без машин",
-            "игровые и спортивные площадки",
-            "магазины и сервисы на первых этажах",
-        ],
-        "investment": [
-            "транспортная доступность",
-            "готовность",
-            "отделка",
-            "ценовой диапазон без прогнозов доходности",
-        ],
-        "metro_access": ["метро", "пешая доступность", "транспорт", "цены рядом с метро"],
-        "budget": ["бюджетные ограничения", "почему вариант близок", "честные отличия и компромиссы"],
-        "fast_move": ["готовые корпуса", "выдача ключей", "отделка", "что помогает быстрее переехать"],
-    }.get(scenario, ["инфраструктура", "магазины", "сервисы", "парки", "клиники"])
-    fields = common_fields + scenario_fields
+    profile = _scenario_enrichment_profile(scenario)
+    fields = _COMMON_ENRICHMENT_FIELDS + profile.fields
     loc_line = f"\nЛокация из текущей карточки: {location}." if location else ""
     return (
-        f"Раскрой подробно {name} для сценария: {scenario_label}.{loc_line}\n\n"
+        f"Раскрой подробно {name} для сценария: {profile.label}.{loc_line}\n\n"
+        "Клиентская логика сценария:\n"
+        f"- {profile.intro};\n"
+        + "\n".join(f"- {label}: {meaning};" for _key, label, meaning in profile.criteria)
+        + "\n\nБезопасные правила факт → польза:\n"
+        + "\n".join(f"- {rule};" for rule in profile.benefit_rules)
+        + "\n\nЗапрещённые неподтверждённые выводы:\n"
+        + "\n".join(f"- {claim};" for claim in profile.forbidden_claims)
+        + "\n\n"
         "Нужны только реальные MCP-факты по полям:\n"
         + "\n".join(f"- {field};" for field in fields)
         + "\n\nВерни JSON facts/near/missing/params. "
         "Не выдумывай. Если поля нет — не добавляй. "
-        "Для facts[0] скопируй все доступные поля MCP, включая infrastructure/infrastructure_family."
+        "Для facts[0] скопируй все доступные поля MCP, включая infrastructure/infrastructure_family, "
+        "ads, apartment_types, rooms, egrn_top_novos, counter_novos, discounts, stat_price. "
+        "Не добавляй прогнозы доходности, аренды, спроса, ликвидности или роста цены."
     )
 
 
@@ -6228,7 +8582,10 @@ def _best_enriched_option(parsed: dict[str, Any], base_option: dict[str, Any]) -
     if not isinstance(parsed, dict):
         return None
     raw = json.dumps(parsed, ensure_ascii=False)
-    options = _extract_options(raw)
+    # Enrichment should only merge exact facts for the already selected primary
+    # option. Near alternatives are stored separately and must not silently
+    # replace/reshape the option card.
+    options = _extract_options(raw, include_near=False)
     if not options:
         return None
     base_key = _compact_name_key(base_option.get("name"))
@@ -6287,6 +8644,85 @@ async def _prefetch_options_enrichment(
             raise
         except Exception:
             LOGGER.exception("option enrichment prefetch failed: key=%s", key)
+
+
+async def _enrich_top_options_for_first_list(
+    client: OvermindClient,
+    state: dict[str, Any],
+    options: list[dict[str, Any]],
+    scenario: str,
+    *,
+    max_options: int = 3,
+    total_timeout: float = OPTION_ENRICHMENT_TOP3_WAIT,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Bounded top-card enrichment before the first visible shortlist.
+
+    Each item falls back to its base card on timeout/failure. Successful results
+    are cached for later follow-ups, and order always matches the base shortlist.
+    """
+    if not OPTION_ENRICHMENT_ENABLED or not options:
+        return options, {"enabled": OPTION_ENRICHMENT_ENABLED, "applied": False, "count": 0}
+
+    cache = state.setdefault("enriched_options", {})
+    visible = [option for option in options[:max_options] if isinstance(option, dict)]
+    rest = list(options[max_options:])
+    results: list[dict[str, Any]] = list(visible)
+    item_meta: list[dict[str, Any]] = []
+    tasks: dict[asyncio.Task, tuple[int, str, dict[str, Any]]] = {}
+
+    for idx, option in enumerate(visible):
+        key = _option_enrichment_key(option, scenario)
+        cached = cache.get(key) if key else None
+        if isinstance(cached, dict) and isinstance(cached.get("option"), dict):
+            results[idx] = cached["option"]
+            item_meta.append({"idx": idx + 1, "key": key, "applied": True, "source": "cache"})
+            continue
+        if not key:
+            item_meta.append({"idx": idx + 1, "key": key, "applied": False, "skipped": "missing_key"})
+            continue
+        task = asyncio.create_task(_enrich_option(client, option, scenario, timeout=OPTION_ENRICHMENT_TIMEOUT))
+        tasks[task] = (idx, key, option)
+
+    if tasks:
+        done: set[asyncio.Task]
+        pending: set[asyncio.Task]
+        try:
+            done, pending = await asyncio.wait(set(tasks), timeout=max(0.1, total_timeout))
+        except asyncio.CancelledError:
+            for task in tasks:
+                task.cancel()
+            raise
+        for task in pending:
+            task.cancel()
+            idx, key, _option = tasks[task]
+            item_meta.append({"idx": idx + 1, "key": key, "applied": False, "skipped": "top3_wait_timeout"})
+        for task in done:
+            idx, key, _option = tasks[task]
+            try:
+                enriched, meta = task.result()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception("option enrichment first-list failed: key=%s", key)
+                item_meta.append({"idx": idx + 1, "key": key, "applied": False, "skipped": "exception"})
+                continue
+            if enriched:
+                results[idx] = enriched
+                cache[key] = {"option": enriched, "meta": meta, "ts": datetime.now(timezone.utc).isoformat()}
+                item_meta.append({"idx": idx + 1, "key": key, "applied": True, "source": "sync_top3", "meta": meta})
+            else:
+                item_meta.append({"idx": idx + 1, "key": key, "applied": False, "source": "fallback_base", "meta": meta})
+
+    applied = sum(1 for item in item_meta if item.get("applied"))
+    merged_options = results + rest
+    return merged_options, {
+        "enabled": True,
+        "applied": bool(applied),
+        "count": len(visible),
+        "applied_count": applied,
+        "timeout": total_timeout,
+        "items": sorted(item_meta, key=lambda item: int(item.get("idx") or 0)),
+    }
 
 
 async def _get_or_fetch_enriched_option(
@@ -6634,13 +9070,7 @@ def main() -> None:
         # H018: оборачиваем цены и имена ЖК в <b> через postprocessor
         await update.message.reply_text(
             _to_html(
-                "Привет! Я Ирина, помогу подобрать квартиру в новостройке.\n\n"
-                "Могу искать по району, бюджету, количеству комнат и отделке. "
-                "Например:\n"
-                "• «двушка с отделкой в Солнцево до 15 млн»\n"
-                "• «квартира в Котельниках»\n"
-                "• «студия в пределах МКАД»\n\n"
-                "Напишите, что ищете, а я покажу подходящие варианты и помогу выбрать следующий шаг."
+                "Привет! Я Ирина 👋 Помогу подобрать квартиру в новостройке в Москве и области — по району, бюджету, комнатам и отделке."
             ),
             parse_mode="HTML",
         )
@@ -6954,6 +9384,58 @@ def main() -> None:
         # H016: короткие follow-up сообщения («второй», «подешевле») решаем из памяти,
         # без нового общего поиска через Overmind.
         dialog_intent = _resolve_dialog_intent(text, state)
+        if _is_explicit_operator_request(text):
+            selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
+            options = state.get("visible_options") or state.get("last_options") or []
+            state["operator_context"] = {
+                "selected_option": selected.get("name") if isinstance(selected, dict) else None,
+                "known_facts": {
+                    "selected_option": selected,
+                    "options": options[:3],
+                    "active_task": _active_task(state),
+                    "params": state.get("params", {}),
+                },
+                "client_question": text,
+                "reason": "explicit_operator_request",
+            }
+            state["awaiting_phone"] = True
+            dialog_plan = {
+                "dialog_action": "operator_handoff",
+                "source": "explicit_operator_request",
+                "selected_option_name": selected.get("name") if isinstance(selected, dict) else "",
+                "visible_options_count": len(options[:3]),
+            }
+            offer_type = "operator_for_selected" if isinstance(selected, dict) and selected else "operator_for_context"
+            try:
+                response, chat_meta = await client.explain_conversation_followup(
+                    user_text=text,
+                    state=state,
+                    dialog_plan=dialog_plan,
+                )
+                response = _prepare_response_text(response)
+                if not response.strip():
+                    raise ValueError("empty operator handoff response")
+            except Exception as exc:
+                chat_meta = {"_operator_handoff_fallback": str(exc)}
+                if isinstance(selected, dict) and selected:
+                    response = _prepare_response_text(_format_operator_handoff_for_option(selected))
+                else:
+                    response = _prepare_response_text(_format_operator_handoff_for_context(state, text))
+            state["last_buttons"] = []
+            _remember_bot_response(state, response, offer_type=offer_type, answer_kind="operator_contact_request")
+            _log_event({
+                "kind": "operator_handoff_ready",
+                "uid": uid,
+                "user_text": text,
+                "selected_option": selected.get("name") if isinstance(selected, dict) else None,
+                "reason": "explicit_operator_request_llm",
+                "response_text": response,
+                "buttons": [],
+                "chat_meta": chat_meta,
+                "dialog_plan": dialog_plan,
+            })
+            await update.message.reply_text(_to_html(response), parse_mode="HTML")
+            return
         if _is_task_finishing_refinement(text, state):
             selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else {}
             response = _prepare_response_text(_active_task_operator_handoff_text(state, text))
@@ -7005,6 +9487,7 @@ def main() -> None:
                 user_text=text,
                 state=_dialog_planner_state_payload(state),
                 last_response_text=_last_bot_text(state),
+                visible_response_text=_last_bot_text(state),
                 search_response_text=json.dumps(state.get("last_search_response") or {}, ensure_ascii=False),
             )
             mcp_request_patch = _sanitize_mcp_request_patch(dialog_plan, state)
@@ -7018,6 +9501,15 @@ def main() -> None:
                 "applied": applied_plan,
                 "state": _dialog_planner_state_payload(state),
             })
+            _log_event(_dialog_trace_event(
+                uid=uid,
+                user_text=text,
+                state=state,
+                dialog_plan=dialog_plan,
+                followup_meta=followup_meta,
+                applied_plan=applied_plan,
+                mcp_request_patch=mcp_request_patch,
+            ))
             if dialog_plan.get("clarification_question") and not followup_meta.get("clarification_question"):
                 followup_meta["clarification_question"] = dialog_plan.get("clarification_question")
             followup_intent = followup_meta.get("intent")
@@ -7036,7 +9528,7 @@ def main() -> None:
                     has_options=bool(state.get("visible_options") or state.get("last_options")),
                 )
                 if mapped_intent:
-                    followup_intent = mapped_intent
+                    followup_intent = _merge_followup_intent_with_planner(followup_intent, mapped_intent, dialog_action)
                 if dialog_action == "update_search":
                     followup_intent = "update_search_params"
                     followup_meta["params_delta"] = dialog_plan.get("params_delta") if isinstance(dialog_plan.get("params_delta"), dict) else {}
@@ -7792,6 +10284,7 @@ def main() -> None:
                 "client_question": text,
                 "reason": "selected_option_live_details",
             }
+            state["awaiting_phone"] = True
             response = _prepare_response_text(_format_operator_handoff_for_option(option))
             kb_rows = []
             _log_event({
@@ -7927,13 +10420,13 @@ def main() -> None:
                 stage_scenario = _reason_layer_scenario(text, state.get("params", {}))
                 stage_options = state.get("last_options") or []
                 if len(stage_options) >= 2:
+                    stage_options, enrichment_meta = await _enrich_top_options_for_first_list(client, state, stage_options, stage_scenario)
+                    state["last_options"] = stage_options
                     sales_benefits, sales_meta = await _sales_phrases_for_stage(client, stage_options, stage_scenario)
                     response = _render_stage_first_list(stage_options, stage_scenario, sales_benefits)
                     state["visible_options"] = stage_options[:3]
                     _remember_shown_options(state, state.get("visible_options") or [])
                     state["numeric_choice_policy"] = _numeric_choice_policy_from_response(response, state.get("visible_options") or [])
-                    if OPTION_ENRICHMENT_ENABLED:
-                        asyncio.create_task(_prefetch_options_enrichment(client, state, stage_options[:3], stage_scenario))
                     turn_meta = {
                         "enabled": True,
                         "applied": True,
@@ -7941,6 +10434,7 @@ def main() -> None:
                         "scenario": stage_scenario,
                         "options_count": len(state.get("visible_options") or []),
                         "sales_phrase": sales_meta,
+                        "enrichment": enrichment_meta,
                         "excluded_names": excluded_names,
                     }
                 elif len(stage_options) == 1:
@@ -8100,6 +10594,7 @@ def main() -> None:
                     user_text=text,
                     state=_dialog_planner_state_payload(state),
                     last_response_text=_last_bot_text(state),
+                    visible_response_text=_last_bot_text(state),
                     search_response_text=json.dumps(state.get("last_search_response") or {}, ensure_ascii=False),
                 )
                 initial_mcp_request_patch = _sanitize_mcp_request_patch(initial_dialog_plan, state)
@@ -8298,13 +10793,13 @@ def main() -> None:
             stage_scenario = _reason_layer_scenario(text, state.get("params", {}))
             stage_options = state.get("last_options") or []
             if len(stage_options) >= 2:
+                stage_options, enrichment_meta = await _enrich_top_options_for_first_list(client, state, stage_options, stage_scenario)
+                state["last_options"] = stage_options
                 sales_benefits, sales_meta = await _sales_phrases_for_stage(client, stage_options, stage_scenario)
                 response = _render_stage_first_list(stage_options, stage_scenario, sales_benefits)
                 state["visible_options"] = stage_options[:3]
                 _remember_shown_options(state, state.get("visible_options") or [])
                 state["numeric_choice_policy"] = _numeric_choice_policy_from_response(response, state.get("visible_options") or [])
-                if OPTION_ENRICHMENT_ENABLED:
-                    asyncio.create_task(_prefetch_options_enrichment(client, state, stage_options[:3], stage_scenario))
                 stage_presenter_meta = {
                     "enabled": True,
                     "applied": True,
@@ -8312,7 +10807,7 @@ def main() -> None:
                     "scenario": stage_scenario,
                     "options_count": len(state.get("visible_options") or []),
                     "sales_phrase": sales_meta,
-                    "enrichment_prefetch": {"enabled": OPTION_ENRICHMENT_ENABLED, "scheduled": OPTION_ENRICHMENT_ENABLED, "count": min(len(stage_options), 3)},
+                    "enrichment": enrichment_meta,
                 }
             elif len(stage_options) == 1:
                 option_for_answer, enrichment_meta = await _get_or_fetch_enriched_option(client, state, stage_options[0], stage_scenario)

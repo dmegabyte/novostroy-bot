@@ -4,6 +4,12 @@
 
 Prompt-архитектура описана отдельно в `docs/PROMPT_ARCHITECTURE.md`: main prompt — управляющий каркас, scenario/facet prompts — сценарная информация и приоритеты. Сценарные факты нельзя складывать в основной prompt.
 
+Подробная актуальная карта `primary scenario / facet / overlay`, crosswalk
+`MCP wire field → OptionCard fact` и допустимая механика каждого поля описаны в
+`docs/SCENARIO_FIELD_MECHANICS_MAP.md`. Этот документ остаётся релизным
+контрактом верхнего уровня, а карта является его детализацией перед построением
+динамического `WritingPlan`.
+
 ## Универсальный gate
 
 Сценарий считается валидным только если выполнены все шесть условий:
@@ -48,6 +54,8 @@ Prompt-архитектура описана отдельно в `docs/PROMPT_AR
 | `operator` | Передать к человеку/бронь/показ | `purpose=operator`, selected context if any | Selected option context if available | Коротко подтвердить и предложить оператора | придумывает юридические/бронь условия без facts |
 | `off_topic` | Не-недвижимость | no MCP search required | none | Вежливо вернуть к недвижимости | отвечает на внешнюю тему |
 
+Presentation rule for all scenarios: `facts` are the exact shortlist; `near` are only alternatives / near-match fallback and must not be promoted as exact matches.
+
 ## Mortgage facet
 
 Mortgage is a facet, not a replacement scenario. For `family + mortgage`, primary `purpose` stays `family`, and request additionally contains:
@@ -57,6 +65,18 @@ Mortgage is a facet, not a replacement scenario. For `family + mortgage`, primar
 - `need`: `mortgage_calc`, `mortgage`, `discount`, `payment_by_installments`, `price`.
 
 Answer may mention rates, initial payment, discount or installment only when these fields are present in the MCP/card.
+
+## Verified MCP coverage audit (2026-07-13)
+
+Live audit of 23/23 тематик documented in `docs/MCP_TOPIC_COVERAGE_20260713.md` and supported by the raw run in `reports/mcp_topic_coverage_results_20260713.md`.
+
+Практический вывод:
+
+- базовый подбор опирается на `prices`, `price_range`, `area`, `metro`, `property_metro`, `location`, `ready`, `stage`, `ready_quarter`, `finishing`;
+- family/infrastructure темы могут запрашивать `schools`, `kindergartens`, `parks`, `shops`, `family_infrastructure`, `infrastructure`;
+- finance темы могут запрашивать `mortgage`, `mortgage_calc`, `payment_by_installments`, `discount`, но не обещают ставку/одобрение;
+- `fact_check` по выбранному ЖК может подтверждать конкретные поля по текущему объекту;
+- `operator`, `phone`, `comparison`, `recommendation` остаются диалоговой логикой, а не MCP-facts.
 
 ## Release validation rule
 

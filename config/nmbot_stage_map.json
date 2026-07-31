@@ -1,0 +1,134 @@
+{
+  "schema": "nmbot.stage_map.v1",
+  "schema_version": 1,
+  "active_by_version": {
+    "v2": "v2.turn.v1"
+  },
+  "paths": {
+    "v2.turn.v1": {
+      "purpose": "V2 TurnResult construction through deterministic runtime stages.",
+      "stage_ids": [
+        "v2.planner",
+        "v2.transition",
+        "v2.search",
+        "v2.response_plan",
+        "v2.deterministic_render",
+        "v2.response_writer",
+        "v2.response_formatter",
+        "v2.manager_rewriter",
+        "v2.runtime_finalize"
+      ]
+    },
+    "jivo.v2.turn.v1": {
+      "extends": "v2.turn.v1",
+      "purpose": "Jivo API preparation around the V2 TurnResult boundary.",
+      "stage_ids": ["jivo.api.prepare"]
+    },
+    "jivo.bridge.delivery.v1": {
+      "purpose": "Separate bridge-side terminal Jivo delivery path; not part of TurnResult.",
+      "boundary": "TurnResult has no current correlation to bridge terminal delivery.",
+      "correlation_limit": "No shared TurnResult execution_path stage can prove BOT_MESSAGE delivery.",
+      "stage_ids": ["jivo.bridge.delivery"]
+    }
+  },
+  "stages": {
+    "v2.planner": {
+      "purpose": "Build semantic/executable turn plan.",
+      "owner": "nmbot_v2/runtime.py",
+      "source": "scripts/nmbot_runtime_adapter.py",
+      "source_symbol": "_SemanticPlannerAdapter",
+      "payload_stage": "semantic_planner",
+      "doc": "docs/BOT_ARCHITECTURE.md",
+      "test": "tests/test_nmbot_runtime_adapter.py"
+    },
+    "v2.transition": {
+      "purpose": "Derive accepted runtime stage and action.",
+      "owner": "nmbot_v2/transition.py",
+      "source": "nmbot_v2/transition.py",
+      "source_symbol": "derive_transition_v3",
+      "doc": "docs/BOT_ARCHITECTURE.md",
+      "test": "tests/test_intent_plan_v3_transition.py"
+    },
+    "v2.search": {
+      "purpose": "Conditional main search execution for the search action.",
+      "owner": "nmbot_v2/runtime.py",
+      "source": "scripts/nmbot_runtime_adapter.py",
+      "source_symbol": "search",
+      "prompt": "prompts/v2_search_mcp.txt",
+      "payload_stage": "main_search",
+      "doc": "docs/NMBOT_EXTERNAL_CONTRACTS.md",
+      "test": "tests/test_nmbot_v2_search_contract_runtime.py"
+    },
+    "v2.response_plan": {
+      "purpose": "Build canonical response plan from plan, execution, state delta.",
+      "owner": "nmbot_v2/response.py",
+      "source": "nmbot_v2/response.py",
+      "source_symbol": "build_final_response_plan",
+      "doc": "docs/BOT_ARCHITECTURE.md",
+      "test": "tests/test_nmbot_v2_recipe_transition_matrix.py"
+    },
+    "v2.deterministic_render": {
+      "purpose": "Render safe deterministic customer answer.",
+      "owner": "nmbot_v2/response.py",
+      "source": "nmbot_v2/response.py",
+      "source_symbol": "render_response",
+      "doc": "docs/BOT_ARCHITECTURE.md",
+      "test": "tests/test_nmbot_v2_runtime.py"
+    },
+    "v2.response_writer": {
+      "purpose": "Optional model writer attempt inside response composer.",
+      "owner": "nmbot_v2/response_composer.py",
+      "source": "nmbot_v2/response_composer.py",
+      "source_symbol": "writer_request_payload",
+      "prompt": "prompts/v2_response_writer.txt",
+      "payload_stage": "conversation_answer_writer",
+      "doc": "docs/RESPONSE_MODEL_EVAL.md",
+      "test": "tests/test_nmbot_v2_response_writer_formatter.py"
+    },
+    "v2.response_formatter": {
+      "purpose": "Optional model formatter attempt inside response composer.",
+      "owner": "nmbot_v2/response_composer.py",
+      "source": "nmbot_v2/response_composer.py",
+      "source_symbol": "formatter_request_payload",
+      "prompt": "prompts/v2_response_formatter.txt",
+      "payload_stage": "conversation_answer_formatter",
+      "doc": "docs/RESPONSE_MODEL_EVAL.md",
+      "test": "tests/test_nmbot_v2_response_writer_formatter.py"
+    },
+    "v2.manager_rewriter": {
+      "purpose": "Optional manager-style rewrite after prepared answer.",
+      "owner": "nmbot_v2/runtime.py",
+      "source": "nmbot_v2/manager_rewriter.py",
+      "source_symbol": "manager_rewriter_request_payload",
+      "prompt": "prompts/v2_manager_rewriter.txt",
+      "payload_stage": "conversation_answer_manager_rewriter",
+      "doc": "docs/EXPERIMENTS.md",
+      "test": "tests/test_nmbot_manager_rewriter_cli.py"
+    },
+    "v2.runtime_finalize": {
+      "purpose": "Finalize state, trace and TurnResult only.",
+      "owner": "nmbot_v2/runtime.py",
+      "source": "nmbot_v2/runtime.py",
+      "source_symbol": "process_async",
+      "doc": "docs/NMBOT_RUNTIME_VERSIONS.md",
+      "test": "tests/test_nmbot_v2_runtime.py"
+    },
+    "jivo.api.prepare": {
+      "purpose": "Prepare sanitized Jivo API bot response and journal projection.",
+      "owner": "scripts/nmbot_api_server.py",
+      "source": "scripts/nmbot_api_server.py",
+      "source_symbol": "build_jivo_bot_message",
+      "doc": "docs/JIVO_DIAGNOSTICS.md",
+      "test": "tests/test_nmbot_api_jivo_p1.py"
+    },
+    "jivo.bridge.delivery": {
+      "purpose": "Bridge posts terminal BOT_MESSAGE or INVITE_AGENT to Jivo.",
+      "owner": "scripts/nmbot_n8n_bridge_server.py",
+      "source": "scripts/nmbot_n8n_bridge_server.py",
+      "source_symbol": "_post_event_to_jivo",
+      "doc": "docs/JIVO_DIAGNOSTICS.md",
+      "test": "tests/test_nmbot_n8n_bridge_transport_timeout.py"
+    }
+  },
+  "status_contract": ["completed", "failed", "fallback", "skipped"]
+}

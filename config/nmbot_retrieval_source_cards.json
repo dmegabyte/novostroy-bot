@@ -1,0 +1,85 @@
+{
+  "schema": "nmbot.retrieval_source_cards.v1",
+  "cards": [
+    {
+      "path": "nmbot_v2/response_composer.py",
+      "purpose": "Навигация по сборке V2-ответа: brief, writer/formatter payload, проверка JSON и финальная склейка текста.",
+      "concepts": ["ответ V2", "response brief", "writer formatter", "missing_note", "финальная сборка"],
+      "owns": ["build_response_brief", "parse_composer_json", "validate_composed_response", "assemble_composed_response", "compose_response_sync"],
+      "entry_points": ["nmbot_v2/response_composer.py", "prompts/v2_response_writer.txt", "prompts/v2_response_formatter.txt"],
+      "tests": ["tests/test_nmbot_v2_response_writer_formatter.py"]
+    },
+    {
+      "path": "nmbot_v2/runtime.py",
+      "purpose": "Навигация по финализации V2 runtime: turn result, состояние, события транспорта и связка planner/search/response.",
+      "concepts": ["V2 runtime", "turn result", "state delta", "transport events", "runtime finalize"],
+      "owns": ["TurnProcessor", "process", "process_async", "_execute_async", "_runtime_summary"],
+      "entry_points": ["nmbot_v2/runtime.py", "docs/NMBOT_RUNTIME_VERSIONS.md"],
+      "tests": ["tests/test_nmbot_v2_runtime.py"]
+    },
+    {
+      "path": "nmbot_v2/search_contract.py",
+      "purpose": "Навигация по контракту V2-поиска: request, query, evidence requirements, normalizer и validation diagnostics.",
+      "concepts": ["V2 поиск", "fact fields", "hard evidence", "current options", "validation blockers"],
+      "owns": ["V2SearchRequest", "build_search_request", "build_query", "validate_search_output", "matches_hard_constraint"],
+      "entry_points": ["nmbot_v2/search_contract.py", "prompts/v2_search_mcp.txt"],
+      "tests": ["tests/test_nmbot_v2_search_contract_runtime.py"]
+    },
+    {
+      "path": "scripts/nmbot_n8n_bridge_server.py",
+      "purpose": "Навигация по Jivo/n8n bridge: входящий CLIENT_MESSAGE, вызов private API, terminal BOT_MESSAGE и диагностика доставки.",
+      "concepts": ["Jivo bridge", "CLIENT_MESSAGE", "BOT_MESSAGE", "n8n callback", "transport timeout"],
+      "owns": ["handle_proxy", "_send_to_jivo_after_bot", "_post_event_to_jivo", "create_app"],
+      "entry_points": ["scripts/nmbot_n8n_bridge_server.py", "docs/JIVO_DIAGNOSTICS.md"],
+      "tests": ["tests/test_nmbot_n8n_bridge_transport_timeout.py"]
+    },
+    {
+      "path": "scripts/nmbot_response_path.py",
+      "purpose": "Навигация по локальному resolver stage/path: быстро найти source/doc/test/prompt для известного response path или версии.",
+      "concepts": ["response path", "stage map", "local resolver", "path-id", "version route"],
+      "owns": ["load_registry", "resolve_response_path", "resolve_path_id", "resolve_stage_id"],
+      "entry_points": ["scripts/nmbot_response_path.py", "config/nmbot_stage_map.json"],
+      "tests": ["tests/test_nmbot_stage_map.py", "tests/test_nmbot_wrapper.py"]
+    },
+    {
+      "path": "scripts/nmbot_context_pack.py",
+      "purpose": "Навигация по локальным context packs: list/pack, brief anchors, materialize и бюджетированные read-first фрагменты.",
+      "concepts": ["context pack", "read_first", "brief anchors", "materialize", "source budget"],
+      "owns": ["parse_manifest_text", "render_pack", "materialize_read_first_sources", "read_first_anchors"],
+      "entry_points": ["scripts/nmbot_context_pack.py", "docs/NMBOT_CONTEXT_PACKS.md"],
+      "tests": ["tests/test_nmbot_context_pack.py"]
+    },
+    {
+      "path": "docs/IDEAL_IRINA_UX.md",
+      "purpose": "Навигация по UX north star: стиль Ирины, живой ответ, варианты, operator flow и ограничения точечных regex-фиксов.",
+      "concepts": ["UX north star", "Ирина", "живой ответ", "visible options", "operator flow"],
+      "owns": ["docs/IDEAL_IRINA_UX.md", "answer/prompt/routing/state UX guidance"],
+      "entry_points": ["docs/IDEAL_IRINA_UX.md", "AGENTS.md"],
+      "tests": ["tests/test_nmbot_current_architecture.py"]
+    },
+    {
+      "path": "docs/JIVO_DIAGNOSTICS.md",
+      "purpose": "Навигация по диагностике Jivo: trace, terminal delivery, bridge/API markers и доказательство поведения через свежие логи.",
+      "concepts": ["Jivo diagnostics", "trace", "terminal delivery", "bridge log", "fresh evidence"],
+      "owns": ["docs/JIVO_DIAGNOSTICS.md", "diagnostics/trace context pack"],
+      "entry_points": ["docs/JIVO_DIAGNOSTICS.md", "scripts/nmbot_response_path.py"],
+      "tests": ["tests/test_nmbot_context_pack.py", "tests/test_nmbot_current_architecture.py"]
+    },
+    {
+      "path": "docs/NMBOT_CONTEXT_PACKS.md",
+      "purpose": "Навигация по manifest context packs: какие локальные docs/files/checks открыть для prompt, runtime и diagnostics задач.",
+      "concepts": ["context packs", "read-first", "initial source limit", "path — anchor", "local checks"],
+      "owns": ["docs/NMBOT_CONTEXT_PACKS.md", "pack manifest", "brief/materialize contract"],
+      "entry_points": ["docs/NMBOT_CONTEXT_PACKS.md", "scripts/nmbot_context_pack.py"],
+      "tests": ["tests/test_nmbot_context_pack.py", "tests/test_nmbot_current_architecture.py"]
+    },
+    {
+      "path": "config/nmbot_stage_map.json",
+      "purpose": "Навигация по stage registry: source/doc/test/prompt связи для runtime, search, response и Jivo delivery маршрутов.",
+      "concepts": ["stage map", "source doc test prompt", "stage_ids", "response path", "owner routing"],
+      "owns": ["config/nmbot_stage_map.json", "nmbot.stage_map.v1", "stage-to-source references"],
+      "entry_points": ["config/nmbot_stage_map.json", "scripts/nmbot_response_path.py"],
+      "tests": ["tests/test_nmbot_stage_map.py", "tests/test_nmbot_retrieval.py"]
+    }
+  ]
+}

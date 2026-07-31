@@ -19,22 +19,17 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import google.auth
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
+from nmbot_google_sheets import append_rows, build_sheets_service, resolve_sheet_title
 
 
 REPO = Path(__file__).resolve().parents[1]
 DEFAULT_SPREADSHEET_ID = "1ljLmkPBNijZqnDpsLzmArbIv-HoeewnfP9t1nj7cws8"
 DEFAULT_GID = 714718392
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -61,37 +56,6 @@ def _query_from_command(command: str) -> str:
     # Example: python3 scripts/chat_cli.py --timeout 180 Двушка для семьи в Москве
     match = re.search(r"scripts/chat_cli\.py\s+(?:--timeout\s+\d+\s+)?(.+)$", command)
     return match.group(1).strip() if match else command
-
-
-def _credentials():
-    inline = (
-        os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
-        or os.environ.get("GOOGLE_SHEETS_CREDENTIALS")
-        or os.environ.get("GOOGLE_CREDENTIALS")
-    )
-    if inline:
-        info = json.loads(inline)
-        return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
-
-    # google.auth.default handles GOOGLE_APPLICATION_CREDENTIALS and ADC.
-    creds, _ = google.auth.default(scopes=SCOPES)
-    return creds
-
-
-def _service():
-    return build("sheets", "v4", credentials=_credentials(), cache_discovery=False)
-
-
-def _sheet_title(service, spreadsheet_id: str, gid: int) -> str:
-    meta = service.spreadsheets().get(
-        spreadsheetId=spreadsheet_id,
-        fields="sheets.properties(sheetId,title)",
-    ).execute()
-    for sheet in meta.get("sheets", []):
-        props = sheet.get("properties", {})
-        if props.get("sheetId") == gid:
-            return props.get("title")
-    raise SystemExit(f"Sheet gid={gid} not found in spreadsheet {spreadsheet_id}")
 
 
 def _sheet_row(row: dict[str, Any], timestamp: str) -> list[str]:
@@ -140,21 +104,25 @@ def _sheet_row(row: dict[str, Any], timestamp: str) -> list[str]:
     ]
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("rows_jsonl", type=Path, help="Prepared rows JSONL from live_run_table_validator.py")
     parser.add_argument("--spreadsheet-id", default=DEFAULT_SPREADSHEET_ID)
     parser.add_argument("--gid", type=int, default=DEFAULT_GID)
     parser.add_argument("--write", action="store_true", help="Actually append rows. Default is dry-run.")
     parser.add_argument("--timestamp", default=datetime.now().strftime("%Y-%m-%d %H:%M"))
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     rows = _load_jsonl(args.rows_jsonl)
     values = [_sheet_row(row, args.timestamp) for row in rows]
 
-    service = _service()
-    title = _sheet_title(service, args.spreadsheet_id, args.gid)
-    target_range = f"'{title}'!A:H"
+    title = f"gid:{args.gid}"
+    target_range = f"{title}!A:H"
+    service = None
+    if args.write:
+        service = build_sheets_service()
+        title = resolve_sheet_title(service, spreadsheet_id=args.spreadsheet_id, gid=args.gid)
+        target_range = f"'{title}'!A:H"
 
     print(f"PUBLISH: rows={len(values)} target={title} gid={args.gid} mode={'write' if args.write else 'dry-run'}")
     for value in values:
@@ -164,13 +132,7 @@ def main() -> int:
         print("DRY_RUN: pass --write to append rows")
         return 0
 
-    result = service.spreadsheets().values().append(
-        spreadsheetId=args.spreadsheet_id,
-        range=target_range,
-        valueInputOption="USER_ENTERED",
-        insertDataOption="INSERT_ROWS",
-        body={"values": values},
-    ).execute()
+    result = append_rows(service, spreadsheet_id=args.spreadsheet_id, range_name=target_range, values=values)
     updates = result.get("updates", {})
     print(f"WRITTEN: updatedRange={updates.get('updatedRange')} updatedRows={updates.get('updatedRows')}")
     return 0

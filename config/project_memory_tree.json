@@ -1,0 +1,237 @@
+{
+  "schema": "project_memory_tree.v1",
+  "read_only": true,
+  "write_performed": false,
+  "notebook_mutation_performed": false,
+  "automatic_routing_changed": false,
+  "production_verified": false,
+  "requires_owner_confirmation": true,
+  "human_owner": "TBD",
+  "rollback_owner": "TBD",
+  "canonical_decisions": {
+    "n8n_audit_notebook": "n8n_audit",
+    "qapairs": "canonical_owner_cc-daemons_all_qapairs_contours_nested_standalone_poller_legacy",
+    "rules-v2": "unresolved"
+  },
+  "nodes": [
+    {
+      "path": "ecosystem/nmbot",
+      "name": "nmbot",
+      "class": "project",
+      "status": "confirmed_root",
+      "evidence_refs": [
+        "config/project_memory_registry.json:5-33",
+        "/tmp/opencode-run-nmbot/project/docs/NMBOT_RUNTIME_VERSIONS.md:27-81"
+      ]
+    },
+    {
+      "path": "ecosystem/nmbot/projects/v0",
+      "name": "NMBot V0 runtime subproject",
+      "class": "subproject",
+      "status": "confirmed_runtime_subproject",
+      "evidence_refs": ["/tmp/opencode-run-nmbot/project/docs/NMBOT_RUNTIME_VERSIONS.md:27-81"]
+    },
+    {
+      "path": "ecosystem/nmbot/projects/v2",
+      "name": "NMBot V2 runtime subproject",
+      "class": "subproject",
+      "status": "confirmed_runtime_subproject",
+      "evidence_refs": ["/tmp/opencode-run-nmbot/project/docs/NMBOT_RUNTIME_VERSIONS.md:27-81"]
+    },
+    {
+      "path": "ecosystem/nmbot/projects/v3",
+      "name": "NMBot V3 runtime subproject",
+      "class": "subproject",
+      "status": "confirmed_runtime_subproject",
+      "evidence_refs": ["/tmp/opencode-run-nmbot/project/docs/NMBOT_RUNTIME_VERSIONS.md:27-81"]
+    },
+    {
+      "path": "ecosystem/nmbot/shared-boundary",
+      "name": "NMBot shared runtime boundary",
+      "class": "shared",
+      "status": "confirmed_shared_boundary",
+      "evidence_refs": ["/tmp/opencode-run-nmbot/project/docs/NMBOT_RUNTIME_VERSIONS.md:121-137"]
+    },
+    {
+      "path": "ecosystem/mpn-daemon",
+      "name": "mpn-daemon independent project",
+      "class": "project",
+      "status": "confirmed_independent_root",
+      "evidence_refs": ["/home/ser/projects/mpn-daemon/README.md:1-11"]
+    },
+    {
+      "path": "ecosystem/cc-daemons",
+      "name": "cc-daemons local repository root",
+      "class": "project",
+      "status": "confirmed_local_repository_root",
+      "evidence_refs": ["/home/ser/projects/cc-daemons/PROJECT_MAP.md:44-80"]
+    },
+    {
+      "path": "ecosystem/cc-daemons/shared-core",
+      "name": "cc-daemons shared core",
+      "class": "shared",
+      "status": "confirmed_shared_core",
+      "evidence_refs": ["/home/ser/projects/cc-daemons/PROJECT_MAP.md:44-59"]
+    },
+    {
+      "path": "ecosystem/cc-daemons/projects/mpn",
+      "name": "cc-daemons MPN orchestration",
+      "class": "subproject",
+      "status": "confirmed_orchestration_subproject",
+      "evidence_refs": ["/home/ser/projects/cc-daemons/PROJECT_MAP.md:63-80"]
+    },
+    {
+      "path": "ecosystem/cc-daemons/projects/qapairs",
+      "name": "QApairs cc-daemons owner tree",
+      "class": "project",
+      "status": "canonical_owner_root_selected_owner_tbd",
+      "evidence_refs": [
+        "config/project_memory_registry.json:35-51",
+        "/home/ser/projects/cc-daemons/PROJECT_MAP.md:63-82",
+        "/home/ser/projects/cc-daemons/docs/qapairs-operational-modes.md:77-140"
+      ]
+    },
+    {
+      "path": "ecosystem/cc-daemons/projects/qapairs/current/autonomous-v1",
+      "name": "QApairs current autonomous v1",
+      "class": "subproject",
+      "status": "current_local_canonical_member_owner_tbd",
+      "evidence_refs": [
+        "/home/ser/projects/cc-daemons/PROJECT_MAP.md:63-82",
+        "/home/ser/projects/cc-daemons/docs/qapairs-operational-modes.md:77-119"
+      ]
+    },
+    {
+      "path": "ecosystem/cc-daemons/projects/qapairs/recovery/structured-facts-v2",
+      "name": "QApairs recovery structured facts v2",
+      "class": "subproject",
+      "status": "current_local_canonical_member_owner_tbd",
+      "evidence_refs": [
+        "/home/ser/projects/cc-daemons/PROJECT_MAP.md:63-82",
+        "/home/ser/projects/cc-daemons/docs/qapairs-operational-modes.md:128-140"
+      ]
+    },
+    {
+      "path": "ecosystem/cc-daemons/projects/qapairs/legacy/embedded-poller",
+      "name": "QApairs legacy embedded poller subproject",
+      "class": "subproject",
+      "status": "legacy_poller_excluded_from_canonical_owner_root",
+      "evidence_refs": [
+        "/home/ser/projects/cc-daemons/AGENTS.md:164-164",
+        "/home/ser/projects/cc-daemons/DOCUMENTATION.md:654-654"
+      ]
+    },
+    {
+      "path": "ecosystem/cc-daemons/projects/qapairs/legacy/standalone-poller",
+      "name": "QApairs legacy standalone poller",
+      "class": "subproject",
+      "status": "legacy_poller_excluded_from_canonical_owner_root",
+      "evidence_refs": [
+        "/home/ser/projects/qapairs-daemon/README.md:5-23",
+        "/home/ser/projects/qapairs-daemon/README.md:63-74"
+      ]
+    },
+    {
+      "path": "ecosystem/N8N_AUDIT",
+      "name": "N8N_AUDIT owner zones",
+      "class": "project",
+      "status": "owner_zone_confirmed_canonical_notebook_selected_n8n_audit",
+      "evidence_refs": [
+        "/home/ser/projects/N8N_AUDIT/README.md:27-47",
+        "/home/ser/projects/N8N_AUDIT/README.md:85-91",
+        "/home/ser/projects/N8N_AUDIT/AGENTS.md:96-110"
+      ]
+    },
+    {
+      "path": "ecosystem/N8N_AUDIT/projects/call-center-2",
+      "name": "N8N_AUDIT call-center-2 owner zone",
+      "class": "subproject",
+      "status": "owner_zone_confirmed",
+      "evidence_refs": [
+        "/home/ser/projects/N8N_AUDIT/README.md:27-47",
+        "/home/ser/projects/N8N_AUDIT/WORKFLOW_INDEX.md:8-98"
+      ]
+    },
+    {
+      "path": "ecosystem/N8N_AUDIT/projects/qapairs",
+      "name": "N8N_AUDIT qapairs owner zone",
+      "class": "subproject",
+      "status": "owner_zone_confirmed",
+      "evidence_refs": [
+        "/home/ser/projects/N8N_AUDIT/README.md:27-47",
+        "/home/ser/projects/N8N_AUDIT/WORKFLOW_INDEX.md:8-98"
+      ]
+    },
+    {
+      "path": "ecosystem/N8N_AUDIT/projects/mpn",
+      "name": "N8N_AUDIT mpn owner zone",
+      "class": "subproject",
+      "status": "owner_zone_confirmed",
+      "evidence_refs": [
+        "/home/ser/projects/N8N_AUDIT/README.md:27-47",
+        "/home/ser/projects/N8N_AUDIT/WORKFLOW_INDEX.md:8-98"
+      ]
+    },
+    {
+      "path": "ecosystem/N8N_AUDIT/projects/prompt_workflow_mvp",
+      "name": "N8N_AUDIT prompt_workflow_mvp owner zone",
+      "class": "subproject",
+      "status": "owner_zone_confirmed",
+      "evidence_refs": [
+        "/home/ser/projects/N8N_AUDIT/README.md:27-47",
+        "/home/ser/projects/N8N_AUDIT/WORKFLOW_INDEX.md:8-98"
+      ]
+    },
+    {
+      "path": "ecosystem/N8N_AUDIT/shared/gas-owner-zones",
+      "name": "N8N_AUDIT GAS owner zones",
+      "class": "shared",
+      "status": "owner_zone_confirmed",
+      "evidence_refs": [
+        "/home/ser/projects/N8N_AUDIT/README.md:85-91",
+        "/home/ser/projects/N8N_AUDIT/WORKFLOW_INDEX.md:8-98"
+      ]
+    },
+    {
+      "path": "ecosystem/opencode",
+      "name": "opencode",
+      "class": "project",
+      "status": "confirmed_root",
+      "evidence_refs": ["/home/ser/.config/opencode/opencode.jsonc:1-19"]
+    },
+    {
+      "path": "ecosystem/NOVOSTROY_M",
+      "name": "NOVOSTROY_M",
+      "class": "project",
+      "status": "confirmed_root",
+      "evidence_refs": [
+        "/home/ser/ai/projects/NOVOSTROY_M/README.md:1-5",
+        "/home/ser/ai/projects/NOVOSTROY_M/README.md:48-57"
+      ]
+    },
+    {
+      "path": "ecosystem/NOVOSTROY_AI",
+      "name": "NOVOSTROY_AI",
+      "class": "project",
+      "status": "confirmed_root",
+      "evidence_refs": [
+        "/home/ser/ai/projects/NOVOSTROY_AI/README.md:5-25",
+        "/home/ser/ai/projects/NOVOSTROY_AI/AGENTS.md:11-16"
+      ]
+    },
+    {
+      "path": "ecosystem/NOVOSTROY_AI/projects/nmbot",
+      "name": "NOVOSTROY_AI nested projects/nmbot",
+      "class": "subproject",
+      "status": "confirmed_nested_project",
+      "evidence_refs": ["/home/ser/ai/projects/NOVOSTROY_AI/AGENTS.md:11-16"]
+    },
+    {
+      "path": "ecosystem/rules-v2",
+      "name": "rules-v2",
+      "class": "project",
+      "status": "unresolved",
+      "evidence_refs": ["/tmp/opencode-run-nmbot/project/docs/PROJECT_CONTEXT_RETRIEVAL_PROTOCOL.md:97-113"]
+    }
+  ]
+}

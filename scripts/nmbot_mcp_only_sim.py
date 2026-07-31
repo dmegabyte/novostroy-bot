@@ -29,7 +29,9 @@ from chat_tester_bot import (  # noqa: E402
     _format_operator_handoff_for_option,
     _format_options_summary_response,
     _format_option_response,
+    _first_list_params_context,
     _prepare_response_text,
+    _render_stage_first_list,
     _resolve_dialog_intent,
     _visible_options_from_response,
 )
@@ -508,10 +510,11 @@ def run_simulation(search_response: dict[str, Any], turns: list[str], *, write_j
     options = _extract_options_from_structured(search_response)[:3]
     print("BOT [first_mcp_search]")
     if options:
-        visible_response = _format_options_summary_response(
+        params = search_response.get("params") if isinstance(search_response.get("params"), dict) else {}
+        visible_response = _render_stage_first_list(
             options,
-            "Нашла несколько вариантов по текущим данным",
-            "Какой ЖК хотите рассмотреть подробнее?",
+            str(params.get("purpose") or "self_use"),
+            params_context=_first_list_params_context(params),
         )
     else:
         visible_response = _format_no_results_area_response(search_response)

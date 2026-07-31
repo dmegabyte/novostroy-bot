@@ -131,6 +131,7 @@ from chat_tester_bot import (  # noqa: E402
     _filter_rejected_options,
     _followup_state_payload,
     _followup_intent_from_dialog_action,
+    _merge_followup_intent_with_planner,
     _remember_shown_options,
     _format_history_event,
     _history_search_preview,
@@ -1822,7 +1823,7 @@ def _run_h021_unit_tests() -> list[Result]:
         and corpus_options
         and corpus_options[0].get("delivered_houses") == ["Корпус 1 (2019)", "Корпус 12 (2023)"]
         and "готовых корпусов нет" not in unknown_corpus_response
-        and "не буду делать вывод" in unknown_corpus_response
+        and ("не буду делать вывод" in unknown_corpus_response or "не буду гадать" in unknown_corpus_response)
         and "уже сданы" in corpus_rendered
         and "корпус 1" in corpus_rendered
         and "еще строятся" in corpus_rendered.replace("ё", "е")
@@ -2498,12 +2499,12 @@ def _run_h021_unit_tests() -> list[Result]:
         "params": {"purpose": "investment"},
         "dialog_window": [
             {"role": "user", "text": "как ты подираешь жк?"},
-            {"role": "assistant", "text": "Подбираю не просто по цене. Хотите, я коротко объясню, почему в прошлой подборке показала именно эти варианты?"},
+            {"role": "assistant", "text": "Смотрю не только на цену. Хотите, я коротко объясню, почему в прошлой подборке показала именно эти варианты?"},
         ],
     }
     _remember_bot_response(
         yes_after_explain_state,
-        "Подбираю не просто по цене. Хотите, я коротко объясню, почему в прошлой подборке показала именно эти варианты?",
+        "Смотрю не только на цену. Хотите, я коротко объясню, почему в прошлой подборке показала именно эти варианты?",
         offer_type="explain_selection_logic",
         answer_kind="selection_logic",
     )
@@ -3095,6 +3096,85 @@ def _run_h021_unit_tests() -> list[Result]:
         duration_ms=int((time.time() - started) * 1000),
     ))
 
+    budget_lift_options = [
+        {
+            "name": "ЖК «Событие»",
+            "location": "Москва, Раменки",
+            "price": "от 25 000 000 до 55 000 000 руб.",
+            "finishing": "white box",
+            "ready": "2025-2026",
+            "area": "от 45 до 85 м²",
+            "metro": "Мичуринский проспект",
+            "infrastructure": "школы; детские сады; парк рядом; двор без машин; детские площадки",
+        },
+        {
+            "name": "ЖК «Лужники Collection»",
+            "location": "Москва, Хамовники",
+            "price": "от 45 000 000 до 60 000 000 руб.",
+            "finishing": "без отделки",
+            "ready": "2026",
+            "area": "от 50 до 90 м²",
+            "metro": "Лужники",
+            "infrastructure": "парк рядом; охрана / безопасность; спортивные площадки",
+        },
+        {"name": "ЖК «Третий»", "price": "от 61 млн", "metro": "Тестовая"},
+        {"name": "ЖК «Четвёртый»", "price": "от 70 млн"},
+    ]
+    budget_lift_text = _render_stage_first_list(budget_lift_options, "self_use", params_context="в Москве")
+    budget_cards = re.findall(r"(?m)^\d+\.\s", budget_lift_text)
+    pass_budget_lift = (
+        "white box" not in budget_lift_text.lower()
+        and "предчистовая отделка" in budget_lift_text
+        and "ЖК «Лужники Collection»" in budget_lift_text
+        and "Лужники Коллекшн" not in budget_lift_text
+        and "цены от 25 до 55 млн рублей" in budget_lift_text
+        and "метро: Мичуринский проспект" in budget_lift_text
+        and "цены от 45 до 60 млн рублей" in budget_lift_text
+        and "метро: Лужники" in budget_lift_text
+        and "приятный плюс" not in budget_lift_text
+        and "добавляет удобства" not in budget_lift_text
+        and "подтверждённые детали" not in budget_lift_text
+        and "Рядом есть школы, детские сады и парк." in budget_lift_text
+        and "Рядом есть парк и спортивные площадки, а в проекте предусмотрена охрана / безопасность." in budget_lift_text
+        and "школы" in budget_lift_text
+        and "детские сады" in budget_lift_text
+        and "парк" in budget_lift_text
+        and "охрана / безопасность" in budget_lift_text
+        and budget_lift_text.count("?") == 1
+        and len(budget_cards) <= 3
+        and "ЖК «Четвёртый»" not in budget_lift_text
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="first_list_budget_lift_preserves_price_metro_and_confirmed_infra",
+        passed=pass_budget_lift,
+        error="" if pass_budget_lift else f"bad budget lift first_list: {budget_lift_text}",
+        response_text=budget_lift_text,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    sparse_options = [
+        {"name": "ЖК «Тихий»", "price": "от 12 000 000 руб."},
+        {"name": "ЖК «Сроки»", "ready": "2027"},
+    ]
+    sparse_text = _render_stage_first_list(sparse_options, "self_use")
+    pass_sparse = (
+        "ЖК «Тихий»" in sparse_text
+        and "цены от 12 млн рублей" in sparse_text
+        and "ЖК «Сроки»" in sparse_text
+        and "сдача запланирована на 2027 год" in sparse_text
+        and not re.search(r"метро:|школ|детск\w*\s+сад|парк рядом|двор без машин|охрана|спортивные площадки", sparse_text, re.I)
+        and sparse_text.count("?") == 1
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="first_list_sparse_facts_do_not_invent_infrastructure",
+        passed=pass_sparse,
+        error="" if pass_sparse else f"bad sparse first_list: {sparse_text}",
+        response_text=sparse_text,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
     weak_state = {"params": {"rooms": "s", "max_price": 5_000_000, "district": "msk"}, "asked_questions": []}
     weak_rows = _pick_quick_actions(weak_state, "C-narrow-empty")
     weak_callbacks = [btn["callback_data"] for row in weak_rows for btn in row]
@@ -3504,11 +3584,20 @@ def _run_h021_unit_tests() -> list[Result]:
         and '"mcp_request_patch": none' in planner_prompt_low
         and "ты не пишешь клиентский ответ" in planner_prompt_low
         and "clarification_question всегда пустая строка" in planner_prompt_low
+        and "state.last_turn" in planner_prompt_low
+        and "expected_action_class" in planner_prompt_low
+        and "operator_live_check" in planner_prompt_low
+        and "нельзя понижать это до conversation_answer или consultation_answer" in planner_prompt_low
         and "все подходят под ипотеку" in planner_prompt_low
         and "верни consultation_answer и clarification_question=\"\"" in planner_prompt_low
         and "частичное название" in planner_prompt_low
         and "каноническое точное name из памяти" in planner_prompt_low
         and "если совпадение неоднозначно" in planner_prompt_low
+        and "last_response_text/visible_response_text" in planner_prompt_low
+        and "скандинавия что там" in planner_prompt_low
+        and "скандинвания что там" in planner_prompt_low
+        and "а второй что там" in planner_prompt_low
+        and "selected_option_name=\"жилой район «скандинавия»\"" in planner_prompt_low
         and "не давай клиенту номера телефонов" in _build_conversation_answer_prompt(user_text="дайте номер оператора", state={}, dialog_plan={}).lower()
         and "единственный телефонный сценарий" in _build_conversation_answer_prompt(user_text="дайте номер оператора", state={}, dialog_plan={}).lower()
         and "не давай клиенту номера телефонов" in _build_consultation_answer_prompt(user_text="дайте номер оператора", state={}, dialog_plan={}).lower()
@@ -3537,6 +3626,87 @@ def _run_h021_unit_tests() -> list[Result]:
         response_text=DIALOG_STATE_PLANNER_PROMPT,
         duration_ms=int((time.time() - started) * 1000),
     ))
+
+    # Hypothesis gate for 2026-07-13 live bug:
+    # short "да" after a selected ЖК live-check offer must not be downgraded
+    # from operator_for_selected to conversation/consultation by dialog planner.
+    # These tests exercise the merge point between the old followup classifier
+    # and the dialog state planner. The runtime invariant: planner must not
+    # downgrade an already detected selected-option operator handoff into a
+    # generic conversation/consultation answer.
+    action_downgrade_cases = [
+        {
+            "name": "selected_availability_yes_keeps_operator",
+            "last_bot_question": "Хотите посмотреть, какие варианты сейчас доступны и на каких условиях их можно приобрести?",
+            "classifier_intent": "operator_for_selected",
+            "planner_action": "consultation_answer",
+            "expected_intent": "operator_for_selected",
+        },
+        {
+            "name": "selected_conditions_yes_keeps_operator",
+            "last_bot_question": "Хотите, чтобы специалист проверил условия покупки по этому ЖК?",
+            "classifier_intent": "operator_for_selected",
+            "planner_action": "conversation_answer",
+            "expected_intent": "operator_for_selected",
+        },
+        {
+            "name": "selected_booking_yes_keeps_operator",
+            "last_bot_question": "Хотите проверить бронь, корпус, этажи и конкретные квартиры?",
+            "classifier_intent": "operator_for_selected",
+            "planner_action": "consultation_answer",
+            "expected_intent": "operator_for_selected",
+        },
+        {
+            "name": "selected_mortgage_live_yes_keeps_operator",
+            "last_bot_question": "Хотите передать этот ЖК специалисту, чтобы проверить семейную ипотеку и первый взнос?",
+            "classifier_intent": "operator_for_selected",
+            "planner_action": "conversation_answer",
+            "expected_intent": "operator_for_selected",
+        },
+        {
+            "name": "selected_discount_live_yes_keeps_operator",
+            "last_bot_question": "Хотите проверить актуальную рассрочку, скидки и акции по этому ЖК?",
+            "classifier_intent": "operator_for_selected",
+            "planner_action": "consultation_answer",
+            "expected_intent": "operator_for_selected",
+        },
+    ]
+    downgrade_results: list[dict[str, Any]] = []
+    for case in action_downgrade_cases:
+        planner_mapped_intent = _followup_intent_from_dialog_action(
+            str(case["planner_action"]),
+            {"dialog_action": case["planner_action"], "confidence": 0.95, "reason": case["last_bot_question"]},
+            visible_policy="keep",
+            has_options=True,
+        )
+        current_merged_intent = _merge_followup_intent_with_planner(
+            case["classifier_intent"],
+            planner_mapped_intent,
+            str(case["planner_action"]),
+        )
+        expected_intent = str(case["expected_intent"])
+        downgrade_results.append({
+            "name": case["name"],
+            "last_bot_question": case["last_bot_question"],
+            "classifier_intent": case["classifier_intent"],
+            "planner_action": case["planner_action"],
+            "planner_mapped_intent": planner_mapped_intent,
+            "current_merged_intent": current_merged_intent,
+            "expected_intent": expected_intent,
+            "passed": current_merged_intent == expected_intent,
+        })
+    for case_result in downgrade_results:
+        results.append(Result(
+            suite="h029",
+            scenario="last_question_yes_does_not_downgrade_action__" + str(case_result["name"]),
+            passed=bool(case_result["passed"]),
+            error="" if case_result["passed"] else (
+                f"classifier intent was downgraded: expected={case_result['expected_intent']} "
+                f"actual={case_result['current_merged_intent']}"
+            ),
+            response_text=json.dumps(case_result, ensure_ascii=False),
+            duration_ms=int((time.time() - started) * 1000),
+        ))
 
     no_outbound_phone_re = re.compile(r"(?:\+\s*7|8)\D*(?:\d\D*){10}|\b\d{10,15}\b")
     outbound_phone_samples = [
@@ -3585,6 +3755,17 @@ def _run_h021_unit_tests() -> list[Result]:
         {"dialog_action": "operator_live_check", "mcp_request_patch": {"purpose": "operator", "need": ["mortgage"]}},
         mcp_patch_state,
     )
+    selected_details_patch = _sanitize_mcp_request_patch(
+        {
+            "mcp_request_patch": {
+                "purpose": "fact_check",
+                "selected_option_name": "ЖК «Лучи",
+                "fact_to_check": "details",
+                "need": ["prices", "area", "property_metro", "schools", "kindergartens", "parks", "shops", "stage", "ready_quarter", "house", "bad_need"],
+            }
+        },
+        mcp_patch_state,
+    )
     pass_mcp_patch = (
         safe_mcp_patch.get("purpose") == "fact_check"
         and safe_mcp_patch.get("selected_option_name") == "ЖК «Лучи"
@@ -3595,13 +3776,17 @@ def _run_h021_unit_tests() -> list[Result]:
         and safe_mcp_patch.get("count") == 10
         and unsafe_mcp_patch == {}
         and operator_mcp_patch == {}
+        and selected_details_patch.get("fact_to_check") == "details"
+        and selected_details_patch.get("selected_option_name") == "ЖК «Лучи"
+        and "property_metro" in selected_details_patch.get("need", [])
+        and "bad_need" not in selected_details_patch.get("need", [])
     )
     results.append(Result(
         suite="h029",
         scenario="mcp_request_patch_is_allowlisted_before_search",
         passed=pass_mcp_patch,
-        error="" if pass_mcp_patch else f"safe={safe_mcp_patch}; unsafe={unsafe_mcp_patch}; operator={operator_mcp_patch}",
-        response_text=json.dumps({"safe": safe_mcp_patch, "unsafe": unsafe_mcp_patch, "operator": operator_mcp_patch}, ensure_ascii=False),
+        error="" if pass_mcp_patch else f"safe={safe_mcp_patch}; unsafe={unsafe_mcp_patch}; operator={operator_mcp_patch}; selected_details={selected_details_patch}",
+        response_text=json.dumps({"safe": safe_mcp_patch, "unsafe": unsafe_mcp_patch, "operator": operator_mcp_patch, "selected_details": selected_details_patch}, ensure_ascii=False),
         duration_ms=int((time.time() - started) * 1000),
     ))
 
@@ -3644,6 +3829,87 @@ def _run_h021_unit_tests() -> list[Result]:
         duration_ms=int((time.time() - started) * 1000),
     ))
 
+    finance_context_state = {
+        "visible_options": [
+            {
+                "name": "Мичуринский парк",
+                "location": "Очаково-Матвеевское",
+                "price_range": "от 14,3 млн до 37,6 млн руб.",
+                "area": "от 20,1 до 80,9 м²",
+                "mortgage_calc": [
+                    {"bank": "СберБанк", "program": "Семейная ипотека", "rate": "6%", "min_fee": "50.1%"},
+                    {"bank": "ВТБ", "program": "Семейная ипотека", "rate": "6%", "min_fee": "20.1%"},
+                ],
+                "mortgage": "семейная ипотека",
+                "discount": "выгода до 4,4 млн руб.",
+                "payment_by_installments": "рассрочка от ПИК на 18 месяцев",
+            }
+        ],
+        "last_options": [],
+        "params": {"purpose": "family", "mortgage_type": "family_mortgage"},
+    }
+    finance_ctx = _scenario_context_payload("а под семейную ипотеку?", finance_context_state)
+    finance_option = (finance_ctx.get("current_options") or [{}])[0]
+    finance_prompt_low = _build_consultation_answer_prompt(
+        user_text="а под семейную ипотеку?",
+        state=finance_context_state,
+        dialog_plan={"dialog_action": "consultation_answer"},
+    ).lower()
+    pass_finance_facts = (
+        finance_ctx.get("primary_scenario") == "family"
+        and finance_ctx.get("facet_request", {}).get("evidence_status") == "has_mortgage_facts"
+        and "mortgage_calc" in finance_option
+        and "payment_by_installments" in finance_option
+        and "discount" in finance_option
+        and "сбербанк" in finance_prompt_low
+        and "втб" in finance_prompt_low
+        and "рассрочка" in finance_prompt_low
+        and "выгода до 4,4 млн" in finance_prompt_low
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="scenario_context_preserves_finance_facts_for_family_mortgage",
+        passed=pass_finance_facts,
+        error="" if pass_finance_facts else f"ctx={finance_ctx}; prompt={finance_prompt_low[:1200]}",
+        response_text=json.dumps({"context": finance_ctx}, ensure_ascii=False),
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    selected_details_text = _format_option_response(
+        {
+            "idx": 1,
+            "name": "Мичуринский парк",
+            "location": "Очаково-Матвеевское",
+            "price_range": "от 14,3 млн до 37,6 млн руб.",
+            "area": "от 20,1 до 80,9 м²",
+            "metro": "Озёрная, 7 минут пешком",
+            "ready": "3 квартал 2028 г.",
+            "finishing": "с отделкой",
+            "schools": "школы рядом",
+            "kindergartens": "детские сады рядом",
+            "parks": "парки рядом",
+        },
+        "family",
+    )
+    selected_details_low = selected_details_text.lower()
+    pass_selected_details = (
+        "мичуринский парк" in selected_details_low
+        and "озёрная" in selected_details_low
+        and "20,1" in selected_details_text
+        and "очаково-матвеевское" in selected_details_low
+        and "для семьи" in selected_details_low
+        and "не подтвержден" not in selected_details_low
+        and "нет подтверждения" not in selected_details_low
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="selected_option_details_are_dossier_not_yes_no_fact_check",
+        passed=pass_selected_details,
+        error="" if pass_selected_details else selected_details_text,
+        response_text=selected_details_text,
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
     broad_patch_cases = {
         "search": {"mcp_request_patch": {"purpose": "search", "need": ["prices"]}},
         "repeat_search": {"mcp_request_patch": {"purpose": "repeat_search", "exclude": ["ЖК «Лучи"]}},
@@ -3677,7 +3943,7 @@ def _run_h021_unit_tests() -> list[Result]:
         {},
         params={"purpose": "family", "rooms": "2"},
     )
-    usable_safe_error = _is_usable_search_result("Сейчас поиск не ответил как надо", {"_safe_fallback": True}, params={"purpose": "family"})
+    usable_safe_error = _is_usable_search_result("По запросу не удалось найти информацию", {"_safe_fallback": True}, params={"purpose": "family"})
     pass_broad_count = (
         all(item.get("count") == 3 for item in broad_patch_results.values())
         and "count" not in selected_fact_patch
@@ -3915,6 +4181,76 @@ def _run_h021_unit_tests() -> list[Result]:
         passed=pass_planner_payload,
         error="" if pass_planner_payload else f"bad planner payload: {planner_payload}",
         response_text=json.dumps(planner_payload, ensure_ascii=False, default=str),
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    last_turn_live_check_payload = _dialog_planner_state_payload({
+        "params": {"purpose": "rental"},
+        "selected_option": {"name": "Бусиновский парк", "location": "Западное Дегунино"},
+        "visible_options": [{"name": "Бусиновский парк", "location": "Западное Дегунино"}],
+        "last_options": [{"name": "Бусиновский парк", "location": "Западное Дегунино"}],
+        "last_bot_question": "Хотите посмотреть, какие варианты сейчас доступны и на каких условиях их можно приобрести?",
+        "last_offer_type": "selected_option_details",
+        "last_answer_kind": "selected_option_details",
+        "dialog_window": [
+            {"role": "bot", "text": "Хотите посмотреть, какие варианты сейчас доступны и на каких условиях их можно приобрести?"},
+            {"role": "user", "text": "да"},
+        ],
+    })
+    last_turn = last_turn_live_check_payload.get("last_turn") if isinstance(last_turn_live_check_payload.get("last_turn"), dict) else {}
+    pass_last_turn_payload = (
+        last_turn.get("bot_question") == "Хотите посмотреть, какие варианты сейчас доступны и на каких условиях их можно приобрести?"
+        and last_turn.get("client_answer") == "да"
+        and last_turn.get("offer_type") == "selected_option_details"
+        and last_turn.get("selected_option") == "Бусиновский парк"
+        and last_turn.get("expected_action_class") == "operator_live_check"
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="dialog_planner_payload_has_last_turn_for_selected_live_check_yes",
+        passed=pass_last_turn_payload,
+        error="" if pass_last_turn_payload else f"last_turn missing or weak: {last_turn_live_check_payload}",
+        response_text=json.dumps(last_turn_live_check_payload, ensure_ascii=False, default=str),
+        duration_ms=int((time.time() - started) * 1000),
+    ))
+
+    rental_followup_state = {
+        "params": {"purpose": "rental"},
+        "visible_options": [
+            {"name": "Бусиновский парк", "location": "Западное Дегунино"},
+            {"name": "Мичуринский парк", "location": "Очаково-Матвеевское"},
+            {"name": "Жилой район «Скандинавия»", "location": "Коммунарка"},
+        ],
+        "last_options": [
+            {"name": "Бусиновский парк", "location": "Западное Дегунино"},
+            {"name": "Мичуринский парк", "location": "Очаково-Матвеевское"},
+            {"name": "Жилой район «Скандинавия»", "location": "Коммунарка"},
+        ],
+        "last_bot_question": "Какой вариант разобрать подробнее?",
+        "last_offer_type": "choose_option",
+        "last_answer_kind": "options_summary",
+        "dialog_window": [
+            {"role": "bot", "text": "Есть три варианта для аренды: Бусиновский парк, Мичуринский парк и Жилой район «Скандинавия». Какой разобрать подробнее?"},
+            {"role": "user", "text": "Скандинвания что там"},
+        ],
+    }
+    rental_payload = _dialog_planner_state_payload(rental_followup_state)
+    rental_last_turn = rental_payload.get("last_turn") if isinstance(rental_payload.get("last_turn"), dict) else {}
+    rental_visible_names = [str(o.get("name") or "") for o in rental_payload.get("visible_options") or [] if isinstance(o, dict)]
+    pass_rental_followup_payload = (
+        "Жилой район «Скандинавия»" in rental_visible_names
+        and "Бусиновский парк" in rental_visible_names
+        and rental_last_turn.get("client_answer") == "Скандинвания что там"
+        and rental_last_turn.get("bot_question") == "Какой вариант разобрать подробнее?"
+        and rental_payload.get("last_answer_kind") == "options_summary"
+        and rental_payload.get("numeric_choice_policy") == "accept"
+    )
+    results.append(Result(
+        suite="h029",
+        scenario="dialog_planner_payload_keeps_visible_options_for_rental_typo_followup",
+        passed=pass_rental_followup_payload,
+        error="" if pass_rental_followup_payload else f"rental followup payload weak: {rental_payload}",
+        response_text=json.dumps(rental_payload, ensure_ascii=False, default=str),
         duration_ms=int((time.time() - started) * 1000),
     ))
 
@@ -4296,6 +4632,7 @@ async def _resolve_stateful_intent(
             user_text=text,
             state=_dialog_planner_state_payload(state),
             last_response_text=_last_bot_text(state),
+            visible_response_text=_last_bot_text(state),
             search_response_text=json.dumps(state.get("last_search_response") or {}, ensure_ascii=False),
         )
         if asyncio.iscoroutine(dialog_plan):
@@ -4319,7 +4656,11 @@ async def _resolve_stateful_intent(
             has_options=bool(state.get("visible_options") or state.get("last_options")),
         )
         if mapped:
-            followup_meta["intent"] = mapped
+            followup_meta["intent"] = _merge_followup_intent_with_planner(
+                followup_meta.get("intent"),
+                mapped,
+                action,
+            )
         if mapped == "update_search_params":
             followup_meta["params_delta"] = dialog_plan.get("params_delta") or {}
             followup_meta["repeat_search_reason"] = action

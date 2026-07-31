@@ -16,7 +16,7 @@ LOG_FILE = "/tmp/or-monitor.log"
 BACKUP_FILE = "/tmp/or-key-backup.txt"
 VAULT_PATH = "secret/projects/NOVOSTROY_AI"
 VAULT_FIELD = "openrouter_token"
-DUMMY_KEY = "sk-or-v1-BLOCKED_BY_MONITOR_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+DUMMY_KEY = "REDACTED_SK_TOKEN" + datetime.now().strftime("%Y%m%d_%H%M%S")
 
 # ── Куда слать в TG ──────────────────────────────────────
 TG_TOKEN = ""

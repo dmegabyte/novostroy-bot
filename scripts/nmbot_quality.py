@@ -159,7 +159,7 @@ def main() -> int:
             failed = [k for k, v in checks.items() if v is False]
             user = (rec.get("user_text") or "")[:60]
             resp = (rec.get("response_text") or "")[:80]
-            print(f"  • {rec.get('h_id', '?')} | {rec.get('ts', '?')[:19]}")
+            print(f"  • {rec.get('h_id', '?')} | {rec.get('dialog_id', '?')}#{rec.get('turn_id', '?')} | {rec.get('ts', '?')[:19]}")
             print(f"    user:  {user}")
             print(f"    reply: {resp}")
             print(f"    fails: {failed}")
@@ -172,7 +172,7 @@ def main() -> int:
             checks = _check(rec)
             user = (rec.get("user_text") or "")[:80]
             resp = (rec.get("response_text") or "")[:80]
-            print(f"  [{rec.get('h_id', '?')}] {user!r}")
+            print(f"  [{rec.get('h_id', '?')}|{rec.get('dialog_id', '?')}#{rec.get('turn_id', '?')}] {user!r}")
             print(f"    → {resp!r}")
             print(f"    checks: {checks}")
 

@@ -17,6 +17,7 @@ SENSITIVE_KEY_PARTS = ("payload", "text", "token", "authorization", "url", "body
 TERMINAL_OK_MARKERS = ("final", "final_answer", "bot_message", "answered", "handoff", "invite_agent")
 TERMINAL_BAD_MARKERS = ("explicit_failure", "failure", "failed", "error", "timeout")
 ASYNC_ACK_MARKERS = ("accepted_async", "accepted_for_async_processing")
+NONTERMINAL_STATUS_MARKERS = ("status_sent", "fallback_status_sent", "status_update")
 UPSTREAM_MARKERS = ("upstream_response", "nmbot_response", "local_response", "api_response", "llm_response", "gateway_response")
 
 
@@ -90,6 +91,9 @@ def terminal_kind(row: dict[str, Any]) -> str | None:
     # therefore part of the terminal contract; an async acknowledgement is
     # evidence of the bug, not a terminal result.
     if any(marker in hay for marker in ASYNC_ACK_MARKERS):
+        return None
+    # A progress BOT_MESSAGE is intentionally followed by the final answer.
+    if any(marker in hay for marker in NONTERMINAL_STATUS_MARKERS):
         return None
     if any(marker in hay for marker in TERMINAL_BAD_MARKERS):
         return "failure"

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import json
 import re
 import sys
@@ -77,6 +78,25 @@ SAMPLE_SEARCH_RESPONSE: dict[str, Any] = {
     "missing": "Не удалось подтвердить точное наличие квартир в продаже в режиме реального времени.",
     "params": {"rooms": "2", "district": "msk", "purpose": "family"},
 }
+
+FAMILY_SEARCH_RESPONSE: dict[str, Any] = copy.deepcopy(SAMPLE_SEARCH_RESPONSE)
+FAMILY_SEARCH_RESPONSE["facts"][0].update(
+    {
+        "schools": "4 детских сада и 2 школы",
+        "kindergartens": "4 детских сада",
+        "parks": "Мещерский парк, Чоботовский лес",
+        "yards": "двор без машин",
+        "infrastructure": "семейная инфраструктура рядом с домом",
+    }
+)
+FAMILY_SEARCH_RESPONSE["facts"][1].update(
+    {
+        "schools": "рядом есть детские сады",
+        "kindergartens": "детские сады поблизости",
+        "parks": "зелёные зоны и прогулочные маршруты",
+        "yards": "игровые и спортивные площадки",
+    }
+)
 
 NEAR_ONLY_SEARCH_RESPONSE: dict[str, Any] = {
     "facts": [],
@@ -176,12 +196,12 @@ def planner_intent(user_text: str, state: dict[str, Any]) -> str:
     facts_count = int(summary.get("facts_count") or 0)
     near_count = int(summary.get("near_count") or 0)
     has_budget = bool(re.search(r"\b\d+\s*(млн|млн\.|миллион|руб)\b", text))
-    has_rooms = bool(re.search(r"(студия\w*|студ\w*|1к\w*|1-к\w*|однуш\w*|2к\w*|2-к\w*|двуш\w*|3к\w*|треш\w*)", text))
-    has_location = bool(re.search(r"(котельник\w*|солнцев\w*|бутов\w*|дегунин\w*|отрадн\w*|люберц\w*|мытищ\w*|новокосин\w*|балаших\w*|мкад|москва|мск|московск\w*)", text))
+    has_rooms = bool(re.search(r"(студ\w*|1к\w*|1-к\w*|однуш\w*|2к\w*|2-к\w*|двуш\w*|3к\w*|треш\w*)", text))
+    has_location = bool(re.search(r"(котельник\w*|солнцев\w*|бутов\w*|дегунин\w*|отрадн\w*|люберц\w*|мытищ\w*|новокосин\w*|балаших\w*|москв\w*|мск|московск\w*)", text))
     has_finish = bool(re.search(r"(отделк|с отделкой|без отделк|чистов)", text))
     has_exact_combo = bool(has_rooms and (has_finish or "мкад" in text or has_budget))
     looks_like_real_estate = bool(
-        re.search(r"\b(квартир|квартира|жк|дом|новострой|студия|однуш|двуш|треш|комнат|москва|москов|мск|котельник|солнцев|бутово|дегунино|мкад|отделк|бюджет|цена|район|метро)\b", text)
+        re.search(r"\b(квартир\w*|жк|дом\w*|новострой\w*|студ\w*|однуш\w*|двуш\w*|треш\w*|комнат\w*|москв\w*|москов\w*|мск|котельник\w*|солнцев\w*|бутов\w*|дегунин\w*|мкад|отделк\w*|бюджет\w*|цен\w*|район\w*|метро)\b", text)
         or has_budget
     )
     if re.search(r"(ипотек|кредит|ставк|банк|первоначальн|взнос|пв|finance)", text):
@@ -210,7 +230,7 @@ def planner_intent(user_text: str, state: dict[str, Any]) -> str:
         return "room_budget_list"
     if looks_like_real_estate and has_location and not has_budget and facts_count > 0:
         return "location_list"
-    if re.search(r"\b(студия|студ|1к|1-к|2к|2-к|двуш|треш|метро|район|бюджет|солнцево|бутово|дегунино)\b", text):
+    if re.search(r"\b(студ\w*|1к\w*|1-к\w*|2к\w*|2-к\w*|двуш\w*|треш\w*|метро|район|бюджет|солнцев\w*|бутов\w*|дегунин\w*)\b", text):
         return "new_search"
     if re.search(r"(подробнее|расскажи|что по нему|что по этому|что по жк|про него)", text) and selected:
         return "selected_option_details"
@@ -349,14 +369,44 @@ def present(action: str, context: dict[str, Any], state: dict[str, Any]) -> str:
     options = context.get("visible_options") or []
     selected = state.get("selected_option") if isinstance(state.get("selected_option"), dict) else None
     intent = context.get("stage")
+    purpose = str(state.get("purpose") or "").lower()
     intro_map = {
+        "family": "Для семьи вижу такие варианты:",
         "location_list": "По этому району вижу такие варианты:",
         "exact_match_list": "Нашла варианты, которые ближе всего к вашему запросу:",
         "room_budget_list": "По комнатности и бюджету вижу такие варианты:",
         "new_search": "Нашла несколько вариантов по текущим данным:",
     }
     if action == "show_first_list":
-        return _format_options_summary_response(options, intro_map.get(str(intent), "Нашла несколько вариантов по текущим данным"), "Какой ЖК хотите рассмотреть подробнее?")
+        text = _format_options_summary_response(options, intro_map.get(purpose if purpose == "family" else str(intent), intro_map.get(str(intent), "Нашла несколько вариантов по текущим данным")), "Какой ЖК хотите рассмотреть подробнее?")
+        if purpose == "family" and options:
+            first = options[0]
+            family_bits: list[str] = []
+            schools = str(first.get("schools") or "").strip()
+            kindergartens = str(first.get("kindergartens") or "").strip()
+            parks = str(first.get("parks") or "").strip()
+            yards = str(first.get("yards") or "").strip()
+            infra = str(first.get("infrastructure") or "").strip()
+            if schools or kindergartens:
+                family_bits.append(f"школы и сады: {', '.join(bit for bit in (schools, kindergartens) if bit)}")
+            if parks:
+                family_bits.append(f"парки: {parks}")
+            if yards:
+                family_bits.append(f"двор: {yards}")
+            if infra and infra not in family_bits:
+                family_bits.append(infra)
+            if family_bits:
+                list_lines = []
+                for idx, item in enumerate(options[:3], start=1):
+                    list_lines.append(f"{idx}. {item.get('name')}")
+                family_text = (
+                    f"{intro_map['family']}\n\n"
+                    + "\n".join(list_lines)
+                    + f"\n\nДля семьи это особенно полезно: {'; '.join(family_bits)}.\n"
+                    + "Какой ЖК хотите рассмотреть подробнее?"
+                )
+                return family_text
+        return text
     if action == "show_wide_starting_options":
         return _format_options_summary_response(options, "Можно смотреть широко без бюджета", "Какой ЖК хотите рассмотреть подробнее?")
     if action == "show_selected_details" and selected:
@@ -486,6 +536,7 @@ def run_scenario(name: str, turns: list[str], search_response: dict[str, Any]) -
 
 def scenarios() -> list[Scenario]:
     return [
+        Scenario("family", ["двушка для семьи в Москве"], FAMILY_SEARCH_RESPONSE),
         Scenario("first_list", ["двушка в Солнцево"]),
         Scenario("comparison_criteria", ["1", "по каким критериям сравнивал?"]),
         Scenario("operator_handoff", ["1", "позови оператора"]),

@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"case_id": "pos_001", "diagnostic_code": "summary_saved"},
+    {"case_id": "pos_002", "diagnostic_code": "empty_summary"},
+    {"case_id": "pos_003", "diagnostic_code": "summary_error"},
+    {"case_id": "pos_004", "diagnostic_code": "tagging_error"},
+    {"case_id": "pos_005", "diagnostic_code": "low_quality"},
+    {"case_id": "pos_006", "diagnostic_code": "crm_payload"},
+    {"case_id": "pos_007", "diagnostic_code": "json_crm_payload"},
+    {"case_id": "pos_008", "diagnostic_code": "gateway_credentials_missing"},
+    {"case_id": "neg_001", "diagnostic_code": "totally_missing_mpn_code_zzz"},
+    {"case_id": "neg_002", "diagnostic_code": "unknown_mpn_code_alpha"},
+    {"case_id": "neg_003", "diagnostic_code": "summary_saved_extra"},
+    {"case_id": "neg_004", "diagnostic_code": "unknown_mpn_code_alpha:dynamic_suffix"},
+    {"case_id": "neg_005", "diagnostic_code": ""},
+    {"case_id": "neg_006", "diagnostic_code": "MPN_LOCAL_PIPELINE"},
+    {"case_id": "neg_007", "diagnostic_code": "mpn-local-pipeline"},
+    {"case_id": "neg_008", "diagnostic_code": "чужой_токен"},
+    {"case_id": "neg_009", "diagnostic_code": "not_found"},
+    {"case_id": "neg_010", "diagnostic_code": "unauthorized"},
+    {"case_id": "neg_011", "diagnostic_code": "invalid_body_size"},
+    {"case_id": "neg_012", "diagnostic_code": "payload_must_be_a_json_object"},
+    {"case_id": "neg_013", "diagnostic_code": "missing_required_field"},
+    {"case_id": "neg_014", "diagnostic_code": "sheet_append_failed"},
+    {"case_id": "neg_015", "diagnostic_code": "pipeline_exit"},
+    {"case_id": "neg_016", "diagnostic_code": "mpn_direct_ingest_http_inbox"},
+    {"case_id": "neg_017", "diagnostic_code": "mpn_direct_worker_orchestration"},
+    {"case_id": "neg_018", "diagnostic_code": "projects/mpn/ingest_server.py MpnIngestHandler do_POST"},
+    {"case_id": "neg_019", "diagnostic_code": "projects/mpn/direct_worker.py run_pipeline main"},
+    {"case_id": "neg_020", "diagnostic_code": "cc-daemons dependency interface direct ingest should be primary"}
+  ]
+}

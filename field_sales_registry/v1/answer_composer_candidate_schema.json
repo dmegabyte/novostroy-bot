@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novostroy.local/field-sales-registry/v1/answer_composer_candidate_schema.json",
+  "title": "External Field Sales Registry v1 Answer Composer candidate",
+  "type": "object",
+  "required": ["intro", "fact_summary", "benefit", "caveat", "final_question", "used_field_ids", "used_combination_ids"],
+  "additionalProperties": false,
+  "properties": {
+    "intro": {"type": "string", "minLength": 1, "maxLength": 220},
+    "fact_summary": {"type": "string", "minLength": 1, "maxLength": 420},
+    "benefit": {"type": "string", "minLength": 1, "maxLength": 420},
+    "caveat": {"type": "string", "maxLength": 260},
+    "final_question": {"type": "string", "minLength": 1, "maxLength": 240},
+    "used_field_ids": {"type": "array", "minItems": 1, "maxItems": 6, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}},
+    "used_combination_ids": {"type": "array", "maxItems": 3, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}}
+  }
+}

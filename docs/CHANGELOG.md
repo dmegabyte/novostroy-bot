@@ -1,8 +1,286 @@
 # Changelog nmbot
 
+## 2026-07-23 — V2/V3 manager rewriter prepared locally
+
+- Added an optional final Gemini 2.5 Flash rewriter after the prepared V2/V3
+  answer. It receives the full redacted session transcript, current question,
+  prepared answer and canonical MCP-derived evidence.
+- Added independent version-isolated switching with
+  `NMBOT_V2_MANAGER_REWRITER_MODE` and `NMBOT_V3_MANAGER_REWRITER_MODE`, plus a
+  small CLI. V0 and the existing planner/search/composer contracts are unchanged.
+- By explicit product decision there is no semantic post-validation after the
+  rewrite. Only timeout/provider/exception/empty-result fallback preserves the
+  prepared answer.
+- Added persistent full safe dialogue state without changing the existing
+  six-turn `recent_turns` window, plus prompt provenance and focused tests.
+- Added a local one-step release prepared to deploy only V3 publish while V2
+  stays off.
+- Local only: no production env, VPS file, service or Jivo behavior changed.
+
+## 2026-07-23 — Public overview live-audit fixes
+
+- Reworked `scripts/build_public_overview.py` after the live audit: the main
+  page is now a short safe landing with hero, main rule, shared Jivo
+  transport/selector, a separate V0 flow and a shared typed V2/V3 flow.
+- Moved source catalogs to `resources.html`, kept legacy material out of primary
+  navigation through `archive.html`, and made dialogue history a separate
+  one-shot lazy page with no 10-second polling.
+- Added public-page metadata, skip link, semantic landmarks, focus-visible,
+  target sizing, fine-pointer-only hover and reduced-motion handling. Static
+  output still publishes summaries only: no raw docs/prompts/commands/trace,
+  dotenv material, logs, backups, secret key names or operational snippets.
+- Local static overview only; no NMBOT runtime, API, bridge, prompts, VPS env or
+  service was changed.
+
+## 2026-07-23 — Public architecture design and safety refresh
+
+- Rebuilt the public NMBOT overview around the current Jivo flow and a clear
+  V0/V2/V3 architecture comparison, with responsive system typography,
+  restrained interaction feedback and reduced-motion support.
+- Removed raw internal document/passport rendering from the public pages: full
+  docs, prompts, commands, traces, `.env`, logs and backups are no longer
+  exported through the static overview.
+- Static public HTML only; no NMBOT runtime, API, bridge, prompts, VPS `.env`
+  or service was changed.
+
+## 2026-07-23 — Public NMBOT overview aligned with Jivo runtime
+
+- `scripts/build_public_overview.py` now renders the Jivo V0/V2/V3 runtime map,
+  current V2 prompt contracts and a dedicated `versions.html` passport page.
+- Removed the public secret-command form and legacy Telegram overview from the
+  generated NMBOT landing page; no secret values or operational commands belong
+  in a public static overview.
+- This change updates static overview sources only; it does not alter NMBOT
+  runtime, selector, prompts, VPS `.env` or Jivo services.
+
+## 2026-07-23 — Runtime architecture approaches documented
+
+- `docs/NMBOT_RUNTIME_VERSIONS.md` now describes executable V0, V2 and V3
+  approaches, ownership, composer publication/fallback boundary and the V3
+  `IntentPlanV3` boundary.
+- Added the missing documented per-session `/start_3` selector command and
+  aligned the generic Jivo flow with both V2 and V3 typed runtimes.
+- Documentation only; no runtime code, prompt, selector or production setting
+  changed by this entry.
+
 Все значимые изменения в проекте. Формат: версия → что сделано → impact. Связь с гипотезами — `H###`, с гипотезами про промпты — `P###`.
 
 ---
+
+## 2026-07-23 — Prompt provenance and quality-run identity 🟡
+
+- Added exact SHA-256 prompt and prompt-set identities without storing prompt
+  bodies, payloads, provider responses or secrets.
+- Terminal dialogue turns can carry the actually invoked planner/search/
+  response prompt set; dialogue reports display compact prompt IDs.
+- Quality runs now carry UUID `run_id`, fixture hashes, release identity and a
+  prompt set. Offline runs are `configured_only`; live runs record only stages
+  this runner invokes. Response prompts were added to release tracking. Local
+  implementation only; production was not changed.
+
+## 2026-07-23 — Model navigation conflicts removed 🟡
+
+- Removed the invalid project-local `explorer` override; the OpenCode project
+  config now loads and global `evidence-scout` remains the research specialist.
+- Updated `nmbot-ux-architect` to discover the project via nearest `AGENTS.md`,
+  use context packs and scoped checks, and stop routing new work through legacy
+  Telegram-era simulation commands.
+- Added `quality` to the thin `scripts/nmbot.py check` allowlist, synchronized
+  CI documentation, expanded task routing, and added a tree/JSON context-pack
+  synchronization test. No runtime, pipeline, prompt or production files changed.
+
+## 2026-07-23 — Offline answer-quality regression added to CI 🟡
+
+- Reused the existing deterministic `nmbot_v2_quality_gate.py`; no duplicate
+  runner or production pipeline code was added.
+- Added an allowlisted `quality` scope covering 15 fixed scenarios, including
+  family, investment, rental and life; `--live` is rejected by the dispatcher.
+- GitHub local fast gate now runs `docs contracts quality`. No model, MCP, VPS,
+  Jivo, prompt, state, API, bridge or production configuration was changed.
+
+## 2026-07-23 — Root agent context simplified 🟡
+
+- Reduced root `AGENTS.md` from 258 to 107 lines while retaining current Jivo
+  production boundaries, secret handling, UX, deploy/live-evidence and
+  model/fallback gates.
+- Moved detailed deployment, rollback and legacy Telegram procedures to
+  `docs/NMBOT_RUNBOOK.md`.
+- Added local navigation packs `diagnostics/trace` and `runtime/fallback` to
+  `docs/NMBOT_CONTEXT_PACKS.md`; no production/runtime configuration changed.
+
+## 2026-07-23 — Local gate timing baseline 🟡
+
+- Kept `scripts/nmbot_diag.sh` as the single diagnostic entry point; a second
+  doctor command was rejected as duplication.
+- Added `scripts/nmbot_check_benchmark.py`, a read-only p50/p95 wrapper over the
+  existing allowlisted `nmbot_check.py` dispatcher.
+- Added `docs/NMBOT_DEVELOPER_BASELINE.md` and documented the existing GitHub
+  Actions fast gate. No production, VPS or provider calls are part of this work.
+- Recorded a same-host Python 3.12.3 baseline: `docs` p50/p95
+  `1251.201/1284.123 ms`; `runtime` p50/p95 `4163.781/4304.599 ms`.
+
+## 2026-07-23 — Architecture preflight evidence tightened 🟡
+
+- Preflight now recognizes the implemented per-session Jivo lock instead of requiring the word `chat`.
+- Bridge structured delivery events explicitly distinguish `terminal` and `delivery_status`; status updates remain nonterminal.
+- The CAS warning is retained: current state safety is session serialization plus atomic file replacement, not compare-and-swap.
+- Runtime registry and operations map received a dated, read-only VPS configuration snapshot; no production files, env values or services were changed.
+
+## 2026-07-23 — Repeating Jivo status integration prepared 🟡
+
+- **Bridge:** добавлен выключенный по умолчанию режим промежуточных статусов;
+  первый статус через 3 секунды, затем повтор каждые 3 секунды до финального
+  `BOT_MESSAGE`.
+- **Конфигурация:** добавлен безопасный пример
+  `deploy/systemd/novostroy-bot-n8n-bridge.env.example`; новые ключи разрешены в
+  `scripts/nmbot_env_secrets.py`.
+- **Документация:** обновлены README, architecture, diagnostics, integration
+  plan, operations map и external contracts.
+- **Проверка:** локально `17 passed`; production/VPS не изменён. Перед включением
+  нужны backup bridge + `.env`, restart только bridge и коррелированный Jivo
+  delivery trace.
+
+## 2026-07-21 — V0/V2 quality baselines fixed ✅
+
+- **V0 baseline:** `v0-baseline-20260721`, собственный harness и gate —
+  `23 passed`, `--scenario all --json` → `ok=true`.
+- **V2 baseline:** `v2-baseline-20260721-family-enrichment-repair`; family live
+  gate — `PASS`, score `10`, enrichment `3/3`, composer `repaired`, hard blockers
+  `0`.
+- **Правило:** V0 и V2 сравниваются только со своими эталонами. Полные паспорта:
+  `docs/NMBOT_V0_QUALITY_BASELINE.md` и
+  `docs/NMBOT_V2_QUALITY_BASELINE.md`.
+
+## 2026-07-21 — V0/V2 display names fixed ✅
+
+- **V0:** Валерия — имя задано в `prompts/v0_scenario_search.txt` и
+  `prompts/v0_answer.txt`.
+- **V2:** Ирина — имя сохранено в client-facing V2 prompts.
+- **Важно:** технические идентификаторы `V0`/`V2`, namespaces и команды
+  `/start_0`/`/start_2` не менялись.
+
+## 2026-07-21 — IntentPlan V3 production opt-in ✅
+
+- **Что добавлено:** `IntentPlanV3` подключён к authoritative Jivo runtime через
+  `NMBOT_INTENT_PLAN_VERSION`; V3 проходит strict validation и mechanical
+  transition, а V2 сохранён как rollback path.
+- **Production:** установлен `NMBOT_INTENT_PLAN_VERSION=v3`, перезапущен
+  `novostroy-bot-api.service`; backup —
+  `backups/deploy-intent-v3-20260721-085140`.
+- **Проверка:** synthetic Jivo live smoke вернул `BOT_MESSAGE`; planner trace
+  подтвердил `schema_version=3`, `canonical_valid=True`,
+  `fallback_used=False`; свежих service errors после рестарта нет.
+- **Ограничение:** полный многоходовой V3 production dialogue matrix и удаление
+  legacy layers ещё не выполнены.
+
+## 2026-07-21 — Current-options batch evidence probe 🔎
+
+- **Проверено:** один read-only typed batch-запрос по трём текущим ЖК с
+  `facts_needed=["parks", "schools"]` вернул `facts=3`, `near=0`, `missing=0`;
+  все три exact names прошли scope validation.
+- **Факты:** у каждого пришли числовые признаки школы, детского сада, парка и
+  водоёма (`1`), а также location, цены, readiness и built year.
+- **Вывод:** одного batch-запроса достаточно для плотного grounded shortlist;
+  три отдельных enrichment не требуются в этом сценарии.
+- **Ограничение:** MCP не вернул названия и расстояния до парков, поэтому нельзя
+  честно ранжировать ЖК по близости к конкретному парку.
+- **Дефект:** normalizer теряет числовые `1/0` infrastructure flags, потому что
+  проверяет только `is True`. До исправления факты не доходят до renderer.
+- **Статус:** probe read-only; normalizer fix и повторный production smoke ещё
+  не выполнялись.
+
+## 2026-07-21 — Structured customer presentation reference 📐
+
+- **Что зафиксировано:** единый structured output contract для customer
+  composition: `intro`, `options[].name/facts/description`, `recommendation`,
+  `missing_note`, `final_question`.
+- **Правило:** `recommendation` обязателен для `recommend_current`; internal
+  evidence verdict не показывается клиенту напрямую.
+- **Presentation flow:** good news → benefit per ЖК → real difference →
+  recommendation → next step.
+- **Golden reference:** `docs/GOLDEN_DIALOGS.md`, Example 7.
+- **Статус:** contract реализован в offline `response_composer` schema/prompt и
+  validator; live deterministic `CURRENT_OPTIONS` renderer ещё требует
+  отдельного wiring task.
+
+## 2026-07-21 — Scenario overlays and open-question pipeline 🧭
+
+- **Зафиксировано:** customer JSON остаётся единым, а `family`, `life`,
+  `rental`, `investment`, `financing` и `neutral` меняют только presentation
+  profile: fact priority, benefits, forbidden inferences и CTA policy.
+- **Неизвестные вопросы:** специальный recipe не является обязательным для
+  ответа. Для понятного вопроса без известного сценария запланирован универсальный
+  `answer_open_question` с буквальным user question, requested/available/missing
+  facts и bounded response policy.
+- **Fallback:** неизвестный сценарий не даёт модели свободу придумывать цель;
+  runtime сохраняет вопрос, ограничивает evidence и выбирает direct answer,
+  honest boundary или одно точное уточнение.
+- **Документ:** `docs/NMBOT_INTENT_PLAN_V3_IMPLEMENTATION_PLAN.md`, §§12.6–12.12.
+- **Статус:** архитектурный target contract; runtime wiring ещё не реализован.
+
+## 2026-07-21 — Scenario model probe and advisory validator ✅
+
+- Quality harness теперь собирает final `ResponsePlan` с executable recipe до
+  `ResponseBrief`.
+- Numeric MCP infrastructure flags `1/0` сохраняются в canonical cards.
+- Semantic validator переведён в advisory warnings и не заменяет распарсенный
+  model response fallback-ом; parser остаётся tolerant к собираемым отклонениям.
+- Добавлены universal open-question поля `ResponseBrief` и read-only probe.
+- Live model results: family `10/10`, investment `10/10`; unknown answerable и
+  unknown missing вернули `primary` без errors.
+- Evidence: `docs/NMBOT_SCENARIO_MODEL_PROBE_20260721.md`.
+- Статус: локальный model probe; production/Jivo не менялись.
+
+## 2026-07-21 — Missing fact routes to operator phone request ☎️
+
+- Для понятного вопроса с недоступным фактом policy изменена с neutral boundary
+  на `operator_phone_request`.
+- Ирина сама передаёт вопрос оператору и всегда завершает такой ответ запросом
+  номера телефона.
+- Запрещено отправлять клиента к застройщику, на сайт, в офис или предлагать
+  «уточнить на месте».
+- Статус: contract/prompt/probe updated; production/Jivo не менялись.
+
+---
+
+## 2026-07-16 — Four-layer validator shadow rollout 🧪
+
+- **Что добавлено:** зафиксирована цепочка `Planner → MCP/Search → deterministic Validator → Presenter`.
+- **Что проверено:** локальные typed-регрессии и isolated E2E для exact-match, no-match, hard constraints и unsupported claims; validator не передаёт rejected/unknown варианты в безопасный DecisionContext.
+- **Production-режим:** `NMBOT_FOUR_LAYER_RUNTIME=1`, `NMBOT_FOUR_LAYER_ENFORCE=0`; validator работает только как shadow diagnostics, legacy `main_answer` остаётся клиентским путём.
+- **Ограничение:** enforcement restricted Presenter не включён; требуется отдельная Jivo live-регрессия и проверка клиентского текста.
+- **Зачем:** проверить архитектурное разделение ответственности без риска изменить текущий ответ Ирины.
+
+## 2026-07-16 — Jivo search/callback docs aligned ✅
+
+- **Что обновлено:** зафиксированы текущие production-контракты для Jivo: exact `facts` против `near`, callback `name + phone -> private outbox -> Google Sheets`, и текущий live caveat по нормализации административного района vs метро.
+- **Что зафиксировано:** callback больше не считается operator handoff; он подтверждается сразу и уходит в background worker на Sheets, а operator handoff остаётся только для live operator path.
+- **Зачем:** чтобы документация не противоречила runtime после live deploy/search-contract rollout.
+- **Дополнено:** во втором проходе синхронизированы ещё три устаревшие формулировки: карта диалогов переведена на callback outbox/Sheets, eval-рубрика — на exact facts vs near, а Jivo integration plan получил resolved note вместо старого open question про INVITE_AGENT.
+
+## 2026-07-13 — Scenario-by-scenario debugging practice documented 🧪
+
+- **Что зафиксировано:** в `docs/EXPERIMENTS.md` добавлена рабочая практика отладки сценариев: гипотеза → симулятор/тест → чтение диалога глазами клиента → отчёт → регрессия → только потом runtime patch.
+- **Зачем:** не внедрять большие UX-изменения вслепую; сначала доказывать каждый сценарий отдельно и показывать реальные тексты, а не только pass/fail.
+- **Где применять:** MCP/scenario-аудит, family/mortgage/selected-details/investment/rental/installment сценарии, fallback wording и любые изменения, влияющие на ответы Ирины.
+
+## 2026-07-13 — MCP topic coverage audit documented 📚
+
+- **Что добавлено:** `docs/MCP_TOPIC_COVERAGE_20260713.md` с проверкой 23 тем по живому MCP `novostroym`.
+- **Что зафиксировано:** по темам поиска реально доступны цена, площадь, метро, готовность, отделка, семейная инфраструктура, ипотечные поля, рассрочка и часть investment/rental signals.
+- **Что уточнено:** `docs/SCENARIO_MCP_CONTRACT.md` теперь прямо ссылается на аудит и разводит MCP-facts, answer layer и менеджерскую воронку.
+
+## 2026-07-06 — Sticky payment topic + all-options handoff ✅
+
+- **Проверка:** на VPS `novostroy-bot.service` active/running, sticky-topic и payment playbook прошли локальные и VPS-suite проверки.
+- **Логика:** короткие follow-up `да`, `все проверь`, `проверь все` и опечатки теперь наследуют активную тему диалога; для `без ПВ` / `первоначальный взнос` бот не теряет контекст и не просит снова выбрать один ЖК, если клиент просит проверить все текущие варианты.
+- **Контракт:** payment/financing playbook запрещает async-обещания (`я уточню`, `как только будет информация`) и вместо этого предлагает реальное действие сейчас: новый MCP-поиск, live-check конкретного ЖК или передача всех текущих ЖК оператору.
+
+## 2026-07-06 — Prod/VPS verified after first-list UX fix ✅
+
+- **Проверка:** на VPS `novostroy-bot.service` active/running, runtime-файлы совпали с локальными по sha256, `python3 -m py_compile scripts/chat_tester_bot.py scripts/nmbot_test_agent.py` прошёл, `python3 scripts/nmbot_test_agent.py --suite dialog --json` прошёл `3/3`.
+- **Логика:** первый полезный ответ по списку вариантов и воронка к оператору работают по новой схеме; локально полный suite зелёный `76/76`.
+- **Каверза:** `scripts/nmbot_deploy_smoke.py` по-прежнему падает не из-за бота, а из-за внутреннего SSH `Permission denied` в самом smoke-скрипте; для prod-проверки использовались прямые VPS-команды.
 
 ## 2026-07-04 — Raw MCP evidence required in Sheet validation 🧾
 

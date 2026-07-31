@@ -11,6 +11,25 @@
 5. `prompts/eval/prompt_master_v1.txt` — evaluator: оценивает результат, но не пишет клиентский ответ.
 6. `prompts/text_style_v1.txt` — style-only слой: может улучшать живость текста, но не добавляет факты и не меняет сценарный смысл.
 
+## Текущая four-layer схема
+
+Целевая упрощённая цепочка ответа состоит из четырёх логических слоёв:
+
+1. **Planner** — LLM определяет действие, intent, target и ограничения клиента.
+2. **MCP/Search** — получает структурированные факты; не пишет клиентский текст.
+3. **Deterministic Validator** — код классифицирует варианты как `matched`, `near`, `rejected` или `unknown` и формирует безопасный `DecisionContext`.
+4. **Presenter** — LLM пишет финальный ответ только из разрешённого `DecisionContext`.
+
+В идеальном поисковом пути это два LLM-вызова (Planner и Presenter), один MCP-вызов и одна детерминированная проверка. Текущий production rollout работает в **shadow mode**: validator считает безопасные агрегированные diagnostics, но клиентский ответ пока проходит через legacy `main_answer`. Enforcement отключён до завершения регрессионной проверки.
+
+Feature flags:
+
+- `NMBOT_FOUR_LAYER_RUNTIME=1` — включить расчёт four-layer diagnostics;
+- `NMBOT_FOUR_LAYER_ENFORCE=0` — shadow mode, без замены клиентского ответа;
+- `NMBOT_FOUR_LAYER_ENFORCE=1` — restricted Presenter path, только после отдельного live-gate.
+
+Shadow diagnostics не должны содержать raw search payload, текст клиента, названия/ID вариантов, телефоны, токены или Authorization.
+
 ## Запрещено
 
 - Нельзя класть scenario-specific факты в `chat_v1.txt`: школы/сады для family, доходность/ликвидность для investment, арендный спрос для rental и так далее.

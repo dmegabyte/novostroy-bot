@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novostroy.local/field-sales-registry/v1/adaptation_schema.json",
+  "title": "External Field Sales Registry v1 option-card adaptation envelope",
+  "type": "object",
+  "required": ["schema_version", "object_name", "facts", "lot_index", "diagnostics"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "object_name": {"type": ["string", "null"], "maxLength": 240},
+    "facts": {
+      "type": "object",
+      "additionalProperties": {
+        "oneOf": [
+          {"type": "string", "maxLength": 240},
+          {"type": "number"},
+          {"type": "boolean"},
+          {"type": "array", "maxItems": 8, "items": {"type": ["string", "number", "boolean"], "maxLength": 240}}
+        ]
+      }
+    },
+    "lot_index": {"type": ["integer", "null"], "minimum": 0},
+    "diagnostics": {
+      "type": "object",
+      "required": ["unmapped_field_ids", "omitted_field_ids", "lot_examples_available", "lot_selection", "house_link_available"],
+      "additionalProperties": false,
+      "properties": {
+        "unmapped_field_ids": {"type": "array", "maxItems": 100, "items": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"}},
+        "omitted_field_ids": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/omission"}},
+        "lot_examples_available": {"type": "integer", "minimum": 0, "maximum": 100},
+        "lot_selection": {"enum": ["not_requested", "selected", "out_of_range"]},
+        "house_link_available": {"type": "boolean"}
+      }
+    }
+  },
+  "$defs": {
+    "omission": {
+      "type": "object",
+      "required": ["field_id", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "field_id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "reason": {"enum": ["missing", "unsafe_value", "unmapped", "not_requested", "out_of_range"]}
+      }
+    }
+  }
+}

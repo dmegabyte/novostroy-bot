@@ -1,0 +1,96 @@
+{
+  "answer_goal": "present_selected",
+  "brief": {
+    "combinations": [
+      {
+        "client_meaning": "В карточке есть оба семейных инфраструктурных признака.",
+        "forbidden_leap": "Не обещать места, закрепление или точную пешую доступность.",
+        "id": "school_plus_kindergarten",
+        "required_cards": [
+          "school",
+          "kindergarten"
+        ],
+        "required_evidence": [
+          "school evidence",
+          "kindergarten evidence"
+        ],
+        "safe_phrasing": "Для семейного сценария в карточке указаны и школа, и детский сад; расстояния и места лучше уточнить отдельно."
+      }
+    ],
+    "constraints": {
+      "facts_are_canonical": true,
+      "no_new_facts": true,
+      "registry_version": "v1"
+    },
+    "diagnostics": {
+      "omitted_field_ids": [
+        {
+          "field_id": "ads_count",
+          "reason": "not_relevant"
+        }
+      ],
+      "unknown_field_ids": [
+        "seller_phone"
+      ]
+    },
+    "fields": [
+      {
+        "allowed_benefit": "Можно отметить семейную логистику, если школа подтверждена в карточке.",
+        "field_id": "school",
+        "forbidden_claims": [
+          "Не обещать качество школы, закрепление, места или точное расстояние без evidence."
+        ],
+        "label": "школа рядом",
+        "literal_meaning": "В карточке есть подтверждение школы или школьной инфраструктуры.",
+        "rendering_rules": [
+          "Писать «в карточке указана школа», если нет расстояния или названия."
+        ],
+        "required_evidence": [
+          "school flag or canonical infrastructure school label is present"
+        ],
+        "strength": "strong",
+        "value": true
+      },
+      {
+        "allowed_benefit": "Можно отметить удобство для семьи с маленьким ребёнком, если детский сад подтверждён.",
+        "field_id": "kindergarten",
+        "forbidden_claims": [
+          "Не обещать места, качество сада или точную пешую доступность без evidence."
+        ],
+        "label": "детский сад рядом",
+        "literal_meaning": "В карточке есть подтверждение детского сада.",
+        "rendering_rules": [
+          "Не усиливать формулировку сверх буквального признака."
+        ],
+        "required_evidence": [
+          "kindergarten flag or canonical infrastructure kindergarten label is present"
+        ],
+        "strength": "strong",
+        "value": true
+      },
+      {
+        "allowed_benefit": "Можно отметить дворовую инфраструктуру для ребёнка, если площадка подтверждена.",
+        "field_id": "children_ground",
+        "forbidden_claims": [
+          "Не описывать состояние, безопасность или возраст площадки без evidence."
+        ],
+        "label": "детская площадка",
+        "literal_meaning": "В карточке подтверждена детская площадка.",
+        "rendering_rules": [
+          "Писать буквально: «есть детская площадка»."
+        ],
+        "required_evidence": [
+          "children_ground flag or canonical label is present"
+        ],
+        "strength": "supporting",
+        "value": true
+      }
+    ],
+    "fresh_mcp": true,
+    "object_name": "Синтетический семейный ЖК",
+    "scenario": "family",
+    "schema_version": 1
+  },
+  "cta_template": "Хотите подробнее разобрать этот вариант?",
+  "schema_version": 1
+}

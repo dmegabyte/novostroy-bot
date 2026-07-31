@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://novostroy.local/field-sales-registry/v1/structured_finance_schema.json",
+  "title": "External Field Sales Registry v1 structured finance input envelope",
+  "type": "object",
+  "required": ["schema_version", "object_name", "fresh_mcp", "facts"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": 1},
+    "object_name": {"type": "string", "minLength": 1, "maxLength": 240},
+    "fresh_mcp": {"type": "boolean"},
+    "facts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mortgage_rate": {"$ref": "#/$defs/mortgage_rate_fact"},
+        "down_payment": {"$ref": "#/$defs/down_payment_fact"},
+        "installment_months": {"$ref": "#/$defs/months_fact"}
+      }
+    }
+  },
+  "$defs": {
+    "mortgage_rate_fact": {
+      "type": "object",
+      "required": ["value", "source_field"],
+      "additionalProperties": false,
+      "properties": {
+        "value": {"type": "number", "minimum": 0},
+        "source_field": {"enum": ["mortgage_calc.min_percent", "mortgage.year_percent"]}
+      }
+    },
+    "down_payment_fact": {
+      "type": "object",
+      "required": ["value", "source_field"],
+      "additionalProperties": false,
+      "properties": {
+        "value": {"type": "number", "minimum": 0},
+        "source_field": {"enum": ["mortgage_calc.min_fee", "mortgage.min_fee"]}
+      }
+    },
+    "months_fact": {
+      "type": "object",
+      "required": ["value", "source_field"],
+      "additionalProperties": false,
+      "properties": {
+        "value": {"type": "integer", "minimum": 1},
+        "source_field": {"const": "payment_by_installments.month"}
+      }
+    }
+  }
+}

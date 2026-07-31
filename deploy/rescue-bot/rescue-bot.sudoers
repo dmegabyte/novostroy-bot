@@ -1,0 +1,4 @@
+# Install as root: /etc/sudoers.d/rescue-bot
+# Validate with: sudo visudo -cf /etc/sudoers.d/rescue-bot
+neiro ALL=(root) NOPASSWD: /usr/bin/wg-quick down /home/neiro/wg0.conf
+neiro ALL=(root) NOPASSWD: /usr/sbin/ip rule add pref 100 from 193.107.155.236/32 lookup main

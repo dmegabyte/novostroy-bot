@@ -4,4 +4,4 @@ set -a
 source "$(dirname "$0")/../.env"
 set +a
 cd "$(dirname "$0")/.."
-exec python3 scripts/chat_tester_bot.py
+exec ./.venv/bin/python scripts/chat_tester_bot.py

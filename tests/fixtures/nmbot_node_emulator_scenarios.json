@@ -1,0 +1,158 @@
+{
+  "scenarios": [
+    {
+      "id": "s01_redundant_purpose_clarification",
+      "title": "known investment purpose but planner asks primary_intent/purpose again",
+      "expected_failures": ["intent_loss_redundant_clarification"],
+      "state": {"known_intent": "investment", "known_fields": ["primary_intent", "purpose"], "constraints": {"hard": {}, "preferences": {}, "unknown": {}}, "visible_options": []},
+      "planner_output": {"action": "search", "intent": "investment", "intent_policy": "keep", "target": "new_search", "search_policy": "required", "confidence": 0.81, "constraints_patch": {"hard": {"rooms": "studio"}, "preferences": {}, "unknown": {}}, "facets": {"rooms": "studio"}, "missing_fields": ["primary_intent"], "clarification_fields": ["purpose"]},
+      "constraint_schema": {"rooms": {"fact_field": "rooms", "operator": "exact", "claim": true}},
+      "search_fixture": {"options": [{"option_id": "opt_a", "label": "Option A", "facts": {"rooms": "studio"}, "source_ref": "fixture:s01:a"}]},
+      "expected": {"guarded_action": "search", "search_gate": true, "counts": {"matched": 1, "near_match": 0, "rejected": 0, "unknown": 0}, "option_statuses": {"opt_a": "matched"}, "presenter_option_ids": ["opt_a"], "rejected_ids_absent": [], "relaxation_needed": false, "do_not_say": []}
+    },
+    {
+      "id": "s02_location_hard_reject",
+      "title": "hard location restriction rejects outside facts",
+      "expected_failures": [],
+      "state": {"known_intent": "life", "constraints": {"hard": {}, "preferences": {}, "unknown": {}}},
+      "planner_output": {"action": "search", "intent": "life", "intent_policy": "keep", "target": "new_search", "search_policy": "required", "confidence": 0.9, "constraints_patch": {"hard": {"location": ["Sokol", "Voykovskaya"]}, "preferences": {}, "unknown": {}}, "facets": {"location": ["Sokol", "Voykovskaya"]}, "missing_fields": [], "clarification_fields": []},
+      "constraint_schema": {"location": {"fact_field": "location", "operator": "in", "claim": true}},
+      "search_fixture": {"options": [{"option_id": "neutral_2", "label": "Neutral 2", "facts": {"location": "Tekstilshchiki"}, "source_ref": "fixture:s02:2"}]},
+      "expected": {"guarded_action": "search", "search_gate": true, "counts": {"matched": 0, "near_match": 0, "rejected": 1, "unknown": 0}, "option_statuses": {"neutral_2": "rejected"}, "presenter_option_ids": [], "rejected_ids_absent": ["neutral_2"], "relaxation_needed": true, "do_not_say": []}
+    },
+    {
+      "id": "s03_budget_hard_matching_unit",
+      "title": "hard max budget uses confirmed matching_unit_price_m",
+      "expected_failures": [],
+      "state": {"known_intent": "family", "constraints": {"hard": {}, "preferences": {}, "unknown": {}}},
+      "planner_output": {"action": "search", "intent": "family", "intent_policy": "keep", "target": "new_search", "search_policy": "required", "confidence": 0.88, "constraints_patch": {"hard": {"max_budget_m": 25}, "preferences": {}, "unknown": {}}, "facets": {"max_budget_m": 25}, "missing_fields": [], "clarification_fields": []},
+      "constraint_schema": {"max_budget_m": {"fact_field": "matching_unit_price_m", "operator": "max", "claim": true}},
+      "search_fixture": {"options": [{"option_id": "under", "label": "Under", "facts": {"matching_unit_price_m": 24.9, "price_min_m": 18, "price_max_m": 45}, "source_ref": "fixture:s03:under"}, {"option_id": "over", "label": "Over", "facts": {"matching_unit_price_m": 26.1, "price_min_m": 20, "price_max_m": 80}, "source_ref": "fixture:s03:over"}]},
+      "expected": {"guarded_action": "search", "search_gate": true, "counts": {"matched": 1, "near_match": 0, "rejected": 1, "unknown": 0}, "option_statuses": {"under": "matched", "over": "rejected"}, "presenter_option_ids": ["under"], "rejected_ids_absent": ["over"], "relaxation_needed": false, "do_not_say": []}
+    },
+    {
+      "id": "s04_current_options_mortgage",
+      "title": "mortgage question over current options forbids search",
+      "expected_failures": [],
+      "state": {"known_intent": "family", "expected_target": "current_options", "constraints": {"hard": {}, "preferences": {}, "unknown": {}}, "visible_options": [{"option_id": "visible_1", "label": "Visible One"}]},
+      "planner_output": {"action": "answer_current_options", "intent": "mortgage", "intent_policy": "keep", "target": "current_options", "search_policy": "forbidden", "confidence": 0.77, "constraints_patch": {"hard": {}, "preferences": {}, "unknown": {}}, "facets": {"topic": "mortgage"}, "missing_fields": [], "clarification_fields": []},
+      "constraint_schema": {},
+      "search_fixture": {"options": []},
+      "expected": {"guarded_action": "answer_current_options", "search_gate": false, "counts": {"matched": 0, "near_match": 0, "rejected": 0, "unknown": 0}, "option_statuses": {}, "presenter_option_ids": [], "rejected_ids_absent": [], "relaxation_needed": true, "do_not_say": []}
+    },
+    {
+      "id": "s05_meaningless_recovery",
+      "title": "meaningless input recovers without search or shortlist",
+      "expected_failures": [],
+      "state": {"constraints": {"hard": {}, "preferences": {}, "unknown": {}}},
+      "planner_output": {"action": "recover_dialogue", "intent": "unknown", "intent_policy": "keep", "target": "none", "search_policy": "forbidden", "confidence": 0.22, "constraints_patch": {"hard": {}, "preferences": {}, "unknown": {}}, "facets": {}, "missing_fields": [], "clarification_fields": []},
+      "constraint_schema": {},
+      "search_fixture": {"options": []},
+      "expected": {"guarded_action": "recover_dialogue", "search_gate": false, "counts": {"matched": 0, "near_match": 0, "rejected": 0, "unknown": 0}, "option_statuses": {}, "presenter_option_ids": [], "rejected_ids_absent": [], "relaxation_needed": true, "do_not_say": []}
+    },
+    {
+      "id": "s06_area_no_match",
+      "title": "good no-match due area minimum requires relaxation",
+      "expected_failures": [],
+      "state": {"known_intent": "family", "constraints": {"hard": {}, "preferences": {}, "unknown": {}}},
+      "planner_output": {"action": "search", "intent": "family", "intent_policy": "keep", "target": "new_search", "search_policy": "required", "confidence": 0.86, "constraints_patch": {"hard": {"area_min_m2": 70}, "preferences": {}, "unknown": {}}, "facets": {"area_min_m2": 70}, "missing_fields": [], "clarification_fields": []},
+      "constraint_schema": {"area_min_m2": {"fact_field": "matching_unit_area_min_m2", "operator": "min", "claim": true}},
+      "search_fixture": {"options": [{"option_id": "small", "label": "Small", "facts": {"matching_unit_area_min_m2": 55}, "source_ref": "fixture:s06:small"}, {"option_id": "unknown_area", "label": "Unknown Area", "facts": {}, "source_ref": "fixture:s06:unknown"}]},
+      "expected": {"guarded_action": "search", "search_gate": true, "counts": {"matched": 0, "near_match": 0, "rejected": 1, "unknown": 1}, "option_statuses": {"small": "rejected", "unknown_area": "unknown"}, "presenter_option_ids": [], "rejected_ids_absent": ["small"], "relaxation_needed": true, "do_not_say": [["unknown_area", "area_min_m2"]]}
+    },
+    {
+      "id": "s07_unknown_claim_absent",
+      "title": "unsupported claim field absent goes to do_not_say",
+      "expected_failures": [],
+      "state": {"known_intent": "life", "constraints": {"hard": {}, "preferences": {}, "unknown": {}}},
+      "planner_output": {"action": "search", "intent": "life", "intent_policy": "keep", "target": "new_search", "search_policy": "required", "confidence": 0.91, "constraints_patch": {"hard": {"location": ["Sokol"]}, "preferences": {}, "unknown": {}}, "facets": {"location": ["Sokol"]}, "missing_fields": [], "clarification_fields": []},
+      "constraint_schema": {"location": {"fact_field": "location", "operator": "in", "claim": true}, "delivery_visible": {"fact_field": "delivery_visible", "operator": "known", "claim": true}},
+      "search_fixture": {"options": [{"option_id": "claim_missing", "label": "Claim Missing", "facts": {"location": "Sokol"}, "source_ref": "fixture:s07:claim"}]},
+      "expected": {"guarded_action": "search", "search_gate": true, "counts": {"matched": 1, "near_match": 0, "rejected": 0, "unknown": 0}, "option_statuses": {"claim_missing": "matched"}, "presenter_option_ids": ["claim_missing"], "rejected_ids_absent": [], "relaxation_needed": false, "do_not_say": [["claim_missing", "delivery_visible"]]}
+    },
+    {
+      "id": "s08_conflicting_intent_keep_state",
+      "title": "conflicting planner intent with keep policy preserves state intent",
+      "expected_failures": [],
+      "state": {"known_intent": "investment", "constraints": {"hard": {}, "preferences": {}, "unknown": {}}},
+      "planner_output": {"action": "search", "intent": "family", "intent_policy": "keep", "target": "new_search", "search_policy": "required", "confidence": 0.82, "constraints_patch": {"hard": {}, "preferences": {}, "unknown": {}}, "facets": {}, "missing_fields": [], "clarification_fields": []},
+      "constraint_schema": {},
+      "search_fixture": {"options": []},
+      "expected": {"guarded_action": "search", "search_gate": true, "counts": {"matched": 0, "near_match": 0, "rejected": 0, "unknown": 0}, "option_statuses": {}, "presenter_option_ids": [], "rejected_ids_absent": [], "relaxation_needed": true, "do_not_say": []}
+    },
+    {
+      "id": "s09_explicit_intent_change",
+      "title": "explicit intent_policy change records provenance and changes state intent",
+      "expected_failures": [],
+      "state": {"known_intent": "investment", "constraints": {"hard": {}, "preferences": {}, "unknown": {}}},
+      "planner_output": {"action": "search", "intent": "family", "intent_policy": "change", "target": "new_search", "search_policy": "required", "confidence": 0.84, "constraints_patch": {"hard": {}, "preferences": {}, "unknown": {}}, "facets": {}, "missing_fields": [], "clarification_fields": []},
+      "constraint_schema": {},
+      "search_fixture": {"options": []},
+      "expected": {"guarded_action": "search", "search_gate": true, "counts": {"matched": 0, "near_match": 0, "rejected": 0, "unknown": 0}, "option_statuses": {}, "presenter_option_ids": [], "rejected_ids_absent": [], "relaxation_needed": true, "do_not_say": []}
+    },
+    {
+      "id": "s10_visible_options_explicit_new_search_allowed",
+      "title": "old visible options do not block explicit new search",
+      "expected_failures": [],
+      "state": {"known_intent": "family", "constraints": {"hard": {}, "preferences": {}, "unknown": {}}, "visible_options": [{"option_id": "old_visible", "label": "Old Visible"}]},
+      "planner_output": {"action": "search", "intent": "family", "intent_policy": "keep", "target": "new_search", "search_policy": "required", "confidence": 0.89, "constraints_patch": {"hard": {"rooms": "3"}, "preferences": {}, "unknown": {}}, "facets": {"rooms": "3"}, "missing_fields": [], "clarification_fields": []},
+      "constraint_schema": {"rooms": {"fact_field": "rooms", "operator": "exact", "claim": true}},
+      "search_fixture": {"options": [{"option_id": "new_3room", "label": "New 3-room", "facts": {"rooms": "3"}, "source_ref": "fixture:s10:new"}]},
+      "expected": {"guarded_action": "search", "search_gate": true, "counts": {"matched": 1, "near_match": 0, "rejected": 0, "unknown": 0}, "option_statuses": {"new_3room": "matched"}, "presenter_option_ids": ["new_3room"], "rejected_ids_absent": [], "relaxation_needed": false, "do_not_say": []}
+    },
+    {
+      "id": "s11_budget_aggregate_range_unknown",
+      "title": "project-wide price range is insufficient for room-specific budget match",
+      "expected_failures": [],
+      "state": {"known_intent": "family", "constraints": {"hard": {}, "preferences": {}, "unknown": {}}},
+      "planner_output": {"action": "search", "intent": "family", "intent_policy": "keep", "target": "new_search", "search_policy": "required", "confidence": 0.87, "constraints_patch": {"hard": {"max_budget_m": 25}, "preferences": {}, "unknown": {}}, "facets": {"max_budget_m": 25, "rooms": "3"}, "missing_fields": [], "clarification_fields": []},
+      "constraint_schema": {"max_budget_m": {"fact_field": "matching_unit_price_m", "operator": "max", "claim": true, "insufficient_if_absent": true}},
+      "search_fixture": {"options": [{"option_id": "aggregate_only", "label": "Aggregate Only", "facts": {"price_min_m": 17, "price_max_m": 90, "rooms": "3"}, "source_ref": "fixture:s11:aggregate"}]},
+      "expected": {"guarded_action": "search", "search_gate": true, "counts": {"matched": 0, "near_match": 0, "rejected": 0, "unknown": 1}, "option_statuses": {"aggregate_only": "unknown"}, "presenter_option_ids": [], "rejected_ids_absent": [], "relaxation_needed": true, "do_not_say": [["aggregate_only", "max_budget_m"]]}
+    },
+    {
+      "id": "s12_current_consultation_answer_visible",
+      "title": "current production consultation_answer with visible options maps to current-options answer",
+      "planner_format": "current",
+      "expected_failures": [],
+      "state": {"known_intent": "family", "constraints": {"hard": {}, "preferences": {}, "unknown": {}}, "visible_options": [{"option_id": "visible_1", "label": "Visible One"}]},
+      "planner_output": {"mode": "dialog_planner", "dialog_action": "consultation_answer", "confidence": 0.86, "params_delta": {}, "visible_options_policy": "keep", "conversation_followup": "answer", "clarification_question": "", "fallback_used": false},
+      "constraint_schema": {},
+      "search_fixture": {"options": []},
+      "expected": {"adapter_coverage_gaps": ["primary_intent_unavailable"], "guarded_action": "answer_current_options", "search_gate": false, "counts": {"matched": 0, "near_match": 0, "rejected": 0, "unknown": 0}, "option_statuses": {}, "presenter_option_ids": [], "rejected_ids_absent": [], "relaxation_needed": true, "do_not_say": []}
+    },
+    {
+      "id": "s13_current_new_search_params_unknown",
+      "title": "current production new_search keeps params_delta as unknown constraints",
+      "planner_format": "current",
+      "expected_failures": [],
+      "state": {"constraints": {"hard": {}, "preferences": {}, "unknown": {}}},
+      "planner_output": {"mode": "dialog_planner", "dialog_action": "new_search", "confidence": 0.9, "params_delta": {"rooms": "2", "max_budget_m": 25}, "mcp_request_patch": {}, "visible_options_policy": "replace", "conversation_followup": "", "clarification_question": "", "fallback_used": false},
+      "constraint_schema": {"rooms": {"fact_field": "rooms", "operator": "exact", "claim": true}, "max_budget_m": {"fact_field": "matching_unit_price_m", "operator": "max", "claim": true}},
+      "search_fixture": {"options": [{"option_id": "any_option", "label": "Any Option", "facts": {"rooms": "2", "matching_unit_price_m": 24}, "source_ref": "fixture:s13:any"}]},
+      "expected": {"adapter_coverage_gaps": ["primary_intent_unavailable"], "guarded_action": "search", "search_gate": true, "counts": {"matched": 1, "near_match": 0, "rejected": 0, "unknown": 0}, "option_statuses": {"any_option": "matched"}, "presenter_option_ids": ["any_option"], "rejected_ids_absent": [], "relaxation_needed": false, "do_not_say": []}
+    },
+    {
+      "id": "s14_current_ask_clarification_known_purpose_not_tested",
+      "title": "current ask_clarification cannot prove redundant known purpose without normalized fields",
+      "planner_format": "current",
+      "expected_status": "not_tested",
+      "expected_failures": [],
+      "state": {"known_intent": "investment", "known_fields": ["primary_intent", "purpose"], "constraints": {"hard": {}, "preferences": {}, "unknown": {}}},
+      "planner_output": {"mode": "dialog_planner", "dialog_action": "ask_clarification", "confidence": 0.76, "params_delta": {}, "conversation_followup": "", "clarification_question": "Уточните цель покупки", "fallback_used": false},
+      "constraint_schema": {},
+      "search_fixture": {"options": []},
+      "expected": {"adapter_coverage_gaps": ["primary_intent_unavailable", "clarification_fields_unavailable"], "guarded_action": "clarify", "search_gate": false, "counts": {"matched": 0, "near_match": 0, "rejected": 0, "unknown": 0}, "option_statuses": {}, "presenter_option_ids": [], "rejected_ids_absent": [], "relaxation_needed": true, "do_not_say": []}
+    },
+    {
+      "id": "s15_preference_to_hard_migration",
+      "title": "constraint category transition removes field from preference when hard patch arrives",
+      "expected_failures": [],
+      "state": {"known_intent": "family", "constraints": {"hard": {}, "preferences": {"location": ["Sokol"]}, "unknown": {}}},
+      "planner_output": {"action": "search", "intent": "family", "intent_policy": "keep", "target": "new_search", "search_policy": "required", "confidence": 0.91, "constraints_patch": {"hard": {"location": ["Sokol"]}, "preferences": {}, "unknown": {}}, "facets": {"location": ["Sokol"]}, "missing_fields": [], "clarification_fields": []},
+      "constraint_schema": {"location": {"fact_field": "location", "operator": "in", "claim": true}},
+      "search_fixture": {"options": [{"option_id": "sokol_match", "label": "Sokol Match", "facts": {"location": "Sokol"}, "source_ref": "fixture:s15:sokol"}]},
+      "expected": {"guarded_action": "search", "search_gate": true, "counts": {"matched": 1, "near_match": 0, "rejected": 0, "unknown": 0}, "option_statuses": {"sokol_match": "matched"}, "presenter_option_ids": ["sokol_match"], "rejected_ids_absent": [], "relaxation_needed": false, "do_not_say": []}
+    }
+  ]
+}

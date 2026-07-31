@@ -1,0 +1,269 @@
+- description: v3 / family
+  vars:
+    version: v3
+    case: family
+    scenario: family
+    query: python3 scripts/chat_cli.py --timeout 180 Двушка для семьи в Москве
+    mcp: ''
+    response: '👋 Нашла несколько вариантов двухкомнатных квартир для семьи в Москве:
+
+
+      1. ЖК «Лучи» в Солнцево. Это комфорт-класс с отделкой, что удобно для быстрого переезда.
+
+
+      2. ЖК «Южные Сады» в Южном Бутово. Тоже комфорт-класс с отделкой, подходит для семейного проживания.
+
+
+      3. Жилой район «АЛИА» в Покровском-Стрешнево. Это бизнес-класс с отделкой и развитой инфраструктурой.
+
+
+      Какой ЖК хотите рассмотреть подробнее?'
+    warnings: ''
+    facts_count: 3
+    visible_count: 3
+    facts_names: ЖК «Лучи»; ЖК «Южные Сады»; Жилой район «АЛИА»
+    visible_names: ЖК «Лучи»; ЖК «Южные Сады»; Жилой район «АЛИА»
+    evaluation: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем не найдено",
+      "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt": "prompts/eval/prompt_master_v1.txt",
+      "scenario": "family", "command": "python3 scripts/chat_cli.py --timeout 180 Двушка для семьи в Москве"}'
+    score: 100
+    prompt_master_verdict: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем
+      не найдено", "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt":
+      "prompts/eval/prompt_master_v1.txt", "scenario": "family", "command": "python3 scripts/chat_cli.py --timeout 180 Двушка
+      для семьи в Москве"}'
+  metadata:
+    case: family
+    version: v3
+- description: v2 / search
+  vars:
+    version: v2
+    case: search
+    scenario: search
+    query: python3 scripts/chat_cli.py --timeout 180 Найди однушку до 8 млн в Москве
+    mcp: ''
+    response: 'Нашла один вариант однушки в Москве, которая подходит под ваш бюджет и запрос:
+
+
+      ЖК «Зелёный парк» в Крюково. Квартира с отделкой, цена от 7 827 900 руб. Дом уже сдан, так что можно планировать переезд.
+
+
+      Есть еще варианты, но они либо без отделки, либо цена по запросу, что может быть выше вашего бюджета. Могу их тоже показать,
+      если интересно.'
+    warnings: ''
+    facts_count: 1
+    visible_count: 0
+    facts_names: Зелёный парк
+    visible_names: ''
+    evaluation: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем не найдено",
+      "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt": "prompts/eval/prompt_master_v1.txt",
+      "scenario": "search", "command": "python3 scripts/chat_cli.py --timeout 180 Найди однушку до 8 млн в Москве"}'
+    score: 100
+    prompt_master_verdict: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем
+      не найдено", "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt":
+      "prompts/eval/prompt_master_v1.txt", "scenario": "search", "command": "python3 scripts/chat_cli.py --timeout 180 Найди
+      однушку до 8 млн в Москве"}'
+  metadata:
+    case: search
+    version: v2
+- description: v2 / operator
+  vars:
+    version: v2
+    case: operator
+    scenario: operator
+    query: 'python3 scripts/chat_cli.py --timeout 180 --params {"selected_option_name": "ЖК «Лучи»"} Можно ли забронировать?'
+    mcp: ''
+    response: 'Да, в ЖК «Лучи» предусмотрена покупка по ДДУ с использованием эскроу-счетов. Это стандартный и безопасный механизм
+      бронирования и покупки новостройки.
+
+
+      Вы можете обратиться к застройщику или официальным представителям для оформления брони на конкретный лот.
+
+
+      Хотите, чтобы я помогла связаться с застройщиком?'
+    warnings: ''
+    facts_count: 1
+    visible_count: 0
+    facts_names: ЖК «Лучи»
+    visible_names: ''
+    evaluation: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем не найдено",
+      "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt": "prompts/eval/prompt_master_v1.txt",
+      "scenario": "operator", "command": "python3 scripts/chat_cli.py --timeout 180 --params {\"selected_option_name\": \"ЖК
+      «Лучи»\"} Можно ли забронировать?"}'
+    score: 100
+    prompt_master_verdict: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем
+      не найдено", "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt":
+      "prompts/eval/prompt_master_v1.txt", "scenario": "operator", "command": "python3 scripts/chat_cli.py --timeout 180 --params
+      {\"selected_option_name\": \"ЖК «Лучи»\"} Можно ли забронировать?"}'
+  metadata:
+    case: operator
+    version: v2
+- description: v3 / rental
+  vars:
+    version: v3
+    case: rental
+    scenario: rental
+    query: python3 scripts/chat_cli.py --timeout 180 Под сдачу в аренду
+    mcp: ''
+    response: '👋 Есть несколько вариантов, которые хорошо подходят для сдачи в аренду:
+
+
+      1. ЖК «Левел Павелецкая Сити» в Даниловском районе. Он уже сдан, есть отделка, а высокий спрос в бизнес-классе и близость
+      к деловому центру делают его привлекательным для арендаторов.
+
+
+      2. Жилой квартал «Символ» в Лефортово. Это масштабный проект бизнес-класса с хорошей транспортной доступностью и широким
+      выбором планировок. Он тоже сдан.
+
+
+      3. ЖК «Лучи» в Солнцево. Это комфорт-класс с отделкой, что удобно для быстрой сдачи в аренду, и доступной ценой входа.
+      ЖК уже сдан.
+
+
+      Какой ЖК хотите рассмотреть подробнее?'
+    warnings: ''
+    facts_count: 3
+    visible_count: 3
+    facts_names: Левел Павелецкая Сити; Жилой квартал «Символ»; ЖК «Лучи»
+    visible_names: Левел Павелецкая Сити; Жилой квартал «Символ»; ЖК «Лучи»
+    evaluation: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем не найдено",
+      "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt": "prompts/eval/prompt_master_v1.txt",
+      "scenario": "rental", "command": "python3 scripts/chat_cli.py --timeout 180 Под сдачу в аренду"}'
+    score: 100
+    prompt_master_verdict: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем
+      не найдено", "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt":
+      "prompts/eval/prompt_master_v1.txt", "scenario": "rental", "command": "python3 scripts/chat_cli.py --timeout 180 Под
+      сдачу в аренду"}'
+  metadata:
+    case: rental
+    version: v3
+- description: v3 / off_topic
+  vars:
+    version: v3
+    case: off_topic
+    scenario: off_topic
+    query: python3 scripts/chat_cli.py --timeout 180 Расскажи анекдот
+    mcp: ''
+    response: Я консультирую только по недвижимости. Могу помочь с подбором новостройки в Москве или Московской области.
+    warnings: ''
+    facts_count: 0
+    visible_count: 0
+    facts_names: ''
+    visible_names: ''
+    evaluation: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем не найдено",
+      "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt": "prompts/eval/prompt_master_v1.txt",
+      "scenario": "off_topic", "command": "python3 scripts/chat_cli.py --timeout 180 Расскажи анекдот"}'
+    score: 100
+    prompt_master_verdict: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем
+      не найдено", "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt":
+      "prompts/eval/prompt_master_v1.txt", "scenario": "off_topic", "command": "python3 scripts/chat_cli.py --timeout 180
+      Расскажи анекдот"}'
+  metadata:
+    case: off_topic
+    version: v3
+- description: vfollow / refine_search
+  vars:
+    version: vfollow
+    case: refine_search
+    scenario: refine_search
+    query: 'python3 scripts/chat_cli.py --timeout 180 --params ''{"rooms": "2", "purpose": "family", "selected_option_name":
+      "ЖК «Лучи»", "visible_options": [{"name": "ЖК «Лучи»"}, {"name": "Второй Нагатинский"}, {"name": "Жилой район «АЛИА»"}]}''
+      ''Исключи варианты без отделки и оставь только сданные, если есть.'''
+    mcp: ''
+    response: '{"message": "Поняла. Тогда из тех вариантов, что смотрели, подходят:", "items": [{"name": "Второй Нагатинский",
+      "location": "Москва", "price_range": "27.0 - 30.4 млн руб.", "reason": "сдан, есть отделка, школа и детский сад"}, {"name":
+      "Жилой район «АЛИА»", "location": "Москва", "price_range": "17.0 - 98.6 млн руб.", "reason": "сдан, есть отделка, двор
+      без машин и парковая зона"}, {"name": "ЖК «Лучи»", "location": "Москва", "price_range": "10.9 - 31.6 млн руб.", "reason":
+      "сдан, есть отделка, закрытая территория и парк рядом"}], "question": "Какой из этих вариантов хотите рассмотреть подробнее?"}'
+    warnings: ''
+    facts_count: 3
+    visible_count: 3
+    facts_names: Второй Нагатинский; Жилой район «АЛИА»; ЖК «Лучи»
+    visible_names: Второй Нагатинский; Жилой район «АЛИА»; ЖК «Лучи»
+    evaluation: '{"score": 90, "verdict": "good", "problem_level": "response", "what_went_wrong": "в ответе нет продающего
+      акцента", "next_fix": "сделать ответ более консультативным и сравнивающим", "source_warnings": "", "mcp_signals": {"request":
+      {"schools": true, "kindergartens": true, "parks": true, "yard_without_cars": true}, "search": {"schools": true, "kindergartens":
+      true, "parks": true, "yard_without_cars": true}}, "prompt": "prompts/eval/prompt_master_v1.txt", "scenario": "refine_search",
+      "command": "python3 scripts/chat_cli.py --timeout 180 --params ''{\"rooms\": \"2\", \"purpose\": \"family\", \"selected_option_name\":
+      \"ЖК «Лучи»\", \"visible_options\": [{\"name\": \"ЖК «Лучи»\"}, {\"name\": \"Второй Нагатинский\"}, {\"name\": \"Жилой
+      район «АЛИА»\"}]}'' ''Исключи варианты без отделки и оставь только сданные, если есть.''"}'
+    score: 90
+    prompt_master_verdict: '{"score": 90, "verdict": "good", "problem_level": "response", "what_went_wrong": "в ответе нет
+      продающего акцента", "next_fix": "сделать ответ более консультативным и сравнивающим", "source_warnings": "", "mcp_signals":
+      {"request": {"schools": true, "kindergartens": true, "parks": true, "yard_without_cars": true}, "search": {"schools":
+      true, "kindergartens": true, "parks": true, "yard_without_cars": true}}, "prompt": "prompts/eval/prompt_master_v1.txt",
+      "scenario": "refine_search", "command": "python3 scripts/chat_cli.py --timeout 180 --params ''{\"rooms\": \"2\", \"purpose\":
+      \"family\", \"selected_option_name\": \"ЖК «Лучи»\", \"visible_options\": [{\"name\": \"ЖК «Лучи»\"}, {\"name\": \"Второй
+      Нагатинский\"}, {\"name\": \"Жилой район «АЛИА»\"}]}'' ''Исключи варианты без отделки и оставь только сданные, если
+      есть.''"}'
+  metadata:
+    case: refine_search
+    version: vfollow
+- description: vfollow / explain_selection
+  vars:
+    version: vfollow
+    case: explain_selection
+    scenario: explain_selection
+    query: 'python3 scripts/chat_cli.py --timeout 180 --params ''{"rooms": "2", "purpose": "family", "selected_option_name":
+      "ЖК «Лучи»", "visible_options": [{"name": "ЖК «Лучи»"}, {"name": "Второй Нагатинский"}, {"name": "Жилой район «АЛИА»"}]}''
+      ''По какому принципу ты подбираешь и почему эти ЖК лучше?'''
+    mcp: ''
+    response: '{"message": "Я подбираю ЖК, ориентируясь на ваши пожелания. Вы искали двухкомнатную квартиру для семьи, поэтому
+      я предложила варианты, где есть развитая инфраструктура для детей и комфортная среда для жизни.", "items": [{"name":
+      "ЖК «Лучи»", "location": "Солнцево", "price_range": "от 10.9 до 31.6 млн руб.", "reason": "здесь запланированы 4 детских
+      сада и 2 школы, рядом Мещерский парк и Чоботовский лес, а двор без машин"}, {"name": "Второй Нагатинский", "location":
+      "Нагатино-Садовники", "price_range": "от 27.0 до 30.4 млн руб.", "reason": "есть школа и детский сад на территории,
+      рядом набережная и парки, а также дворы без машин"}, {"name": "Жилой район «АЛИА»", "location": "Покровское-Стрешнево",
+      "price_range": "от 17.0 до 98.6 млн руб.", "reason": "3 школы и 4 детских сада в пешей доступности, собственный парк
+      на территории и дворы без машин"}], "question": "Какой из этих вариантов хотите рассмотреть подробнее?"}'
+    warnings: ''
+    facts_count: 3
+    visible_count: 3
+    facts_names: ЖК «Лучи»; Второй Нагатинский; Жилой район «АЛИА»
+    visible_names: ЖК «Лучи»; Второй Нагатинский; Жилой район «АЛИА»
+    evaluation: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем не найдено",
+      "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "mcp_signals": {"request":
+      {"schools": true, "kindergartens": true, "parks": true, "yard_without_cars": true}, "search": {"schools": true, "kindergartens":
+      true, "parks": true, "yard_without_cars": true}}, "prompt": "prompts/eval/prompt_master_v1.txt", "scenario": "explain_selection",
+      "command": "python3 scripts/chat_cli.py --timeout 180 --params ''{\"rooms\": \"2\", \"purpose\": \"family\", \"selected_option_name\":
+      \"ЖК «Лучи»\", \"visible_options\": [{\"name\": \"ЖК «Лучи»\"}, {\"name\": \"Второй Нагатинский\"}, {\"name\": \"Жилой
+      район «АЛИА»\"}]}'' ''По какому принципу ты подбираешь и почему эти ЖК лучше?''"}'
+    score: 100
+    prompt_master_verdict: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем
+      не найдено", "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "mcp_signals":
+      {"request": {"schools": true, "kindergartens": true, "parks": true, "yard_without_cars": true}, "search": {"schools":
+      true, "kindergartens": true, "parks": true, "yard_without_cars": true}}, "prompt": "prompts/eval/prompt_master_v1.txt",
+      "scenario": "explain_selection", "command": "python3 scripts/chat_cli.py --timeout 180 --params ''{\"rooms\": \"2\",
+      \"purpose\": \"family\", \"selected_option_name\": \"ЖК «Лучи»\", \"visible_options\": [{\"name\": \"ЖК «Лучи»\"}, {\"name\":
+      \"Второй Нагатинский\"}, {\"name\": \"Жилой район «АЛИА»\"}]}'' ''По какому принципу ты подбираешь и почему эти ЖК лучше?''"}'
+  metadata:
+    case: explain_selection
+    version: vfollow
+- description: vfollow / fact_check
+  vars:
+    version: vfollow
+    case: fact_check
+    scenario: fact_check
+    query: 'python3 scripts/chat_cli.py --timeout 180 --params ''{"purpose": "fact_check", "selected_option_name": "ЖК «Лучи»",
+      "visible_options": [{"name": "ЖК «Лучи»"}], "fact_to_check": "yard_without_cars"}'' ''Точно есть двор без машин?'''
+    mcp: ''
+    response: '{"message": "Да, в ЖК «Лучи» предусмотрен двор без машин. Это сделано для безопасности, чтобы дети могли спокойно
+      гулять.", "items": [], "question": "Хотите узнать что-то еще про этот ЖК?"}'
+    warnings: ''
+    facts_count: 1
+    visible_count: 0
+    facts_names: ЖК «Лучи»
+    visible_names: ''
+    evaluation: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем не найдено",
+      "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "mcp_signals": {}, "prompt":
+      "prompts/eval/prompt_master_v1.txt", "scenario": "fact_check", "command": "python3 scripts/chat_cli.py --timeout 180
+      --params ''{\"purpose\": \"fact_check\", \"selected_option_name\": \"ЖК «Лучи»\", \"visible_options\": [{\"name\": \"ЖК
+      «Лучи»\"}], \"fact_to_check\": \"yard_without_cars\"}'' ''Точно есть двор без машин?''"}'
+    score: 100
+    prompt_master_verdict: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем
+      не найдено", "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "mcp_signals":
+      {}, "prompt": "prompts/eval/prompt_master_v1.txt", "scenario": "fact_check", "command": "python3 scripts/chat_cli.py
+      --timeout 180 --params ''{\"purpose\": \"fact_check\", \"selected_option_name\": \"ЖК «Лучи»\", \"visible_options\":
+      [{\"name\": \"ЖК «Лучи»\"}], \"fact_to_check\": \"yard_without_cars\"}'' ''Точно есть двор без машин?''"}'
+  metadata:
+    case: fact_check
+    version: vfollow

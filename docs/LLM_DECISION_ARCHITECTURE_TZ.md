@@ -2,7 +2,22 @@
 
 Дата: 2026-07-03
 
-Статус: проект архитектуры для чтения и обсуждения. Это **не инструкция к немедленному deploy**, а целевая схема, как перестроить принятие решений так, чтобы LLM было проще и безопаснее отвечать клиентам.
+Статус: целевая архитектура; часть four-layer контура уже проверена локально и включена в production в shadow mode. Это **не разрешение на enforcement/deploy всех целевых компонентов**.
+
+### Текущий runtime-статус
+
+Практический four-layer контур следует читать как четыре логических слоя:
+
+```text
+Planner LLM → MCP/Search → deterministic Validator → Presenter LLM
+```
+
+- Planner и Presenter — LLM-роли;
+- MCP/Search получает факты и не формирует клиентский ответ;
+- Validator кодом проверяет `matched/near/rejected/unknown`, hard constraints и `do_not_say`;
+- в production validator пока работает в shadow mode и не блокирует legacy-ответ.
+
+Цель — не добавлять новые запреты в перегруженные prompts, а переносить проверяемые правила в typed-контракт и кодовый validator. Enforcement возможен только после Jivo live-регрессии по hard constraints, unsupported claims, no-match и current-options follow-up.
 
 ## 1. Зачем нужна новая архитектура
 
@@ -86,7 +101,7 @@ Presenter
         ↓
 Safety Validator
         ↓
-Ответ Ирины в Telegram
+Ответ Ирины в Jivo
 ```
 
 ## 4. Компоненты

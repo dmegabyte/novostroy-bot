@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "adapter": {
+    "id": "qapairs",
+    "label": "Qapairs current owner adapter evidence",
+    "canonical_notebook": "cc-daemons",
+    "owner_root": "/home/ser/projects/cc-daemons",
+    "owner_root_evidence": {
+      "source": "PROJECT_MAP.md",
+      "refs": ["PROJECT_MAP.md:63-71", "PROJECT_MAP.md:81-82"]
+    },
+    "status": "pilot_ready_local_developer_routing_only",
+    "validated": true
+  },
+  "legacy_not_canonical": [
+    {
+      "path": "/home/ser/projects/qapairs-daemon",
+      "reason": "legacy standalone tree; must not be canonical current owner"
+    },
+    {
+      "path": "projects/qapairs",
+      "reason": "legacy/embedded poller path; not canonical current owner root or current runtime source"
+    }
+  ],
+  "active_sources": [
+    {
+      "path": "tools/issue_qa_autonomous.py",
+      "kind": "tool",
+      "stage": "v1_autonomous_runner",
+      "symbols": ["run_autonomous", "_run_structured_facts_pass", "main"],
+      "evidence_refs": ["PROJECT_MAP.md:69-70", "PROJECT_MAP.md:81-82", "docs/qapairs-operational-modes.md:34-48", "docs/qapairs-operational-modes.md:77-90"],
+      "report_only": false
+    },
+    {
+      "path": "tools/issue_qa_orchestrator.py",
+      "kind": "tool",
+      "stage": "v1_orchestrator_verifier",
+      "symbols": ["verify_pair", "verify_record_pairs", "partition_record_pairs"],
+      "evidence_refs": ["PROJECT_MAP.md:69-70", "PROJECT_MAP.md:98-100", "tools/issue_qa_orchestrator.py:2375-2552"],
+      "report_only": false
+    },
+    {
+      "path": "tools/issue_qa_quality_gate.py",
+      "kind": "tool",
+      "stage": "v1_quality_gate",
+      "symbols": ["review_daily", "build_reviewed_candidates", "run_gate"],
+      "evidence_refs": ["tools/issue_qa_quality_gate.py:4-10", "tools/issue_qa_quality_gate.py:32-105", "PROJECT_MAP.md:98-100"],
+      "report_only": false
+    },
+    {
+      "path": "tools/qapairs_gemma_facts_to_pairs.py",
+      "kind": "tool",
+      "stage": "v2_structured_facts_report_only",
+      "symbols": ["select_best_facts", "structured_issues", "main"],
+      "evidence_refs": ["tools/qapairs_gemma_facts_to_pairs.py:2-10", "tools/qapairs_gemma_facts_to_pairs.py:616-646", "tools/qapairs_gemma_facts_to_pairs.py:1110-1168", "docs/qapairs-operational-modes.md:49-66"],
+      "report_only": true
+    }
+  ],
+  "docs": [
+    {"path": "PROJECT_MAP.md", "refs": ["PROJECT_MAP.md:63-71", "PROJECT_MAP.md:81-82", "PROJECT_MAP.md:98-100"]},
+    {"path": "docs/qapairs-operational-modes.md", "refs": ["docs/qapairs-operational-modes.md:34-66", "docs/qapairs-operational-modes.md:77-140"]},
+    {"path": "docs/qapairs-architecture.md", "refs": ["docs/qapairs-architecture.md"]},
+    {"path": "docs/qapairs-principles.md", "refs": ["docs/qapairs-principles.md"]},
+    {"path": "docs/qapairs-template-system.md", "refs": ["docs/qapairs-template-system.md"]}
+  ],
+  "focused_tests": [
+    "tests/test_issue_qa_autonomous.py",
+    "tests/test_issue_qa_orchestrator.py",
+    "tests/test_issue_qa_quality_gate.py",
+    "tests/test_qapairs_gemma_facts_to_pairs.py",
+    "tests/test_qapairs_recovery_pass.py",
+    "tests/test_qapairs_failure_report.py",
+    "tests/test_qapairs_crm_journal.py",
+    "tests/test_qapairs_status.py"
+  ],
+  "excluded": {
+    "paths": [
+      "/home/ser/projects/qapairs-daemon",
+      "projects/qapairs/daemon.py",
+      "projects/qapairs/poller.py",
+      "logs/",
+      "/tmp/issue-agent/",
+      ".env"
+    ],
+    "operations": ["crm_post", "google_sheets", "network", "ssh_vps", "eval", "runtime_logs"]
+  }
+}

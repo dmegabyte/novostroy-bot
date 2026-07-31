@@ -1,0 +1,99 @@
+- description: v3 / family
+  vars:
+    version: v3
+    case: family
+    scenario: family
+    query: python3 scripts/chat_cli.py --timeout 180 Двушка для семьи в Москве
+    mcp: ''
+    response: '👋 Нашла несколько вариантов двухкомнатных квартир для семьи в Москве:
+
+
+      1. ЖК «Лучи» в Солнцево. Это комфорт-класс с отделкой, что удобно для быстрого переезда.
+
+
+      2. ЖК «Южные Сады» в Южном Бутово. Тоже комфорт-класс с отделкой, подходит для семейного проживания.
+
+
+      3. Жилой район «АЛИА» в Покровском-Стрешнево. Это бизнес-класс с отделкой и развитой инфраструктурой.
+
+
+      Какой ЖК хотите рассмотреть подробнее?'
+    warnings: ''
+    facts_count: 3
+    visible_count: 3
+    facts_names: ЖК «Лучи»; ЖК «Южные Сады»; Жилой район «АЛИА»
+    visible_names: ЖК «Лучи»; ЖК «Южные Сады»; Жилой район «АЛИА»
+    evaluation: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем не найдено",
+      "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt": "prompts/eval/prompt_master_v1.txt",
+      "scenario": "family", "command": "python3 scripts/chat_cli.py --timeout 180 Двушка для семьи в Москве"}'
+    score: 100
+    prompt_master_verdict: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем
+      не найдено", "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt":
+      "prompts/eval/prompt_master_v1.txt", "scenario": "family", "command": "python3 scripts/chat_cli.py --timeout 180 Двушка
+      для семьи в Москве"}'
+  metadata:
+    case: family
+    version: v3
+- description: v3 / rental
+  vars:
+    version: v3
+    case: rental
+    scenario: rental
+    query: python3 scripts/chat_cli.py --timeout 180 Под сдачу в аренду
+    mcp: ''
+    response: '👋 Есть несколько вариантов, которые хорошо подходят для сдачи в аренду:
+
+
+      1. ЖК «Левел Павелецкая Сити» в Даниловском районе. Он уже сдан, есть отделка, а высокий спрос в бизнес-классе и близость
+      к деловому центру делают его привлекательным для арендаторов.
+
+
+      2. Жилой квартал «Символ» в Лефортово. Это масштабный проект бизнес-класса с хорошей транспортной доступностью и широким
+      выбором планировок. Он тоже сдан.
+
+
+      3. ЖК «Лучи» в Солнцево. Это комфорт-класс с отделкой, что удобно для быстрой сдачи в аренду, и доступной ценой входа.
+      ЖК уже сдан.
+
+
+      Какой ЖК хотите рассмотреть подробнее?'
+    warnings: ''
+    facts_count: 3
+    visible_count: 3
+    facts_names: Левел Павелецкая Сити; Жилой квартал «Символ»; ЖК «Лучи»
+    visible_names: Левел Павелецкая Сити; Жилой квартал «Символ»; ЖК «Лучи»
+    evaluation: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем не найдено",
+      "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt": "prompts/eval/prompt_master_v1.txt",
+      "scenario": "rental", "command": "python3 scripts/chat_cli.py --timeout 180 Под сдачу в аренду"}'
+    score: 100
+    prompt_master_verdict: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем
+      не найдено", "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt":
+      "prompts/eval/prompt_master_v1.txt", "scenario": "rental", "command": "python3 scripts/chat_cli.py --timeout 180 Под
+      сдачу в аренду"}'
+  metadata:
+    case: rental
+    version: v3
+- description: v3 / off_topic
+  vars:
+    version: v3
+    case: off_topic
+    scenario: off_topic
+    query: python3 scripts/chat_cli.py --timeout 180 Расскажи анекдот
+    mcp: ''
+    response: Я консультирую только по недвижимости. Могу помочь с подбором новостройки в Москве или Московской области.
+    warnings: ''
+    facts_count: 0
+    visible_count: 0
+    facts_names: ''
+    visible_names: ''
+    evaluation: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем не найдено",
+      "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt": "prompts/eval/prompt_master_v1.txt",
+      "scenario": "off_topic", "command": "python3 scripts/chat_cli.py --timeout 180 Расскажи анекдот"}'
+    score: 100
+    prompt_master_verdict: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем
+      не найдено", "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt":
+      "prompts/eval/prompt_master_v1.txt", "scenario": "off_topic", "command": "python3 scripts/chat_cli.py --timeout 180
+      Расскажи анекдот"}'
+  metadata:
+    case: off_topic
+    version: v3

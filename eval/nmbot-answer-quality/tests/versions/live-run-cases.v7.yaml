@@ -1,0 +1,84 @@
+- description: v7 / family
+  vars:
+    version: v7
+    case: family
+    scenario: family
+    query: python3 scripts/chat_cli.py --timeout 180 Двушка для семьи в Москве
+    mcp: ''
+    response: '{"message": "Нашла несколько вариантов двухкомнатных квартир в Москве, которые подойдут для семьи. Покажу самые
+      понятные:", "items": [{"name": "ЖК «Лучи»", "location": "Солнцево", "price_range": "10.9 - 31.6 млн руб.", "reason":
+      "сданный проект с отделкой, подходит для семейного бюджета"}, {"name": "ЖК «Южные Сады»", "location": "Южное Бутово",
+      "price_range": "11.4 - 37.9 млн руб.", "reason": "сданный проект с отделкой"}, {"name": "Бусиновский парк", "location":
+      "Западное Дегунино", "price_range": "12.4 - 36.7 млн руб.", "reason": "сданный проект с отделкой"}], "question": "Какой
+      ЖК хотите рассмотреть подробнее?"}'
+    warnings: ''
+    facts_count: 3
+    visible_count: 3
+    facts_names: ЖК «Лучи»; ЖК «Южные Сады»; Бусиновский парк
+    visible_names: ЖК «Лучи»; ЖК «Южные Сады»; Бусиновский парк
+    evaluation: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем не найдено",
+      "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt": "prompts/eval/prompt_master_v1.txt",
+      "scenario": "family", "command": "python3 scripts/chat_cli.py --timeout 180 Двушка для семьи в Москве"}'
+    score: 100
+    prompt_master_verdict: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем
+      не найдено", "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt":
+      "prompts/eval/prompt_master_v1.txt", "scenario": "family", "command": "python3 scripts/chat_cli.py --timeout 180 Двушка
+      для семьи в Москве"}'
+  metadata:
+    case: family
+    version: v7
+- description: v7 / rental
+  vars:
+    version: v7
+    case: rental
+    scenario: rental
+    query: python3 scripts/chat_cli.py --timeout 180 Под сдачу в аренду
+    mcp: ''
+    response: '{"message": "Да, нашла несколько понятных вариантов, которые хорошо подходят под сдачу в аренду:", "items":
+      [{"name": "Левел Павелецкая Сити", "location": "Даниловский", "price_range": "18.5 - 96.6 млн руб.", "reason": "высокая
+      ликвидность за счет расположения в престижном районе и наличия студий/1-комнатных квартир от 20.6 м²"}, {"name": "Жилой
+      квартал «Символ»", "location": "Лефортово", "price_range": "17.7 - 59.8 млн руб.", "reason": "масштабный проект с широким
+      выбором лотов, включая студии от 25 м²"}, {"name": "Жилой район «Скандинавия»", "location": "Коммунарка пос.", "price_range":
+      "10.9 - 37.5 млн руб.", "reason": "комфорт-класс с доступным порогом входа, студии от 19 м², что привлекает арендаторов
+      в Новой Москве"}], "question": "Какой вариант хотите рассмотреть подробнее?"}'
+    warnings: ''
+    facts_count: 3
+    visible_count: 3
+    facts_names: Левел Павелецкая Сити; Жилой квартал «Символ»; Жилой район «Скандинавия»
+    visible_names: Левел Павелецкая Сити; Жилой квартал «Символ»; Жилой район «Скандинавия»
+    evaluation: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем не найдено",
+      "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt": "prompts/eval/prompt_master_v1.txt",
+      "scenario": "rental", "command": "python3 scripts/chat_cli.py --timeout 180 Под сдачу в аренду"}'
+    score: 100
+    prompt_master_verdict: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем
+      не найдено", "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt":
+      "prompts/eval/prompt_master_v1.txt", "scenario": "rental", "command": "python3 scripts/chat_cli.py --timeout 180 Под
+      сдачу в аренду"}'
+  metadata:
+    case: rental
+    version: v7
+- description: v7 / off_topic
+  vars:
+    version: v7
+    case: off_topic
+    scenario: off_topic
+    query: python3 scripts/chat_cli.py --timeout 180 Расскажи анекдот
+    mcp: ''
+    response: '{"message": "Я консультирую только по недвижимости.", "items": [], "question": "Могу помочь с подбором новостройки
+      в Москве или Московской области?"}'
+    warnings: ''
+    facts_count: 0
+    visible_count: 0
+    facts_names: ''
+    visible_names: ''
+    evaluation: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем не найдено",
+      "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt": "prompts/eval/prompt_master_v1.txt",
+      "scenario": "off_topic", "command": "python3 scripts/chat_cli.py --timeout 180 Расскажи анекдот"}'
+    score: 100
+    prompt_master_verdict: '{"score": 100, "verdict": "good", "problem_level": "none", "what_went_wrong": "серьёзных проблем
+      не найдено", "next_fix": "оставить как baseline и отслеживать регресс по version", "source_warnings": "", "prompt":
+      "prompts/eval/prompt_master_v1.txt", "scenario": "off_topic", "command": "python3 scripts/chat_cli.py --timeout 180
+      Расскажи анекдот"}'
+  metadata:
+    case: off_topic
+    version: v7

@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "adapter_id": "cc2",
+  "owner_root": "/home/ser/projects/cc-daemons",
+  "stages": [
+    {
+      "id": "direct_ingest_http",
+      "label": "Direct HTTP ingest validates auth/body and enqueues CC2 payloads",
+      "owner_source": "projects/cc2/ingest_server.py",
+      "owner_symbols": ["Cc2IngestHandler", "Cc2IngestServer"],
+      "test_refs": [],
+      "report_only": false,
+      "source_refs": ["projects/cc2/ingest_server.py:26-62", "REFERENCE.md:267-280"]
+    },
+    {
+      "id": "direct_inbox_enqueue",
+      "label": "Normalize n8n payload, choose route_sheet, and preserve idempotency",
+      "owner_source": "projects/cc2/direct_inbox.py",
+      "owner_symbols": ["normalize_payload", "Cc2DirectInbox"],
+      "test_refs": [],
+      "report_only": false,
+      "source_refs": ["projects/cc2/direct_inbox.py:25-66", "projects/cc2/direct_inbox.py:84-130", "REFERENCE.md:269-270"]
+    },
+    {
+      "id": "direct_worker_short",
+      "label": "Worker short-call route builds Deferred Calls v2 and CRM deferred payloads",
+      "owner_source": "projects/cc2/direct_worker.py",
+      "owner_symbols": ["process_short_direct"],
+      "test_refs": [],
+      "report_only": false,
+      "source_refs": ["projects/cc2/direct_worker.py:56-84", "projects/cc2/pipeline.py:699-769"]
+    },
+    {
+      "id": "direct_worker_long",
+      "label": "Worker long-call route builds Calls and downstream tags, quality, selection rows",
+      "owner_source": "projects/cc2/direct_worker.py",
+      "owner_symbols": ["process_long_direct"],
+      "test_refs": [],
+      "report_only": false,
+      "source_refs": ["projects/cc2/direct_worker.py:87-104", "projects/cc2/pipeline.py:837-1200"]
+    },
+    {
+      "id": "direct_worker_commit_gate",
+      "label": "Apply mode sends CRM first, then writes Sheets, and marks yellow on post-CRM Sheets failure",
+      "owner_source": "projects/cc2/direct_worker.py",
+      "owner_symbols": ["send_crm", "write_result_sheets", "all_crm_sends_succeeded", "main"],
+      "test_refs": [],
+      "report_only": false,
+      "source_refs": ["projects/cc2/direct_worker.py:107-153", "projects/cc2/direct_worker.py:184-226"]
+    },
+    {
+      "id": "pipeline_short_sequence",
+      "label": "Short normalize/deferred sequence with Russian fallback literals",
+      "owner_source": "projects/cc2/pipeline.py",
+      "owner_symbols": ["process_short_call", "run_short_sequence"],
+      "test_refs": [],
+      "report_only": false,
+      "source_refs": ["projects/cc2/pipeline.py:254-325", "projects/cc2/pipeline.py:699-769"]
+    },
+    {
+      "id": "pipeline_long_batch",
+      "label": "Long summary/tags/quality/selection batch and selection fallback",
+      "owner_source": "projects/cc2/pipeline.py",
+      "owner_symbols": ["process_long_call", "run_selection_sequence", "_process_long_calls_batch"],
+      "test_refs": [],
+      "report_only": false,
+      "source_refs": ["projects/cc2/pipeline.py:422-666", "projects/cc2/pipeline.py:772-833", "projects/cc2/pipeline.py:837-1200"]
+    }
+  ]
+}

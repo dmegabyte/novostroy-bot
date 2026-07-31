@@ -1,0 +1,34 @@
+{
+  "schema": "project_dependency_card.v1",
+  "scope_id": "mpn.cc-daemons.direct-ingest.v1",
+  "owner_project": "cc-daemons",
+  "consumer_project": "mpn",
+  "canonical_notebook": "cc-daemons",
+  "contract_ref": "docs/PROJECT_CONTEXT_RETRIEVAL_PROTOCOL.md:156-182; /home/ser/projects/cc-daemons/PROJECT_MAP.md:63-80",
+  "reason": "MPN uses cc-daemons only as one-hop direct ingest/orchestration interface evidence; no arbitrary second-root traversal.",
+  "allowed_query_types": ["contract", "interface"],
+  "max_depth": 1,
+  "max_records": 2,
+  "transitive_traversal": false,
+  "records": [
+    {
+      "id": "mpn_direct_ingest_http_inbox",
+      "kind": "interface",
+      "owner_root": "/home/ser/projects/cc-daemons",
+      "paths": [
+        {"path": "projects/mpn/ingest_server.py", "symbols": ["MpnIngestHandler", "do_GET", "do_POST"], "literals": ["not_found", "unauthorized", "invalid body size"], "refs": ["projects/mpn/ingest_server.py:30-56"]},
+        {"path": "projects/mpn/direct_inbox.py", "symbols": ["normalize_payload", "MpnDirectInbox"], "literals": ["payload must be a JSON object", "missing required field"], "refs": ["projects/mpn/direct_inbox.py:25-129"]}
+      ]
+    },
+    {
+      "id": "mpn_direct_worker_orchestration",
+      "kind": "interface",
+      "owner_root": "/home/ser/projects/cc-daemons",
+      "paths": [
+        {"path": "projects/mpn/direct_worker.py", "symbols": ["payload_to_sheet_row", "mirror_to_sheet", "run_pipeline", "main"], "literals": ["sheet append failed", "pipeline exit="], "refs": ["projects/mpn/direct_worker.py:1-10", "projects/mpn/direct_worker.py:101-184"]}
+      ],
+      "excluded_operations": ["--apply", "mirror_to_sheet write path", "run_pipeline write/runtime path"]
+    }
+  ],
+  "no_transitive": true
+}

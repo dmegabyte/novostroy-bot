@@ -1,0 +1,41 @@
+# Secrets and local runtime configuration
+.env
+.env.*
+!.env.example
+.envrc
+*.pem
+*.key
+
+# Runtime data and diagnostics
+logs/
+data/
+tmp/
+*.log
+
+# Generated releases, snapshots, and local reports
+release_bundles/
+artifacts/
+reports/generated/
+results/
+
+# Local agent working notes and restricted experiment material
+findings.md
+progress.md
+task_plan.md
+**/private/
+
+# Python and tooling caches
+__pycache__/
+*.py[cod]
+.cache/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local editor and dependency files
+.vscode/
+.idea/
+node_modules/

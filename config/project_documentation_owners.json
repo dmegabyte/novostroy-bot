@@ -1,0 +1,24 @@
+{
+  "schema": "project_documentation_owners.v1",
+  "projects": {
+    "nmbot": {
+      "architecture": "docs/CURRENT_ARCHITECTURE.md",
+      "retrieval": "docs/PROJECT_CONTEXT_RETRIEVAL_PROTOCOL.md",
+      "migration": "docs/NOTEBOOKLM_SUMMARY_MIGRATION_WRITE_PLAN.md",
+      "experiments": "docs/EXPERIMENTS.md",
+      "operations": "docs/NMBOT_RUNBOOK.md",
+      "runtime_versions": "docs/NMBOT_RUNTIME_VERSIONS.md",
+      "external_contracts": "docs/NMBOT_EXTERNAL_CONTRACTS.md",
+      "methodology": "docs/MARSHRUT_K_DOKAZATELSTVU.md"
+    },
+    "qapairs": {
+      "retrieval": "docs/QAPAIRS_RETRIEVAL.md"
+    },
+    "cc2": {
+      "retrieval": "docs/CC2_RETRIEVAL.md"
+    },
+    "mpn": {
+      "retrieval": "docs/MPN_RETRIEVAL.md"
+    }
+  }
+}

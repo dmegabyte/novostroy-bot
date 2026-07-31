@@ -1,0 +1,18 @@
+[Unit]
+Description=Novostroy Bot client-production n8n bridge
+After=network.target novostroy-bot-client-production-api.service
+Requires=novostroy-bot-client-production-api.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/neiro/novostroy-bot-client-production
+EnvironmentFile=/home/neiro/novostroy-bot-client-production/.env.client-production
+Environment=PYTHONPATH=/home/neiro/novostroy-bot-client-production:/home/neiro/novostroy-bot-client-production/scripts
+ExecStartPre=/bin/mkdir -p /home/neiro/novostroy-bot-client-production/logs
+ExecStartPre=/usr/bin/python3 /home/neiro/novostroy-bot-client-production/scripts/nmbot_client_production_preflight.py
+ExecStart=/usr/bin/python3 /home/neiro/novostroy-bot-client-production/scripts/nmbot_n8n_bridge_server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

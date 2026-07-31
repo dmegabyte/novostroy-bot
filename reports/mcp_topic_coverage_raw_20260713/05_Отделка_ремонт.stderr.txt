@@ -1,0 +1,18 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Найди квартиры с отделкой, чтобы были цены и площади.
+Начальные params: {"purpose": "search", "facets": ["finishing"], "need": ["prices", "area"], "count": 5}
+
+MCP-запрос:   {"purpose": "search", "facets": ["finishing"], "need": ["prices", "area"], "count": 5}
+[OK] Задача создана: id=2126500
+[WAIT] Задача 2126500: статус=queued (0с)
+[WAIT] Задача 2126500: статус=processing (3с)
+[OK] Задача создана: id=2126504
+[WAIT] Задача 2126504: статус=queued (0с)
+[WAIT] Задача 2126504: статус=processing (3с)
+[OK] Задача создана: id=2126505
+[WAIT] Задача 2126505: статус=queued (0с)
+📊 tokens_used=25974 (cost: or_cost.py)

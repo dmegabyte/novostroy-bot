@@ -1,0 +1,15 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Позови менеджера по выбранному ЖК.
+
+MCP-запрос:   {"purpose": "operator"}
+[OK] Задача создана: id=2126537
+[WAIT] Задача 2126537: статус=queued (0с)
+[OK] Задача создана: id=2126538
+[WAIT] Задача 2126538: статус=queued (0с)
+[OK] Задача создана: id=2126541
+[WAIT] Задача 2126541: статус=queued (0с)
+📊 tokens_used=14929 (cost: or_cost.py)

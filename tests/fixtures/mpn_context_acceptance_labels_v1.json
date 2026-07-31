@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"case_id": "pos_001", "abstain": false, "owner_path": "mpn_local_pipeline.py", "symbol": "main"},
+    {"case_id": "pos_002", "abstain": false, "owner_path": "mpn_local_pipeline.py", "symbol": "main"},
+    {"case_id": "pos_003", "abstain": false, "owner_path": "mpn_local_pipeline.py", "symbol": "main"},
+    {"case_id": "pos_004", "abstain": false, "owner_path": "mpn_local_pipeline.py", "symbol": "main"},
+    {"case_id": "pos_005", "abstain": false, "owner_path": "mpn_local_pipeline.py", "symbol": "main"},
+    {"case_id": "pos_006", "abstain": false, "owner_path": "mpn_local_pipeline.py", "symbol": "main"},
+    {"case_id": "pos_007", "abstain": false, "owner_path": "mpn_local_pipeline.py", "symbol": "main"},
+    {"case_id": "pos_008", "abstain": false, "owner_path": "mpn_local_pipeline.py", "symbol": "main"},
+    {"case_id": "neg_001", "abstain": true},
+    {"case_id": "neg_002", "abstain": true},
+    {"case_id": "neg_003", "abstain": true},
+    {"case_id": "neg_004", "abstain": true},
+    {"case_id": "neg_005", "abstain": true},
+    {"case_id": "neg_006", "abstain": true},
+    {"case_id": "neg_007", "abstain": true},
+    {"case_id": "neg_008", "abstain": true},
+    {"case_id": "neg_009", "abstain": true},
+    {"case_id": "neg_010", "abstain": true},
+    {"case_id": "neg_011", "abstain": true},
+    {"case_id": "neg_012", "abstain": true},
+    {"case_id": "neg_013", "abstain": true},
+    {"case_id": "neg_014", "abstain": true},
+    {"case_id": "neg_015", "abstain": true},
+    {"case_id": "neg_016", "abstain": true},
+    {"case_id": "neg_017", "abstain": true},
+    {"case_id": "neg_018", "abstain": true},
+    {"case_id": "neg_019", "abstain": true},
+    {"case_id": "neg_020", "abstain": true}
+  ]
+}

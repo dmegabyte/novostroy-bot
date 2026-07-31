@@ -1,0 +1,17 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Подбери варианты для семьи с детьми: школы, детские сады, парки, магазины, метро, цены и площади.
+Начальные params: {"purpose": "family", "facets": ["infrastructure"], "need": ["schools", "kindergartens", "parks", "shops", "family_infrastructure", "property_metro", "prices", "area"], "count": 5}
+
+MCP-запрос:   {"purpose": "family", "facets": ["infrastructure"], "need": ["schools", "kindergartens", "parks", "shops", "family_infrastructure", "property_metro", "prices", "area", "yard_without_cars"], "count": 5}
+[OK] Задача создана: id=2126509
+[WAIT] Задача 2126509: статус=queued (0с)
+[WAIT] Задача 2126509: статус=processing (3с)
+[OK] Задача создана: id=2126514
+[WAIT] Задача 2126514: статус=queued (0с)
+[OK] Задача создана: id=2126516
+[WAIT] Задача 2126516: статус=queued (0с)
+📊 tokens_used=66198 (cost: or_cost.py)

@@ -1,0 +1,19 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Какие варианты можно рассмотреть под ипотеку? Нужны ипотечные данные, цены и площади.
+Начальные params: {"purpose": "search", "facets": ["mortgage"], "need": ["mortgage", "mortgage_calc", "prices", "area"], "count": 5}
+
+MCP-запрос:   {"purpose": "search", "facets": ["mortgage"], "need": ["mortgage", "mortgage_calc", "prices", "area", "discount", "payment_by_installments", "price"], "count": 5}
+[OK] Задача создана: id=2126550
+[WAIT] Задача 2126550: статус=queued (0с)
+[WAIT] Задача 2126550: статус=processing (3с)
+[OK] Задача создана: id=2126553
+[WAIT] Задача 2126553: статус=queued (0с)
+[WAIT] Задача 2126553: статус=processing (3с)
+[OK] Задача создана: id=2126557
+[WAIT] Задача 2126557: статус=queued (0с)
+[WAIT] Задача 2126557: статус=processing (3с)
+📊 tokens_used=66065 (cost: or_cost.py)

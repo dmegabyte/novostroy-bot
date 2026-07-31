@@ -1,0 +1,19 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Покажи другие варианты рядом с метро, не Мичуринский парк, с ценами, площадями и сроками.
+Начальные params: {"purpose": "repeat_search", "facets": ["metro"], "exclude": ["Мичуринский парк"], "need": ["prices", "area", "property_metro", "stage", "ready_quarter"], "count": 5}
+
+MCP-запрос:   {"purpose": "repeat_search", "facets": ["metro"], "exclude": ["Мичуринский парк"], "need": ["prices", "area", "property_metro", "stage", "ready_quarter"], "count": 5}
+[OK] Задача создана: id=2126637
+[WAIT] Задача 2126637: статус=queued (0с)
+[WAIT] Задача 2126637: статус=processing (3с)
+[OK] Задача создана: id=2126640
+[WAIT] Задача 2126640: статус=queued (0с)
+[WAIT] Задача 2126640: статус=processing (3с)
+[OK] Задача создана: id=2126643
+[WAIT] Задача 2126643: статус=queued (0с)
+[WAIT] Задача 2126643: статус=processing (3с)
+📊 tokens_used=27430 (cost: or_cost.py)

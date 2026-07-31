@@ -1,0 +1,573 @@
+{
+  "version": "3.0",
+  "purpose": "Safe human reason templates for nmbot/Irina. Code selects scenario + fact_type from MCP facts, model chooses/adapts a phrase_pattern without inventing facts.",
+  "temperature_recommendation": {
+    "baseline": 0.25,
+    "production_range": [0.25, 0.3],
+    "experimental_range": [0.4, 0.5],
+    "avoid_for_mvp": 0.8,
+    "reason": "0.8 made wording livelier but less controlled: evaluative wording, light advertising tone, and grammar risks."
+  },
+  "comparative_angle_tone_decision": {
+    "status": "accepted_safe_scheme",
+    "primary_model_candidates": [
+      "google/gemini-3.5-flash",
+      "google/gemini-3.1-flash-lite-preview",
+      "openai/gpt-5.4-mini",
+      "openai/gpt-5.5"
+    ],
+    "temperature": 0.25,
+    "model_test_ranking": [
+      {
+        "rank": 1,
+        "model": "google/gemini-3.5-flash",
+        "role": "recommended_live_mvp_candidate",
+        "summary": "Best live balance: fast wall time around 3.45 seconds in benchmark, good comparative angle quality, acceptable safety with validator.",
+        "risk": "Can sound dry/analytical and may use premium/status wording unless validator warns."
+      },
+      {
+        "rank": 2,
+        "model": "openai/gpt-5.4-mini",
+        "role": "best_offline_quality_benchmark",
+        "summary": "Cleanest and safest angle + tone output, especially good at price-vs-deadline compromises.",
+        "risk": "Too slow for live Telegram: benchmark wall time around 19.53 seconds."
+      },
+      {
+        "rank": 3,
+        "model": "openai/gpt-5.5",
+        "role": "offline_or_benchmark_candidate",
+        "summary": "Good and safe comparative output, strong metro case, faster than gpt-5.4-mini.",
+        "risk": "Still slow for live Telegram: around 10-13 seconds wall time and costlier than Gemini; not a clear live default."
+      },
+      {
+        "rank": 4,
+        "model": "google/gemini-3.1-flash-lite-preview",
+        "role": "fast_backup_or_fallback",
+        "summary": "Fast and usable for angle task; produced valid JSON and acceptable comparative hooks.",
+        "risk": "Less stable style; can drift into premium/status wording and needs renderer/validator."
+      },
+      {
+        "rank": 5,
+        "model": "openai/gpt-4o",
+        "role": "not_recommended_for_this_task",
+        "summary": "Accurate and safe but too dry/analytical for short comparative angle generation.",
+        "risk": "No clear advantage over faster/better candidates for this specific reason layer."
+      }
+    ],
+    "task": "For a 2-3 option answer, the model returns comparative angle + tone for each option, not final client text and not client_value.",
+    "why": [
+      "The angle-only approach was stable but too dry.",
+      "The angle + tone approach gave richer and more useful comparison hooks inside one answer.",
+      "Full comparative reasons were too verbose and sometimes broke JSON.",
+      "A stronger general model, openai/gpt-4o, was accurate but more analytical and less useful for this angle task.",
+      "The tested angle + client_value + style_hint format was rejected: it made gemini-3.5-flash more lively but unsafe, with рекламные/investment claims and invented context."
+    ],
+    "required_pipeline": [
+      "MCP facts",
+      "model selects angle + tone for each visible option",
+      "code renderer turns angle + tone into the final human phrase",
+      "validator rejects invented facts, repeated meanings, broken JSON, and advertising wording"
+    ],
+    "output_schema": {
+      "items": [
+        {
+          "idx": 1,
+          "angle": "3-8 words, comparative meaning based only on INPUT facts",
+          "tone": "3-8 words, how to present the angle naturally"
+        }
+      ]
+    },
+    "tested_examples": {
+      "investment": [
+        "самый доступный порог входа",
+        "масштабный проект с высоким ценовым диапазоном",
+        "средний ценовой сегмент в линейке"
+      ],
+      "metro_access": [
+        "баланс близости метро и цены",
+        "максимальная близость в центре города",
+        "самый доступный вариант у метро"
+      ],
+      "self_use_kotelniki": [
+        "широкий выбор цен при долгосрочном ожидании",
+        "ближайший срок сдачи среди предложенных вариантов",
+        "доступный ценовой диапазон при сдаче в 2028"
+      ]
+    },
+    "known_risks": [
+      "The renderer must understand angle semantics; a primitive keyword renderer can ruin a good angle.",
+      "Words like премиальный should be warning-level unless directly backed by MCP class/facts.",
+      "The model must not produce final client-facing claims; final phrasing belongs to code renderer.",
+      "Do not use client_value/style_hint as model output fields for MVP; they encouraged over-selling and unsupported claims in testing."
+    ]
+  },
+  "rejected_experiments": [
+    {
+      "name": "angle_client_value_style_hint",
+      "model": "google/gemini-3.5-flash",
+      "temperature": 0.25,
+      "result": "rejected",
+      "reason": "The model became more vivid but unsafe: used claims like премиальная локация, Садовое кольцо, сэкономить больше половины бюджета, диверсификация бюджета, большая квартира without safe MCP grounding."
+    }
+  ],
+  "global_style_rules": [
+    "Write one short human sentence, preferably under 120 characters.",
+    "Use only facts from the input object and selected fact_value.",
+    "Explain why the fact helps in the selected client scenario.",
+    "Do not add schools, parks, yards, rent, yield, liquidity, price growth, discounts, mortgage, exact availability, floors, buildings, or layouts unless present in input.",
+    "Do not use advertising words: хороший, отличный, выгодный, перспективный, привлекательный, инвестиционно привлекательный, лучший, идеальный, максимально.",
+    "Do not use bureaucratic wording: данный объект, является, подходит под сценарий.",
+    "Do not ban words inside object_name if the object_name came from MCP, for example парк in Белая Дача парк.",
+    "If all available facts are weak, return a neutral practical reason rather than an invented advantage."
+  ],
+  "model_task_template": {
+    "system_prompt": "Пиши как креативный консультант-продавец по новостройкам, который умеет заинтересовать клиента, но использует только проверенные факты из MCP/INPUT. Твоя задача — не сухо перечислить характеристики, а живо показать, почему вариант может быть интересен именно под запрос клиента. Разрешено объяснять пользу реальных фактов и сравнивать варианты между собой только по фактам INPUT: цена, метро, отделка, срок сдачи, площадь, локация. Запрещено придумывать школы, парки, дворы, видовые квартиры, аренду, доходность, ликвидность, рост цены, скидки или обещать выгоду. Не используй пустую рекламу: лучший, идеальный, перспективный, выгодный, инвестиционно привлекательный. Не говори о факте, которого нет во входе. Не повторяй previous_reasons. Верни строго JSON: {\"reason\":\"...\"}.",
+    "input_fields": [
+      "scenario",
+      "object_name",
+      "fact_type",
+      "fact_value",
+      "allowed_meaning",
+      "human_angle",
+      "phrase_patterns",
+      "forbidden_claims",
+      "previous_reasons"
+    ],
+    "instruction": "Choose the closest phrase_pattern and adapt it to fact_value and scenario. Sound like a strong human consultant, but keep the meaning, do not invent extra context, and never sell with claims outside INPUT."
+  },
+  "fallback_policy": {
+    "if_model_output_invalid": "Use first safe phrase_pattern after replacing simple placeholders from fact_value.",
+    "if_reason_contains_forbidden_claim": "Reject model output and use neutral fallback for that fact_type.",
+    "if_reason_repeats_previous": "Ask model once with previous_reasons, then fallback to another phrase_pattern.",
+    "if_no_good_fact_for_scenario": "Omit reason or use a neutral factual phrase; do not invent."
+  },
+  "scenarios": {
+    "investment": {
+      "description": "Client is looking at property as an investment, but we must not promise rent, yield, resale, liquidity, or price growth.",
+      "priority_fact_types": ["price_min", "price_range", "finishing", "ready", "status", "delivered", "area", "metro", "location"],
+      "facts": {
+        "price_min": {
+          "allowed_meaning": "понятный стартовый бюджет для сравнения с другими вариантами",
+          "human_angle": "explain budget as a calm comparison anchor, without promises of income or growth",
+          "phrase_patterns": [
+            "По цене сразу понятно, с чем сравнивать этот вариант.",
+            "У него понятный старт по бюджету — удобно поставить рядом с другими ЖК.",
+            "Цена даёт нормальную точку отсчёта для сравнения.",
+            "По стартовой цене видно, насколько этот вариант вписывается в подборку.",
+            "Бюджет входа понятен сразу, поэтому вариант легко сравнить с соседними предложениями."
+          ],
+          "forbidden_claims": ["доходность", "аренда", "ликвидность", "рост цены", "окупаемость", "выгодная инвестиция", "инвестиционно привлекательный"]
+        },
+        "price_range": {
+          "allowed_meaning": "понятный диапазон бюджета",
+          "human_angle": "show that the client can compare the budget corridor, not investment profit",
+          "phrase_patterns": [
+            "Диапазон цены помогает понять, с каким бюджетом здесь можно смотреть квартиры.",
+            "По цене видно, где начинается и заканчивается основной бюджет по этому ЖК.",
+            "Такой диапазон удобно держать рядом с другими вариантами для сравнения."
+          ],
+          "forbidden_claims": ["доходность", "аренда", "ликвидность", "рост цены", "окупаемость"]
+        },
+        "finishing": {
+          "allowed_meaning": "меньше работ и вложений после покупки",
+          "human_angle": "explain finishing as fewer starting works, not rental readiness or profit",
+          "phrase_patterns": [
+            "С отделкой меньше работ после покупки — это проще на старте.",
+            "Отделка снижает объём ремонта, который пришлось бы делать сразу.",
+            "Можно меньше времени тратить на ремонтные вопросы после сделки."
+          ],
+          "forbidden_claims": ["готово к аренде", "быстро сдать", "доход", "окупаемость", "ликвидность"]
+        },
+        "ready": {
+          "allowed_meaning": "понятный срок ожидания",
+          "human_angle": "explain as planning horizon, not investment upside",
+          "phrase_patterns": [
+            "По сроку сдачи понятно, сколько ждать до готового дома.",
+            "Срок даёт понятный горизонт, чтобы сравнить ожидание с другими ЖК.",
+            "Здесь проще оценить, насколько срок подходит под ваши планы."
+          ],
+          "forbidden_claims": ["рост цены", "ликвидность", "доходность", "перепродажа"]
+        },
+        "status": {
+          "allowed_meaning": "понятный текущий статус объекта",
+          "human_angle": "keep it factual and practical",
+          "phrase_patterns": [
+            "По статусу понятно, на каком этапе сейчас находится дом.",
+            "Статус помогает быстро сравнить этот вариант с более ранними или готовыми ЖК."
+          ],
+          "forbidden_claims": ["гарантия", "без риска", "доходность", "ликвидность"]
+        },
+        "delivered": {
+          "allowed_meaning": "готовый дом, меньше ожидания",
+          "human_angle": "explain ready building as less waiting, without investment promises",
+          "phrase_patterns": [
+            "Дом уже сдан, поэтому не нужно ждать окончания стройки.",
+            "Готовый дом проще оценивать: ожидания по стройке уже нет.",
+            "Если важен готовый корпус, этот вариант сразу понятнее для сравнения."
+          ],
+          "forbidden_claims": ["ликвидность", "рост цены", "доход", "без риска"]
+        },
+        "area": {
+          "allowed_meaning": "понятный диапазон площади",
+          "human_angle": "explain as easier comparison by size",
+          "phrase_patterns": [
+            "По площади видно, какие форматы квартир здесь реально сравнивать.",
+            "Диапазон площади помогает понять, насколько ЖК подходит под нужный формат.",
+            "Площадь даёт ещё один понятный ориентир для сравнения вариантов."
+          ],
+          "forbidden_claims": ["аренда", "доходность", "перепродажа"]
+        },
+        "metro": {
+          "allowed_meaning": "удобная транспортная связь, если метро есть во входе",
+          "human_angle": "explain daily access, not rental demand or liquidity",
+          "phrase_patterns": [
+            "Метро рядом — проще каждый день добираться по городу.",
+            "До метро можно дойти пешком, это удобно для обычных поездок.",
+            "Близость к метро делает ежедневную дорогу понятнее и проще."
+          ],
+          "forbidden_claims": ["арендный спрос", "ликвидность", "рост цены", "премиальность"]
+        },
+        "location": {
+          "allowed_meaning": "понятная география объекта",
+          "human_angle": "only say where it is; do not invent district benefits",
+          "phrase_patterns": [
+            "По локации сразу понятно, в какой части города смотреть этот вариант.",
+            "География понятна, поэтому его легко сравнить с другими районами.",
+            "Локация помогает быстро понять, подходит ли направление поиска."
+          ],
+          "forbidden_claims": ["развитая инфраструктура", "парки", "школы", "престижный район", "рост цены"]
+        }
+      }
+    },
+    "family": {
+      "description": "Client looks for family living. Use only concrete facts; do not invent schools, parks, yards, safety, or kid infrastructure.",
+      "priority_fact_types": ["finishing", "ready", "status", "delivered", "area", "location", "metro", "why_close"],
+      "facts": {
+        "finishing": {
+          "allowed_meaning": "меньше ремонта и проще переезд для семьи",
+          "human_angle": "connect finishing to less repair stress and easier setup",
+          "phrase_patterns": [
+            "Для семьи это удобнее: меньше ремонта на старте и проще планировать переезд.",
+            "С отделкой легче быстрее перейти к обустройству, а не жить в ремонте.",
+            "Меньше ремонтных хлопот — семье проще спокойно заехать и обустроиться.",
+            "Отделка помогает быстрее заняться бытом, а не начинать всё с ремонта."
+          ],
+          "forbidden_claims": ["школы", "детские сады", "парк", "двор без машин", "безопасный район", "семейная инфраструктура"]
+        },
+        "ready": {
+          "allowed_meaning": "понятный срок переезда",
+          "human_angle": "explain as easier planning of family move",
+          "phrase_patterns": [
+            "По сроку сдачи проще понять, когда можно планировать переезд.",
+            "Срок понятен, поэтому семье легче заранее спланировать переезд.",
+            "Такой срок помогает заранее прикинуть, когда получится обустраиваться."
+          ],
+          "forbidden_claims": ["школы", "садики", "инфраструктура", "безопасность"]
+        },
+        "delivered": {
+          "allowed_meaning": "готовый дом, проще планировать переезд",
+          "human_angle": "focus on no construction wait",
+          "phrase_patterns": [
+            "Дом уже сдан, поэтому семье проще планировать переезд без ожидания стройки.",
+            "Готовый корпус удобен, если хочется быстрее перейти к обустройству.",
+            "Не нужно ждать сдачу дома — можно быстрее смотреть конкретные квартиры."
+          ],
+          "forbidden_claims": ["школы", "парки", "двор", "безопасность"]
+        },
+        "area": {
+          "allowed_meaning": "больше понятности по пространству для семьи",
+          "human_angle": "explain area as space planning, without layout claims",
+          "phrase_patterns": [
+            "По площади проще понять, хватит ли пространства под семейный быт.",
+            "Диапазон площади помогает прикинуть, какой формат подойдёт семье.",
+            "Площадь даёт ориентир, насколько комфортно можно разместиться."
+          ],
+          "forbidden_claims": ["планировка", "детская", "три спальни", "просторная кухня"]
+        },
+        "metro": {
+          "allowed_meaning": "удобнее ежедневные поездки",
+          "human_angle": "connect metro to daily movement, not family infrastructure",
+          "phrase_patterns": [
+            "Метро рядом — проще каждый день ездить по делам и возвращаться домой.",
+            "Близость к метро делает ежедневные поездки понятнее и спокойнее.",
+            "До метро можно дойти пешком, это удобно для обычного семейного ритма."
+          ],
+          "forbidden_claims": ["школы", "садики", "парки", "семейная инфраструктура"]
+        },
+        "why_close": {
+          "allowed_meaning": "use the literal why_close fact only",
+          "human_angle": "rephrase only what is explicitly present",
+          "phrase_patterns": [
+            "По этому отличию сразу понятно, чем вариант отличается от точного запроса.",
+            "Это стоит учитывать отдельно: вариант близкий, но отличается по важному параметру.",
+            "Такой вариант можно смотреть, если это отличие для вас приемлемо."
+          ],
+          "forbidden_claims": ["anything not explicitly present in why_close"]
+        }
+      }
+    },
+    "self_use": {
+      "description": "Client is choosing for own living without a more specific motive.",
+      "priority_fact_types": ["finishing", "ready", "status", "delivered", "price_range", "area", "metro", "location"],
+      "facts": {
+        "finishing": {
+          "allowed_meaning": "меньше ремонта на старте",
+          "human_angle": "make it about easier move-in and fewer repair chores",
+          "phrase_patterns": [
+            "С отделкой проще: не нужно сразу начинать с большого ремонта.",
+            "Можно быстрее перейти к обустройству, а не сначала заниматься ремонтом.",
+            "Меньше хлопот после покупки — базовая отделка уже предусмотрена.",
+            "Такой вариант проще для жизни: ремонтные вопросы на старте меньше давят."
+          ],
+          "forbidden_claims": ["идеально", "лучший", "выгодный", "премиальный"]
+        },
+        "ready": {
+          "allowed_meaning": "понятно, когда можно планировать переезд",
+          "human_angle": "connect deadline to personal plans",
+          "phrase_patterns": [
+            "По сроку сдачи понятно, когда можно планировать переезд.",
+            "Срок помогает сразу понять, насколько вариант подходит под ваши планы.",
+            "Так проще сравнить, готовы ли вы ждать именно этот дом."
+          ],
+          "forbidden_claims": ["гарантия", "без риска", "идеально"]
+        },
+        "delivered": {
+          "allowed_meaning": "готовый дом, быстрее к выбору квартиры",
+          "human_angle": "explain no need to wait for construction",
+          "phrase_patterns": [
+            "Дом уже сдан — можно быстрее переходить к выбору конкретной квартиры.",
+            "Не нужно ждать стройку, поэтому переезд проще планировать.",
+            "Готовый корпус удобен, если хочется решить вопрос с жильём быстрее."
+          ],
+          "forbidden_claims": ["идеально", "без риска", "лучший"]
+        },
+        "price_range": {
+          "allowed_meaning": "понятный бюджет для личной покупки",
+          "human_angle": "explain as budget orientation",
+          "phrase_patterns": [
+            "По цене сразу видно, с каким бюджетом здесь можно смотреть квартиры.",
+            "Диапазон цены помогает понять, насколько ЖК подходит по бюджету.",
+            "Цена даёт понятный ориентир перед тем, как смотреть детали."
+          ],
+          "forbidden_claims": ["выгодный", "скидка", "инвестиция"]
+        },
+        "area": {
+          "allowed_meaning": "понятный ориентир по площади",
+          "human_angle": "connect area to living comfort without inventing layouts",
+          "phrase_patterns": [
+            "По площади можно понять, какой формат квартиры здесь реально смотреть.",
+            "Диапазон площади помогает прикинуть, хватит ли пространства для жизни.",
+            "Площадь даёт быстрый ориентир, подходит ли вариант по формату."
+          ],
+          "forbidden_claims": ["планировка", "видовая", "просторная кухня"]
+        },
+        "metro": {
+          "allowed_meaning": "удобнее ежедневные поездки",
+          "human_angle": "daily city trips",
+          "phrase_patterns": [
+            "До метро можно дойти пешком — удобно, если часто ездить по городу.",
+            "Метро рядом, поэтому ежедневная дорога будет проще.",
+            "Близость к метро помогает меньше зависеть от машины."
+          ],
+          "forbidden_claims": ["ликвидность", "аренда", "лучший район"]
+        },
+        "location": {
+          "allowed_meaning": "понятное направление поиска",
+          "human_angle": "do not invent location advantages",
+          "phrase_patterns": [
+            "По локации сразу понятно, подходит ли вам это направление.",
+            "География понятна, поэтому вариант легко сравнить с другими районами.",
+            "Локация помогает быстро решить, стоит ли смотреть ЖК подробнее."
+          ],
+          "forbidden_claims": ["инфраструктура", "парки", "школы", "престижный район"]
+        }
+      }
+    },
+    "budget": {
+      "description": "Client has a budget constraint. Avoid calling anything profitable or best; focus on budget fit and tradeoffs.",
+      "priority_fact_types": ["price_min", "price_range", "finishing", "ready", "status", "delivered", "area", "why_close"],
+      "facts": {
+        "price_min": {
+          "allowed_meaning": "понятный старт по бюджету",
+          "human_angle": "explain as budget filter, not a bargain",
+          "phrase_patterns": [
+            "По цене сразу видно, попадает ли вариант в ваш бюджет.",
+            "Это понятная точка отсчёта по бюджету.",
+            "Цена помогает быстро понять, стоит ли смотреть этот ЖК дальше.",
+            "Стартовая цена даёт простой ориентир для отбора вариантов."
+          ],
+          "forbidden_claims": ["выгодный", "дешёвый лучший", "скидка", "акция", "инвестиция"]
+        },
+        "price_range": {
+          "allowed_meaning": "понятный диапазон бюджета",
+          "human_angle": "help client compare the budget corridor",
+          "phrase_patterns": [
+            "Диапазон цены показывает, в каком бюджете здесь реально выбирать.",
+            "По цене видно, насколько ЖК близок к вашему бюджету.",
+            "Так проще отсеять варианты, которые сразу не проходят по бюджету."
+          ],
+          "forbidden_claims": ["выгодный", "скидка", "акция", "лучший"]
+        },
+        "finishing": {
+          "allowed_meaning": "меньше дополнительных работ после покупки",
+          "human_angle": "connect finishing to fewer immediate extra repair tasks",
+          "phrase_patterns": [
+            "С отделкой меньше дополнительных работ сразу после покупки.",
+            "Отделка помогает не закладывать большой ремонт на самый старт.",
+            "Это удобно для бюджета: меньше ремонтных вопросов сразу после сделки."
+          ],
+          "forbidden_claims": ["экономия", "выгодно", "скидка", "дешевле"]
+        },
+        "why_close": {
+          "allowed_meaning": "честное отличие близкого варианта от запроса",
+          "human_angle": "be transparent about mismatch, especially apartments vs flat",
+          "phrase_patterns": [
+            "Это близкий вариант, но важно учесть отличие: {{fact_value}}.",
+            "Такой вариант стоит смотреть только если это отличие для вас приемлемо.",
+            "Он близок к запросу, но сначала лучше проверить, подходит ли вам этот формат."
+          ],
+          "forbidden_claims": ["выгодный", "лучший", "инвестиционный", "точно подойдёт"]
+        },
+        "delivered": {
+          "allowed_meaning": "готовый дом без ожидания сдачи",
+          "human_angle": "budget plus ready status, no extra promises",
+          "phrase_patterns": [
+            "Дом уже сдан, поэтому не придётся закладывать ожидание стройки.",
+            "Готовый корпус проще оценивать сразу, без ожидания сдачи.",
+            "Если срок важен, готовый дом делает выбор понятнее."
+          ],
+          "forbidden_claims": ["выгодный", "без риска", "лучший"]
+        }
+      }
+    },
+    "fast_move": {
+      "description": "Client wants to move soon or avoid long construction waiting.",
+      "priority_fact_types": ["delivered", "ready", "status", "finishing", "price_min", "price_range", "location", "metro"],
+      "facts": {
+        "delivered": {
+          "allowed_meaning": "не нужно ждать сдачу дома",
+          "human_angle": "explain faster path to choosing and moving",
+          "phrase_patterns": [
+            "Дом уже сдан — можно быстрее переходить к выбору конкретной квартиры.",
+            "Не нужно ждать стройку, поэтому переезд проще планировать.",
+            "Готовый корпус удобен, если хочется решить вопрос с жильём быстрее."
+          ],
+          "forbidden_claims": ["гарантированно заселитесь", "без риска", "лучший"]
+        },
+        "ready": {
+          "allowed_meaning": "понятный срок ожидания",
+          "human_angle": "connect deadline to moving plan",
+          "phrase_patterns": [
+            "По сроку сдачи понятно, насколько долго ждать до переезда.",
+            "Срок помогает сразу понять, подходит ли вариант под быстрый переезд.",
+            "Так проще сравнить ожидание с другими ЖК."
+          ],
+          "forbidden_claims": ["точно переедете", "без задержек", "гарантия"]
+        },
+        "finishing": {
+          "allowed_meaning": "меньше ремонта перед заселением",
+          "human_angle": "faster move because fewer repair tasks",
+          "phrase_patterns": [
+            "С отделкой проще быстрее перейти к заселению, а не начинать с ремонта.",
+            "Меньше ремонтных работ — проще планировать быстрый переезд.",
+            "Отделка помогает быстрее заняться обустройством после покупки."
+          ],
+          "forbidden_claims": ["гарантированно", "сразу завтра", "без затрат"]
+        },
+        "metro": {
+          "allowed_meaning": "понятная ежедневная дорога после переезда",
+          "human_angle": "simple daily commute",
+          "phrase_patterns": [
+            "Метро рядом, поэтому после переезда проще выстроить ежедневный маршрут.",
+            "До метро можно дойти пешком — это удобно для обычных поездок после переезда.",
+            "Близость к метро делает повседневную дорогу понятнее."
+          ],
+          "forbidden_claims": ["лучший район", "ликвидность", "рост цены"]
+        }
+      }
+    },
+    "metro_access": {
+      "description": "Client explicitly asks for metro proximity or easier transit.",
+      "priority_fact_types": ["metro", "location", "price_min", "price_range", "ready", "finishing"],
+      "facts": {
+        "metro": {
+          "allowed_meaning": "удобная ежедневная дорога до метро",
+          "human_angle": "make it about daily trips, not investment or district status",
+          "phrase_patterns": [
+            "До метро около минуты пешком — удобно, если каждый день ездить по городу.",
+            "Метро совсем рядом, поэтому дорога каждый день будет проще.",
+            "До станции можно дойти пешком за пару минут — это удобно для ежедневных поездок.",
+            "Близость к метро помогает быстрее строить обычный маршрут по городу.",
+            "Когда метро рядом, меньше зависишь от машины и пересадок."
+          ],
+          "forbidden_claims": ["ликвидность", "рост цены", "лучший район", "престиж", "арендный спрос"]
+        },
+        "location": {
+          "allowed_meaning": "понятная география рядом с нужным направлением",
+          "human_angle": "only connect to requested geography, no district claims",
+          "phrase_patterns": [
+            "По локации понятно, насколько вариант близок к нужному направлению.",
+            "География помогает быстро сравнить этот ЖК с другими вариантами у метро.",
+            "Так проще понять, подходит ли вам именно это направление."
+          ],
+          "forbidden_claims": ["лучший район", "инфраструктура", "парки", "школы"]
+        },
+        "price_min": {
+          "allowed_meaning": "дополнительный ориентир по цене рядом с метро",
+          "human_angle": "price as secondary filter after metro",
+          "phrase_patterns": [
+            "Плюс по цене сразу видно, с каким бюджетом смотреть вариант рядом с метро.",
+            "Цена даёт понятный ориентир, если сравнивать варианты у метро.",
+            "Так проще сравнить близость к метро и стартовый бюджет."
+          ],
+          "forbidden_claims": ["выгодный", "ликвидный", "арендный спрос", "рост цены"]
+        },
+        "price_range": {
+          "allowed_meaning": "диапазон бюджета для вариантов у метро",
+          "human_angle": "secondary budget orientation",
+          "phrase_patterns": [
+            "Диапазон цены помогает сравнить этот вариант с другими ЖК у метро.",
+            "По цене понятно, в каком бюджете смотреть квартиры рядом с метро.",
+            "Это даёт ориентир по бюджету, если главное — близость к станции."
+          ],
+          "forbidden_claims": ["выгодный", "ликвидный", "рост цены"]
+        }
+      }
+    }
+  },
+  "validator_notes": {
+    "check_reason_only": true,
+    "ignore_banned_words_inside_object_name": true,
+    "reject_if_contains": [
+      "доходность",
+      "аренда",
+      "ликвидность",
+      "рост цены",
+      "окупаемость",
+      "выгодная инвестиция",
+      "инвестиционно привлекательный",
+      "лучший",
+      "идеальный",
+      "максимально",
+      "данный объект",
+      "является",
+      "подходит под сценарий"
+    ],
+    "warn_if_contains": [
+      "очень удобно",
+      "предлагает",
+      "может быть причиной",
+      "премиальный",
+      "премиальное"
+    ],
+    "max_reason_chars": 140,
+    "preferred_reason_chars": 120,
+    "minimum_quality_checks": [
+      "reason is non-empty",
+      "reason is one sentence",
+      "reason references only provided fact_value or selected allowed_meaning",
+      "reason does not repeat previous_reasons",
+      "reason has no forbidden claims after object_name is removed from scan"
+    ]
+  }
+}

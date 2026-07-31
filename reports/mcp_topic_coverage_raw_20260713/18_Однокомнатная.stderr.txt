@@ -1,0 +1,19 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Найди однокомнатные квартиры, где видны цены, площади, метро и готовность.
+Начальные params: {"purpose": "search", "rooms": "1", "need": ["prices", "area", "property_metro", "stage", "ready_quarter"], "count": 5}
+
+MCP-запрос:   {"purpose": "search", "rooms": "1", "need": ["prices", "area", "property_metro", "stage", "ready_quarter"], "count": 5}
+[OK] Задача создана: id=2126612
+[WAIT] Задача 2126612: статус=queued (0с)
+[WAIT] Задача 2126612: статус=processing (3с)
+[WAIT] Задача 2126612: статус=processing (6с)
+[OK] Задача создана: id=2126615
+[WAIT] Задача 2126615: статус=queued (0с)
+[OK] Задача создана: id=2126621
+[WAIT] Задача 2126621: статус=queued (0с)
+[WAIT] Задача 2126621: статус=processing (3с)
+📊 tokens_used=72732 (cost: or_cost.py)

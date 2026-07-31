@@ -1,0 +1,174 @@
+{
+  "version": "v2_search_mcp_contract",
+  "prompt": "prompts/v2_search_mcp.txt",
+  "observed_wire_shapes": {
+    "rooms": ["2", "2-комнатные", "1, 2, 3, студии", [1, 2]],
+    "delivered": [true, false, 1, 0],
+    "location": ["Сокол", ["Сокол", "Аэропорт"]],
+    "region_codes": ["msk", "mo", "newmsk"]
+  },
+  "output_top_level_keys": ["facts", "near", "missing", "params", "diagnostics"],
+  "forbidden_top_level_keys": ["action", "target", "scope", "search_policy", "clarification_question", "response", "current_options", "visible_options", "client_text", "routing_decision"],
+  "allowed_preferences": ["format", "rooms_preference", "budget_preference", "location_preference", "infrastructure_preference", "transport_preference", "finance_preference", "sort_hint"],
+  "scenario_field_priorities": {
+    "family": ["school", "kindergarten", "park_near", "water_near", "yard_without_cars", "children_ground", "sports_ground", "security", "property_metro", "location_2.ecology_rating"],
+    "financing": ["mortgage_calc", "mortgage", "discount", "payment_by_installments", "ads.fullprice", "novos.min_price", "novos.max_price"],
+    "investment": ["min_price", "price1", "price_s", "price_n", "ads.fullprice", "rooms", "apartment_types", "ready", "finishing", "property_metro", "egrn_top_novos", "counter_novos", "ads", "ads_add.stat_price"],
+    "rental": ["rooms", "apartment_types", "ready", "finishing", "property_metro", "location", "ads", "counter_novos", "egrn_top_novos"],
+    "life": ["location", "district", "property_metro", "ready", "finishing", "territory", "park_near", "water_near", "security", "parking", "elevator", "infrastructure"]
+  },
+  "scenarios": [
+    {
+      "id": "base_search",
+      "search_goal": {"entity_type": "new_building_flat", "query_summary": "base catalogue search for new building flats", "explicit_terms": []},
+      "response_viewpoint": "life",
+      "base_viewpoint": null,
+      "constraints": {"requested_hard": {}, "effective_hard": {}, "preferences": {}, "relaxation_audit": []},
+      "count": 3,
+      "expected_field_priorities_include": ["location", "district", "ready", "finishing"],
+      "shape_assertions": ["search_goal_required", "only_allowed_top_level_keys", "facts_preserve_allowed_mcp_fields", "params_only_normalized_constraints"]
+    },
+    {
+      "id": "family",
+      "search_goal": {"entity_type": "new_building_flat", "query_summary": "family oriented flat search", "explicit_terms": ["family"]},
+      "response_viewpoint": "family",
+      "base_viewpoint": null,
+      "constraints": {"requested_hard": {"rooms": [2]}, "effective_hard": {"rooms": [2]}, "preferences": {}, "relaxation_audit": []},
+      "count": 3,
+      "expected_field_priorities_include": ["school", "kindergarten", "park_near", "yard_without_cars", "children_ground", "security"],
+      "shape_assertions": ["effective_hard_controls_exact_matching", "viewpoint_not_hard_filter", "missing_for_unconfirmed_scenario_fields"]
+    },
+    {
+      "id": "family_financing_overlay",
+      "search_goal": {"entity_type": "new_building_flat", "query_summary": "family flat search with financing data overlay", "explicit_terms": ["family", "financing"]},
+      "response_viewpoint": "financing",
+      "base_viewpoint": "family",
+      "constraints": {"requested_hard": {"rooms": [2]}, "effective_hard": {"rooms": [2]}, "preferences": {"finance_preference": "mortgage_details"}, "relaxation_audit": []},
+      "count": 3,
+      "expected_field_priorities_include": ["mortgage_calc", "mortgage", "discount", "payment_by_installments", "ads.fullprice"],
+      "also_expected_overlay_preserves": ["school", "kindergarten", "park_near", "yard_without_cars", "children_ground"],
+      "shape_assertions": ["financing_base_overlay_explicit", "financing_overlay_not_replacement", "no_unconfirmed_rate_or_fee"]
+    },
+    {
+      "id": "investment",
+      "search_goal": {"entity_type": "new_building_flat", "query_summary": "investment oriented flat search", "explicit_terms": ["investment"]},
+      "response_viewpoint": "investment",
+      "base_viewpoint": null,
+      "constraints": {"requested_hard": {"max_price": 12000000}, "effective_hard": {"max_price": 12000000}, "preferences": {"sort_hint": "entry_price"}, "relaxation_audit": []},
+      "count": 3,
+      "expected_field_priorities_include": ["min_price", "ads.fullprice", "rooms", "apartment_types", "ready", "property_metro", "egrn_top_novos", "counter_novos"],
+      "shape_assertions": ["no_unsupported_financial_claim", "egrn_and_counters_only_if_returned"]
+    },
+    {
+      "id": "rental",
+      "search_goal": {"entity_type": "new_building_flat", "query_summary": "rental oriented flat search", "explicit_terms": ["rental"]},
+      "response_viewpoint": "rental",
+      "base_viewpoint": null,
+      "constraints": {"requested_hard": {}, "effective_hard": {}, "preferences": {"format": "compact"}, "relaxation_audit": []},
+      "count": 3,
+      "expected_field_priorities_include": ["rooms", "apartment_types", "ready", "finishing", "property_metro", "location", "ads"],
+      "shape_assertions": ["controlled_preferences_only", "no_rent_yield_or_demand_without_mcp", "viewpoint_not_hard_filter"]
+    },
+    {
+      "id": "life",
+      "search_goal": {"entity_type": "new_building_flat", "query_summary": "life quality search within region", "explicit_terms": ["life"]},
+      "response_viewpoint": "life",
+      "base_viewpoint": null,
+      "constraints": {"requested_hard": {"district": "msk"}, "effective_hard": {"district": "msk"}, "preferences": {}, "relaxation_audit": []},
+      "count": 3,
+      "expected_field_priorities_include": ["location", "district", "property_metro", "ready", "finishing", "territory", "security", "parking"],
+      "shape_assertions": ["district_is_mcp_region_code", "location_is_separate"]
+    },
+    {
+      "id": "rooms_budget_location",
+      "search_goal": {"entity_type": "new_building_flat", "query_summary": "flat search with rooms, budget and location", "explicit_terms": ["rooms", "budget", "location"]},
+      "response_viewpoint": "life",
+      "base_viewpoint": null,
+      "constraints": {"requested_hard": {"rooms": [2], "max_price": 18000000, "location": ["Сокол"]}, "effective_hard": {"rooms": [2], "max_price": 18000000, "location": ["Сокол"]}, "preferences": {}, "relaxation_audit": []},
+      "count": 3,
+      "expected_field_priorities_include": ["rooms", "min_price", "max_price", "location", "district"],
+      "shape_assertions": ["facts_match_all_hard_constraints", "near_not_mixed_with_facts"]
+    },
+    {
+      "id": "ready_finishing",
+      "search_goal": {"entity_type": "new_building_flat", "query_summary": "delivered flats with confirmed finishing", "explicit_terms": ["ready", "finishing"]},
+      "response_viewpoint": "rental",
+      "base_viewpoint": null,
+      "constraints": {"requested_hard": {"ready": "delivered", "finishing": true}, "effective_hard": {"ready": "delivered", "finishing": true}, "preferences": {}, "relaxation_audit": []},
+      "count": 3,
+      "expected_field_priorities_include": ["ready", "finishing", "ads.renovation", "house.finishing_list"],
+      "shape_assertions": ["hard_evidence_required", "facts_match_all_hard_constraints", "missing_for_unconfirmed_scenario_fields"]
+    },
+    {
+      "id": "district_location_separation",
+      "search_goal": {"entity_type": "new_building_flat", "query_summary": "regional code and human location kept separate", "explicit_terms": ["district", "location"]},
+      "response_viewpoint": "life",
+      "base_viewpoint": null,
+      "constraints": {"requested_hard": {"district": "newmsk", "location": ["Коммунарка"]}, "effective_hard": {"district": "newmsk", "location": ["Коммунарка"]}, "preferences": {}, "relaxation_audit": []},
+      "count": 3,
+      "expected_field_priorities_include": ["district", "location", "location_id"],
+      "shape_assertions": ["district_is_mcp_region_code", "location_is_separate", "params_only_normalized_constraints"]
+    },
+    {
+      "id": "exact_facts_vs_near",
+      "search_goal": {"entity_type": "new_building_flat", "query_summary": "exact facts separated from near alternatives", "explicit_terms": ["exact", "near"]},
+      "response_viewpoint": "life",
+      "base_viewpoint": null,
+      "constraints": {"requested_hard": {"rooms": [1], "max_price": 9000000, "location": ["Котельники"]}, "effective_hard": {"rooms": [1], "max_price": 9000000, "location": ["Котельники"]}, "preferences": {}, "relaxation_audit": []},
+      "count": 3,
+      "expected_field_priorities_include": ["rooms", "max_price", "location", "district"],
+      "shape_assertions": ["facts_match_all_hard_constraints", "near_requires_differences_and_why_close", "near_not_mixed_with_facts"]
+    },
+    {
+      "id": "missing_data",
+      "search_goal": {"entity_type": "new_building_flat", "query_summary": "family search where infrastructure details may need enrichment", "explicit_terms": ["family", "missing_data"]},
+      "response_viewpoint": "family",
+      "base_viewpoint": null,
+      "constraints": {"requested_hard": {"rooms": [3]}, "effective_hard": {"rooms": [3]}, "preferences": {}, "relaxation_audit": []},
+      "count": 2,
+      "expected_field_priorities_include": ["school", "kindergarten", "park_near", "children_ground"],
+      "shape_assertions": ["hard_evidence_required", "missing_for_unconfirmed_scenario_fields", "no_invented_infrastructure", "no_absence_claim_without_evidence"]
+    },
+    {
+      "id": "one_actual_constraint_relaxation",
+      "search_goal": {"entity_type": "new_building_flat", "query_summary": "runtime already relaxed budget while preserving audit", "explicit_terms": ["relaxation"]},
+      "response_viewpoint": "life",
+      "base_viewpoint": null,
+      "constraints": {"requested_hard": {"max_price": 10000000, "location": ["Сокол"]}, "effective_hard": {"max_price": 11000000, "location": ["Сокол"]}, "preferences": {}, "relaxation_audit": [{"field": "max_price", "from": 10000000, "to": 11000000, "reason_code": "runtime_preapplied"}]},
+      "count": 2,
+      "expected_field_priorities_include": ["min_price", "max_price", "location", "district"],
+      "shape_assertions": ["relaxation_audit_recorded", "agent_cannot_decide_relaxation", "effective_hard_controls_exact_matching", "only_one_hard_constraint_relaxed"]
+    },
+    {
+      "id": "scenario_field_priority",
+      "search_goal": {"entity_type": "new_building_flat", "query_summary": "investment priorities with room preference kept soft", "explicit_terms": ["investment", "rooms_preference"]},
+      "response_viewpoint": "investment",
+      "base_viewpoint": null,
+      "constraints": {"requested_hard": {"district": "mo"}, "effective_hard": {"district": "mo"}, "preferences": {"rooms_preference": ["s", 1]}, "relaxation_audit": []},
+      "count": 3,
+      "expected_field_priorities_include": ["price_s", "price_n", "ads.fullprice", "apartment_types", "ready", "property_metro", "egrn_top_novos"],
+      "shape_assertions": ["controlled_preferences_only", "viewpoint_not_hard_filter", "params_only_normalized_constraints"]
+    },
+    {
+      "id": "unknown_preference_ignored",
+      "search_goal": {"entity_type": "new_building_flat", "query_summary": "base search with unsupported soft key ignored", "explicit_terms": ["unknown_preference"]},
+      "response_viewpoint": "life",
+      "base_viewpoint": null,
+      "constraints": {"requested_hard": {}, "effective_hard": {}, "preferences": {"unsupported_sensitive_hint": "redacted-by-validator", "sort_hint": "price"}, "relaxation_audit": []},
+      "count": 3,
+      "expected_field_priorities_include": ["location", "district", "ready", "finishing"],
+      "shape_assertions": ["unknown_preference_safely_ignored", "controlled_preferences_only", "params_only_normalized_constraints"]
+    },
+    {
+      "id": "broad_candidates_later_enrichment",
+      "search_goal": {"entity_type": "new_building_flat", "query_summary": "broad financing candidates for later enrichment", "explicit_terms": ["financing", "broad_candidates"]},
+      "response_viewpoint": "financing",
+      "base_viewpoint": "life",
+      "constraints": {"requested_hard": {"location": ["Новая Москва"]}, "effective_hard": {"location": ["Новая Москва"]}, "preferences": {"finance_preference": "mortgage_details"}, "relaxation_audit": []},
+      "count": 5,
+      "expected_field_priorities_include": ["mortgage_calc", "mortgage", "discount", "payment_by_installments", "novos.min_price", "novos.max_price"],
+      "also_expected_overlay_preserves": ["location", "district", "ready", "finishing"],
+      "shape_assertions": ["financing_base_overlay_explicit", "broad_results_allow_later_enrichment", "missing_for_unconfirmed_scenario_fields", "no_unconfirmed_rate_or_fee"]
+    }
+  ]
+}

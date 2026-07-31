@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "status": "contract_only_not_executable",
+  "total_future_runs": 18,
+  "sequence": [
+    "prepare_workspace",
+    "launch_normal_task_subagent_with_agent_packet_only",
+    "capture_parent_and_fresh_session_id",
+    "read_only_db_metrics_capture",
+    "seal_candidate_with_verified_new_session_id",
+    "blind_score_bound_to_sealed_hash",
+    "aggregate_only_after_full_coverage"
+  ],
+  "first_item_gate": {
+    "enabled": true,
+    "stop_before_batch_if_first_packet_receipt_score_or_metric_contract_fails": true
+  },
+  "parent_session_capture": {
+    "required": true,
+    "common_parent_id_required_for_all_18": true,
+    "fresh_subagent_session_id_required": true
+  },
+  "subagent_prompt_template": {
+    "closed_inputs": ["agent_packet_json"],
+    "forbidden_inputs": ["experiment_json", "counterbalanced_schedule", "private_labels", "other_arm_payloads", "own_outcome", "other_arm_data", "score", "metrics", "aggregate", "raw_prompt", "tool_output", "code_body"],
+    "text": "You are a normal task subagent for one prepared mechanism-v2 packet. Use only the JSON object between AGENT_PACKET_JSON_START and AGENT_PACKET_JSON_END. Return JSON only with exactly task_id, arm, selected_check_codes, route_summary, and receipt. Do not include edits, code, prompts, hidden reasoning, tool args, tool outputs, labels, scores, metrics, outcomes, own/other arm data, or any private expected checks. AGENT_PACKET_JSON_START\n{{agent_packet_json}}\nAGENT_PACKET_JSON_END"
+  },
+  "metrics_capture": {
+    "module": "metrics_collector_v2.py",
+    "read_only_db_path_required": true,
+    "after_fresh_session_capture": true,
+    "before_seal_or_aggregate_use": true
+  },
+  "no_run_confirmation": "This contract defines future Chati orchestration only; it does not execute task subagents, scenarios, models or providers."
+}

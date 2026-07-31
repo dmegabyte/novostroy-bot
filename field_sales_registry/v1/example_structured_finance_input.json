@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "object_name": "Синтетический финансовый ЖК",
+  "fresh_mcp": true,
+  "facts": {
+    "mortgage_rate": {
+      "value": 6.0,
+      "source_field": "mortgage_calc.min_percent"
+    },
+    "down_payment": {
+      "value": 20.0,
+      "source_field": "mortgage_calc.min_fee"
+    },
+    "installment_months": {
+      "value": 18,
+      "source_field": "payment_by_installments.month"
+    }
+  }
+}

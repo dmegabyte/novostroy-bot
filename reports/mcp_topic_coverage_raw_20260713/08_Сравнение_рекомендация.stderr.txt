@@ -1,0 +1,15 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Сравни текущие варианты и порекомендуй лучший.
+
+MCP-запрос:   {"purpose": "search", "count": 3}
+[OK] Задача создана: id=2126528
+[WAIT] Задача 2126528: статус=processing (0с)
+[OK] Задача создана: id=2126531
+[WAIT] Задача 2126531: статус=queued (0с)
+[OK] Задача создана: id=2126534
+[WAIT] Задача 2126534: статус=queued (0с)
+📊 tokens_used=14924 (cost: or_cost.py)

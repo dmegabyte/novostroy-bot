@@ -1,0 +1,19 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Проверь ЖК Мичуринский парк под семейную ипотеку: ипотечные условия, цены и площади.
+Начальные params: {"purpose": "fact_check", "selected_option_name": "Мичуринский парк", "facets": ["mortgage"], "need": ["mortgage", "mortgage_calc", "prices", "area", "house"]}
+
+MCP-запрос:   {"purpose": "family", "selected_option_name": "Мичуринский парк", "facets": ["mortgage"], "need": ["mortgage", "mortgage_calc", "prices", "area", "house", "schools", "kindergartens", "parks", "yard_without_cars", "discount", "payment_by_installments", "price"], "count": 3, "mortgage_type": "family_mortgage"}
+[OK] Задача создана: id=2126558
+[WAIT] Задача 2126558: статус=queued (0с)
+[WAIT] Задача 2126558: статус=processing (3с)
+[OK] Задача создана: id=2126563
+[WAIT] Задача 2126563: статус=queued (0с)
+[WAIT] Задача 2126563: статус=processing (3с)
+[OK] Задача создана: id=2126565
+[WAIT] Задача 2126565: статус=queued (0с)
+[WAIT] Задача 2126565: статус=processing (3с)
+📊 tokens_used=59174 (cost: or_cost.py)

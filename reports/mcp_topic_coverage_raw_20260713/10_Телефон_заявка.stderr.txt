@@ -1,0 +1,15 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Да, хочу оставить номер.
+
+MCP-запрос:   {"purpose": "operator"}
+[OK] Задача создана: id=2126544
+[WAIT] Задача 2126544: статус=queued (0с)
+[OK] Задача создана: id=2126547
+[WAIT] Задача 2126547: статус=queued (0с)
+[OK] Задача создана: id=2126549
+[WAIT] Задача 2126549: статус=queued (0с)
+📊 tokens_used=15053 (cost: or_cost.py)

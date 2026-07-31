@@ -1,0 +1,18 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Найди варианты рядом с метро, чтобы были понятны метро, время пешком, цены и площади.
+Начальные params: {"purpose": "search", "facets": ["metro"], "need": ["property_metro", "prices", "area"], "count": 5}
+
+MCP-запрос:   {"purpose": "search", "facets": ["metro"], "need": ["property_metro", "prices", "area"], "count": 5}
+[OK] Задача создана: id=2126481
+[WAIT] Задача 2126481: статус=queued (0с)
+[WAIT] Задача 2126481: статус=processing (3с)
+[OK] Задача создана: id=2126484
+[WAIT] Задача 2126484: статус=queued (0с)
+[OK] Задача создана: id=2126485
+[WAIT] Задача 2126485: статус=queued (0с)
+[WAIT] Задача 2126485: статус=processing (3с)
+📊 tokens_used=25650 (cost: or_cost.py)

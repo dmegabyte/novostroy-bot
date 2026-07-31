@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "experiment_id": "dual-memory-mechanism-v2",
+  "status": "PREPARED_NOT_RUN",
+  "claim_boundary": {
+    "causal_claim_allowed": false,
+    "reason": "Current task API has no seed/model lock; receipts are self-report route declarations only.",
+    "designed_to_distinguish": "relevant memory guidance versus sham added context"
+  },
+  "families": ["normalize", "cache", "boundary"],
+  "arms": ["B0", "M1", "S1"],
+  "holdout_task_ids": [
+    "mech-normalize-holdout-01",
+    "mech-normalize-holdout-02",
+    "mech-cache-holdout-01",
+    "mech-cache-holdout-02",
+    "mech-boundary-holdout-01",
+    "mech-boundary-holdout-02"
+  ],
+  "learning_task_ids": [
+    "mech-normalize-learn-01",
+    "mech-normalize-learn-02",
+    "mech-normalize-learn-03",
+    "mech-cache-learn-01",
+    "mech-cache-learn-02",
+    "mech-cache-learn-03",
+    "mech-boundary-learn-01",
+    "mech-boundary-learn-02",
+    "mech-boundary-learn-03"
+  ],
+  "advice_catalog": {
+    "normalize": ["adv-normalize-trim", "adv-normalize-canonicalize", "adv-normalize-empty-guard"],
+    "cache": ["adv-cache-key-scope", "adv-cache-invalidation", "adv-cache-fallback"],
+    "boundary": ["adv-boundary-validate", "adv-boundary-contract", "adv-boundary-no-crosswrite"]
+  },
+  "receipt_advice_allowlist": {
+    "mech-normalize-holdout-01": {"B0": [], "M1": ["adv-normalize-trim", "adv-normalize-canonicalize", "adv-normalize-empty-guard"], "S1": ["adv-cache-key-scope", "adv-cache-invalidation", "adv-cache-fallback"]},
+    "mech-normalize-holdout-02": {"B0": [], "M1": ["adv-normalize-trim", "adv-normalize-canonicalize", "adv-normalize-empty-guard"], "S1": ["adv-boundary-validate", "adv-boundary-contract", "adv-boundary-no-crosswrite"]},
+    "mech-cache-holdout-01": {"B0": [], "M1": ["adv-cache-key-scope", "adv-cache-invalidation", "adv-cache-fallback"], "S1": ["adv-normalize-trim", "adv-normalize-canonicalize", "adv-normalize-empty-guard"]},
+    "mech-cache-holdout-02": {"B0": [], "M1": ["adv-cache-key-scope", "adv-cache-invalidation", "adv-cache-fallback"], "S1": ["adv-boundary-validate", "adv-boundary-contract", "adv-boundary-no-crosswrite"]},
+    "mech-boundary-holdout-01": {"B0": [], "M1": ["adv-boundary-validate", "adv-boundary-contract", "adv-boundary-no-crosswrite"], "S1": ["adv-normalize-trim", "adv-normalize-canonicalize", "adv-normalize-empty-guard"]},
+    "mech-boundary-holdout-02": {"B0": [], "M1": ["adv-boundary-validate", "adv-boundary-contract", "adv-boundary-no-crosswrite"], "S1": ["adv-cache-key-scope", "adv-cache-invalidation", "adv-cache-fallback"]}
+  },
+  "advisory_payload_manifest": {
+    "path": "private/advisory_payloads.jsonl",
+    "sha256": "53909d237625512eda8da96ce9a3a3b4c3c161475712393af280f31bc018a8a3",
+    "immutability": "hash_locked_before_launch; validator fails if the artifact bytes change without this contract changing"
+  },
+  "check_catalog": {
+    "normalize": ["check-normalize-input", "check-normalize-empty", "check-normalize-idempotent"],
+    "cache": ["check-cache-key", "check-cache-stale", "check-cache-miss"],
+    "boundary": ["check-boundary-schema", "check-boundary-owner", "check-boundary-readonly"]
+  },
+  "counterbalanced_schedule": [
+    {"task_id": "mech-normalize-holdout-01", "family_id": "normalize", "arm_order": ["B0", "M1", "S1"], "m1_advice_family": "normalize", "s1_sham_family": "cache"},
+    {"task_id": "mech-normalize-holdout-02", "family_id": "normalize", "arm_order": ["M1", "S1", "B0"], "m1_advice_family": "normalize", "s1_sham_family": "boundary"},
+    {"task_id": "mech-cache-holdout-01", "family_id": "cache", "arm_order": ["S1", "B0", "M1"], "m1_advice_family": "cache", "s1_sham_family": "normalize"},
+    {"task_id": "mech-cache-holdout-02", "family_id": "cache", "arm_order": ["B0", "S1", "M1"], "m1_advice_family": "cache", "s1_sham_family": "boundary"},
+    {"task_id": "mech-boundary-holdout-01", "family_id": "boundary", "arm_order": ["M1", "B0", "S1"], "m1_advice_family": "boundary", "s1_sham_family": "normalize"},
+    {"task_id": "mech-boundary-holdout-02", "family_id": "boundary", "arm_order": ["S1", "M1", "B0"], "m1_advice_family": "boundary", "s1_sham_family": "cache"}
+  ],
+  "receipt_schema": {
+    "receipt_version": "mechanism-v2-receipt-1",
+    "closed_keys": ["task_id", "arm", "consulted_advice_codes", "selected_check_codes", "receipt_version"],
+    "forbidden": ["hidden_reasoning", "raw_prompt", "raw_code", "logs", "tool_output", "private_labels", "expected_answer", "provider_packet", "production_data"]
+  },
+  "agent_result_schema": {
+    "schema_version": "mechanism-v2-agent-result-1",
+    "closed_keys": ["task_id", "arm", "selected_check_codes", "route_summary", "receipt"],
+    "receipt_keys": ["task_id", "arm", "consulted_advice_codes", "selected_check_codes", "receipt_version"],
+    "forbidden": ["edits", "remediation", "code", "prompt", "hidden_reasoning", "thought", "logs", "tool_args", "tool_output", "private_labels", "outcome", "expected_answer"],
+    "route_summary_contract": "brief natural language route/check summary only; no forbidden content or arm identity leak"
+  },
+  "outcomes": {
+    "quality_scorer_blind_to_arm": true,
+    "primary": ["quality_pass", "wall_ms"],
+    "secondary": ["total_tokens", "tool_calls", "failed_tool_calls"],
+    "comparisons": ["M1_vs_B0", "M1_vs_S1"],
+    "mechanism_evidence_rule": "M1 must improve quality/wall versus both controls and M1 receipts must align with allowed relevant family advice; missing receipt coverage is mechanism_not_evaluable, never zero.",
+    "no_composite_metric": true
+  },
+  "boundaries": {
+    "static_only_now": true,
+    "forbidden_now": ["agents", "models", "providers", "scenarios", "fixtures", "hidden_verifier", "scorer", "eval", "network", "VPS", "production"],
+    "first_infrastructure_failure": "stop",
+    "no_task_sees_own_outcome_in_memory": true,
+    "prompt_token_lengths_exactly_equal_claim": false
+  },
+  "execution_boundary": {
+    "preparation_only": true,
+    "deny_execution_by_default": true,
+    "agent_packet_source": "arm_sliced_preparer_only",
+    "runs_root_required": true,
+    "workspace_fresh_required": true,
+    "agent_packet_forbidden": ["private_labels", "other_arm_payloads", "full_arm_map", "schedule", "hidden_outcomes", "raw_prompt", "thought", "log", "code"],
+    "agent_packet_files": ["agent_packet.json", "run_manifest.json", "RECEIPT_SCHEMA.json"]
+  },
+  "route_manipulation_checks": [
+    "B0 receipt must have empty consulted_advice_codes",
+    "M1 receipt advice codes must exactly match the scheduled relevant-family allowlist for that holdout",
+    "S1 receipt advice codes must exactly match the scheduled unrelated sham-family allowlist for that holdout",
+    "selected_check_codes must stay in the task family's public allowed checks"
+  ]
+}

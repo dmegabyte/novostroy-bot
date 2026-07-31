@@ -1,0 +1,21 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Подбери несколько новостроек в Москве до 18 млн, чтобы были понятны цены, площади, метро и готовность.
+Начальные params: {"purpose": "search", "need": ["prices", "area", "property_metro", "stage", "ready_quarter", "house"], "count": 3}
+
+MCP-запрос:   {"purpose": "search", "need": ["prices", "area", "property_metro", "stage", "ready_quarter", "house"], "count": 3}
+[OK] Задача создана: id=2126451
+[WAIT] Задача 2126451: статус=queued (0с)
+[WAIT] Задача 2126451: статус=processing (3с)
+[WAIT] Задача 2126451: статус=processing (6с)
+[WAIT] Задача 2126451: статус=processing (9с)
+[OK] Задача создана: id=2126454
+[WAIT] Задача 2126454: статус=queued (0с)
+[WAIT] Задача 2126454: статус=processing (3с)
+[OK] Задача создана: id=2126458
+[WAIT] Задача 2126458: статус=queued (0с)
+[WAIT] Задача 2126458: статус=processing (3с)
+📊 tokens_used=216734 (cost: or_cost.py)

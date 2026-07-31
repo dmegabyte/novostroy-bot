@@ -1,0 +1,22 @@
+{
+  "README.md": "8f69abaf6121c7c06ba6ca05c025b91bb9b9c758eadcc04067531531d4e2fe39",
+  "SCHEMAS.md": "c760f237a63bd0808d7e099beef62c1b89aa464d0f753539a123d217f9aebecd",
+  "hash_manifest.json": "28e235c2e4a9c6ca47f3fa099b4fa4c3393fa6c0450e9cb8fb79dc5a38821a21",
+  "private/SCORER_CONTRACT.md": "acf094d2b6f14061021de7b5cffa5c073a8aef399be59692fbf4a4d7a91d47ba",
+  "private/labels.jsonl": "578d6ca837417b0850ba0c6c541520ea3b4b59e5fe54c250d37285539576b216",
+  "private/verifiers/diagnosis_verifier.py": "29f69fda076bc53c56c18531b0c4fe328a17743bcdc4b4b0a2075202b56345cf",
+  "public/scenarios/diag-client-text-leak-01/01-client-observation.md": "2701f7ebe2b36ec92fe0a3457e627215cc64bb04a48588653fd5a056e58c5204",
+  "public/scenarios/diag-client-text-leak-01/02-branch-trace.md": "2ff500fee57fc44400f755e58efc7a53e3f390aa179efa12ea18161940965d22",
+  "public/scenarios/diag-client-text-leak-01/03-metadata-note.md": "dd31679b94dcaab45091c8b6a4a0e1a492a9f037985f837f8e4f4b442e6cafb3",
+  "public/scenarios/diag-client-text-leak-01/04-second-path.md": "44c314a8395a158b2567ffdf16a22312191074d6dff1be3d59d523dfffae3a14",
+  "public/scenarios/diag-composer-rollout-01/01-visible-symptoms.md": "5cb9263feaf03800d2ba9ef3656217cb7ccfcef7f8f87c0180f464dcd67d1f60",
+  "public/scenarios/diag-composer-rollout-01/02-layer-table.md": "98293551cabd753638e75473c923ede33328005654fb7ea10d0b0cde7bb577a4",
+  "public/scenarios/diag-composer-rollout-01/03-timeline-notes.md": "93f0e01b980ba40513df21f444b24ee6e806f297921dd8a02c8f2fe498545163",
+  "public/scenarios/diag-composer-rollout-01/04-causality-boundary.md": "b8aee63f426c8d29cc0a5f22d4322d46e3ebf2b3a12e1534caae2a680e140de0",
+  "public/scenarios/diag-mcp-artifact-01/01-cli-sequence.md": "288f26258f5a16753930f22a678b8932945a78fbe77c37ae76884c8eb6ce8ab1",
+  "public/scenarios/diag-mcp-artifact-01/02-export-row.md": "0a4b1eabcf599afc52c0f2482d9905d3571340cda37e9ae25d0b59f021c1fb9a",
+  "public/scenarios/diag-mcp-artifact-01/03-contract-excerpt.md": "1b31d5cff41aa65f8522cdb371c349fdc83a575ee6af895b496d91f17d4304d2",
+  "public/scenarios/diag-mcp-artifact-01/04-scoring-note.md": "502061843d6b4b8125a6553fd0e70f8a16c5d6535e41d05d23e45e4ba5737eee",
+  "public/tasks.jsonl": "60d0fec179cc1096cf570d91e98113ffe06cc98828a1ace152e8f589a7f311a8",
+  "validate_layout.py": "e38b46a7da4e6dc993604b1c585327c2b0c8f87524d475df638cbb70999f2b9d"
+}

@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "adapter_id": "qapairs",
+  "owner_root": "/home/ser/projects/cc-daemons",
+  "stages": [
+    {
+      "id": "v1_autonomous_orchestration",
+      "label": "V1 autonomous issue-log to daily orchestration",
+      "owner_source": "tools/issue_qa_autonomous.py",
+      "owner_symbols": ["run_autonomous", "main"],
+      "test_refs": ["tests/test_issue_qa_autonomous.py"],
+      "report_only": false,
+      "source_refs": ["PROJECT_MAP.md:81-82", "docs/qapairs-operational-modes.md:34-48", "docs/qapairs-operational-modes.md:77-90"]
+    },
+    {
+      "id": "v1_pair_verifier",
+      "label": "V1 pair verifier and atomicity cap",
+      "owner_source": "tools/issue_qa_orchestrator.py",
+      "owner_symbols": ["verify_pair", "verify_record_pairs", "partition_record_pairs"],
+      "test_refs": ["tests/test_issue_qa_orchestrator.py"],
+      "report_only": false,
+      "source_refs": ["tools/issue_qa_orchestrator.py:2375-2552"]
+    },
+    {
+      "id": "v1_quality_gate",
+      "label": "V1 quality gate over clean daily records",
+      "owner_source": "tools/issue_qa_quality_gate.py",
+      "owner_symbols": ["review_daily", "build_reviewed_candidates", "run_gate"],
+      "test_refs": ["tests/test_issue_qa_quality_gate.py"],
+      "report_only": false,
+      "source_refs": ["tools/issue_qa_quality_gate.py:4-10", "tools/issue_qa_quality_gate.py:32-105"]
+    },
+    {
+      "id": "v2_fact_selection",
+      "label": "V2 structured fact selection for report-only recovery",
+      "owner_source": "tools/qapairs_gemma_facts_to_pairs.py",
+      "owner_symbols": ["select_best_facts"],
+      "test_refs": ["tests/test_qapairs_gemma_facts_to_pairs.py"],
+      "report_only": true,
+      "source_refs": ["tools/qapairs_gemma_facts_to_pairs.py:2-10", "tools/qapairs_gemma_facts_to_pairs.py:616-646"]
+    },
+    {
+      "id": "v2_structured_issues",
+      "label": "V2 structured issue diagnostics for generated pairs",
+      "owner_source": "tools/qapairs_gemma_facts_to_pairs.py",
+      "owner_symbols": ["structured_issues"],
+      "test_refs": ["tests/test_qapairs_gemma_facts_to_pairs.py"],
+      "report_only": true,
+      "source_refs": ["tools/qapairs_gemma_facts_to_pairs.py:1110-1168"]
+    }
+  ]
+}

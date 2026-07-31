@@ -1,0 +1,16 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Найди ЖК с единорогами на крыше и ценой 1 рубль у Кремля.
+Начальные params: {"purpose": "search", "need": ["prices", "area"], "count": 3}
+
+MCP-запрос:   {"purpose": "search", "need": ["prices", "area"], "count": 3}
+[OK] Задача создана: id=2126646
+[WAIT] Задача 2126646: статус=queued (0с)
+[OK] Задача создана: id=2126648
+[WAIT] Задача 2126648: статус=queued (0с)
+[OK] Задача создана: id=2126649
+[WAIT] Задача 2126649: статус=queued (0с)
+📊 tokens_used=14985 (cost: or_cost.py)

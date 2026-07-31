@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "project_id": "nmbot",
+  "status": "PREPARED_NOT_RUN",
+  "runtime": "current_opencode_task_subagents",
+  "run_order": [
+    "validate-layout",
+    "Phase B0: six fresh baseline task-subagent sessions on holdout IDs with empty memory",
+    "Phase L: nine fresh learning task-subagent sessions; only these may feed sealed advisory memory",
+    "seal canonical advisory memory snapshot derived from L only",
+    "Phase M1: six fresh memory task-subagent sessions on the same holdout IDs with sealed advisory memory",
+    "read-only session_metrics collector reads OpenCode DB aggregates after each future session",
+    "separate read-only scorer/reviewer evaluates quality first, then compare pairs by task_id"
+  ],
+  "holdout_task_ids": ["norm-holdout-01", "norm-holdout-02", "state-holdout-01", "state-holdout-02", "bound-holdout-01", "bound-holdout-02"],
+  "learning_task_ids": ["norm-learn-01", "norm-learn-02", "norm-learn-03", "state-learn-01", "state-learn-02", "state-learn-03", "bound-learn-01", "bound-learn-02", "bound-learn-03"],
+  "partitions": {
+    "learning": {"families": 3, "cases_per_family": 3, "total": 9},
+    "holdout": {"families": 3, "cases_per_family": 2, "total": 6}
+  },
+  "quality_gate": {
+    "runs_before_resources": true,
+    "allows_baseline_fail_memory_pass_as_improvement": true,
+    "rejects_baseline_pass_memory_fail_as_regression": true,
+    "requires_memory_pass_all_holdouts_for_resource_claim": true,
+    "forbids_new_false_success": true,
+    "forbids_safety_or_budget_regression": true,
+    "no_composite_score": true,
+    "reporting": "safe per-task quality transitions plus paired deltas and median/p95/total with honest N=6 caveat"
+  },
+  "primary_efficiency_metrics": [
+    "wall_ms", "total_tokens", "input_tokens", "output_tokens", "tokens_cache_read", "tokens_cache_write", "cached_tokens", "reasoning_tokens",
+    "estimated_provider_cost", "model_calls", "tool_calls", "failed_tool_calls", "retries"
+  ],
+  "optional_not_blocking_metrics": [
+    "bytes_read", "lines_read", "chars_read", "memory_hint_count", "memory_hint_chars", "memory_hint_tokens"
+  ],
+  "opencode_runtime_contract": {
+    "task_tool_model_selector_available": false,
+    "exact_luna_guarantee": false,
+    "same_subagent_type_required": true,
+    "actual_agent_and_model_source": "local OpenCode DB session table after future run",
+    "comparison_rule": "B0/M1 compare is evaluable only when all 12 holdout summaries share one nonempty experiment parent_id, one actual agent, one actual model identity, and matching task, fixture and memory contracts",
+    "usage_source": "OpenCode-normalized DB aggregates, not raw provider packets",
+    "forbidden_now": ["agent/model/provider run", "fixture execution", "hidden verifier", "scorer", "eval"]
+  },
+  "session_metrics_collector": {
+    "path": "telemetry/session_metrics.py",
+    "read_only": true,
+    "db_path_sources": ["opencode db path via shell=False", "explicit --db-path"],
+    "allowed_session_columns": ["id", "parent_id", "agent", "model", "cost", "tokens_input", "tokens_output", "tokens_reasoning", "tokens_cache_read", "tokens_cache_write", "time_created", "time_updated"],
+    "allowed_part_aggregates": ["tool_calls", "failed_tool_calls", "model_calls", "retries"],
+    "controlled_write": "sandbox_ctl.py collect-session writes only <run_dir>/observer/session_summary.json for a prepared run under RUNS_ROOT; standalone telemetry/session_metrics.py is stdout-only",
+    "model_identity_rule": "closed canonical JSON object with provider_id, model_id and variant strings; aliases providerID/provider_id/provider and modelID/model_id/model/id are normalized; unknown fields are dropped; plain strings are rejected",
+    "total_tokens_formula": "input_tokens + output_tokens + reasoning_tokens; cache is reported separately as tokens_cache_read, tokens_cache_write and cached_tokens=sum(cache read, cache write)",
+    "forbidden_outputs": ["prompt", "body", "code", "tool args", "tool output", "raw logs", "secrets"]
+  },
+  "first_failure_policy": {
+    "infrastructure_or_contract_failure": "stop_immediately",
+    "baseline_scored_quality_failure": "record_as_baseline_evidence_and_continue_to_L_M1_when_authorized",
+    "safety_budget_or_false_success_stop_semantics": "preserved_where_relevant"
+  },
+  "layer_b_promotion": {
+    "minimum_independent_successful_supports": 3,
+    "requires_separate_fresh_holdout": true,
+    "requires_separate_scorer": true,
+    "memory_role": "advisory_only"
+  },
+  "input_sets": {
+    "agent_allowed": [
+      "public/tasks.jsonl selected row",
+      "public/fixtures/<task-id>/**",
+      "runtime_templates/episodes.jsonl",
+      "runtime_templates/patterns.jsonl",
+      "sealed advisory memory snapshot for M1 only"
+    ],
+    "scorer_allowed": [
+      "prepared run workspace read-only",
+      "OpenCode DB aggregate summaries",
+      "private/labels.jsonl",
+      "private/verifiers/**"
+    ],
+    "agent_forbidden": [
+      "private/**",
+      "observer/**",
+      "locks/hash_manifest.json",
+      "expected_answer",
+      "root_cause_code",
+      "hidden_assertions"
+    ],
+    "scorer_forbidden": [
+      "network",
+      "agent mutation"
+    ]
+  },
+  "candidate_lock_before_scoring": true,
+  "raw_artifact_policy": {
+    "docs": "aggregate refs only",
+    "raw_artifacts_root": "/tmp/opencode",
+    "memory": "no raw prompt, code, logs, secrets, or private labels"
+  },
+  "telemetry": {
+    "schema_version": 1,
+    "run_metadata_schema": "telemetry/schemas/run_metadata_schema.json",
+    "quality_result_schema": "closed schema_version/task_id/pass/false_success/safety_regression/budget_regression/scorer_id/sealed object validated by sandbox_ctl.py seal-run",
+    "missing_optional_retrieval_memory_metrics": "not_evaluable_but_not_blocking_primary_pilot_claim"
+  }
+}

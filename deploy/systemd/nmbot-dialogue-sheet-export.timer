@@ -1,0 +1,10 @@
+[Unit]
+Description=Run NMBOT dialogue Google Sheets export hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=nmbot-dialogue-sheet-export.service
+
+[Install]
+WantedBy=timers.target

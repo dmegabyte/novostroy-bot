@@ -1,0 +1,73 @@
+{
+  "version": 1,
+  "policy": {
+    "runner": "scripts/nmbot_check.py",
+    "network": "forbidden",
+    "secrets": "forbidden",
+    "model_calls": "forbidden",
+    "side_effects": "none",
+    "notes": "Local read-only fast gate only. No SSH, deploy, release status, full pytest, eval or service restart."
+  },
+  "scopes": {
+    "docs": {
+      "description": "Static documentation and manifest presence check.",
+      "commands": [
+        {"name": "compile_dispatcher", "argv": ["{python}", "-m", "py_compile", "scripts/nmbot_check.py"], "evidence": ["py_compile exit 0"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
+        {"name": "docs_static_markers", "argv": ["{python}", "scripts/nmbot_check.py", "--internal-verify-docs"], "evidence": ["required docs and safety markers exist"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
+        {"name": "architecture_preflight", "argv": ["{python}", "scripts/nmbot_architecture_preflight.py", "--repo", ".", "--json"], "evidence": ["static preflight JSON prints without strict failure mode"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"}
+      ]
+    },
+    "contracts": {
+      "description": "External contract fixtures: Jivo API, callback outbox/worker and manifest/release static checks.",
+      "commands": [
+        {"name": "compile_contract_modules", "argv": ["{python}", "-m", "py_compile", "scripts/nmbot_api_server.py", "scripts/nmbot_crm_outbox.py", "scripts/nmbot_callback_sheet_worker.py"], "evidence": ["contract modules compile"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
+        {"name": "contract_targeted_pytest", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_callback_flow.py", "tests/test_nmbot_callback_worker.py", "tests/test_nmbot_api_jivo_p1.py", "tests/test_nmbot_release_manifest.py", "-q"], "evidence": ["targeted contract tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"}
+      ]
+    },
+    "v0": {
+      "description": "V0 local deterministic runtime and adapter checks.",
+      "commands": [
+        {"name": "compile_v0_modules", "argv": ["{python}", "-m", "py_compile", "nmbot_v0/runtime.py", "nmbot_v0/presentation.py", "scripts/nmbot_runtime_adapter.py"], "evidence": ["V0 modules compile"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
+        {"name": "v0_targeted_pytest", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_v0_runtime.py", "tests/test_nmbot_runtime_adapter.py", "-q"], "evidence": ["V0 and selector adapter tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"}
+      ]
+    },
+    "v1": {
+      "description": "V1 local isolated runtime and Stage B adapter/API checks.",
+      "commands": [
+        {"name": "compile_v1_modules", "argv": ["{python}", "-m", "py_compile", "nmbot_v1/runtime.py", "nmbot_v1/state.py", "nmbot_v1/ports.py", "nmbot_v1/contracts.py", "nmbot_v1/execution_path.py", "nmbot_v1/provider_adapters.py", "nmbot_v1/prompt_provenance.py", "scripts/nmbot_v1_quality_gate.py", "scripts/nmbot_runtime_adapter.py", "scripts/nmbot_api_server.py", "scripts/nmbot_egress_policy.py", "scripts/dialogue_journal.py", "scripts/nmbot_dialogue_report.py"], "evidence": ["V1 core/provider/provenance modules, quality runner and shared adapter/API/egress/journal/report compile"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
+        {"name": "v1_targeted_pytest", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_v1_contracts.py", "tests/test_nmbot_v1_state.py", "tests/test_nmbot_v1_search.py", "tests/test_nmbot_v1_execution_path.py", "tests/test_nmbot_v1_runtime.py", "tests/test_nmbot_v1_adapter.py", "tests/test_nmbot_v1_provider_adapters.py", "tests/test_nmbot_v1_quality.py", "tests/test_nmbot_dialogue_report.py", "-q"], "evidence": ["V1 core, provider ports, Stage B adapter/API/journal/report and Stage C quality fixture tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"},
+        {"name": "v1_quality_fixture_replay", "argv": ["{python}", "scripts/nmbot_v1_quality_gate.py", "--all"], "evidence": ["Deterministic V1 Stage C quality fixture replay passes offline"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"}
+      ]
+    },
+    "v2": {
+      "description": "V2 local runtime/search contract checks.",
+      "commands": [
+        {"name": "compile_v2_modules", "argv": ["{python}", "-m", "py_compile", "nmbot_v2/runtime.py", "nmbot_v2/search_contract.py", "scripts/nmbot_runtime_adapter.py"], "evidence": ["V2 modules compile"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
+        {"name": "v2_targeted_pytest", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_v2_runtime.py", "tests/test_nmbot_runtime_adapter.py", "-q"], "evidence": ["V2 and selector adapter tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"}
+      ]
+    },
+    "runtime": {
+      "description": "Local static runtime selector/API/bridge checks; production selection requires live evidence outside this command.",
+      "commands": [
+        {"name": "compile_runtime_entrypoints", "argv": ["{python}", "-m", "py_compile", "scripts/nmbot_api_server.py", "scripts/nmbot_n8n_bridge_server.py", "scripts/nmbot_runtime_adapter.py"], "evidence": ["runtime entrypoints compile"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
+        {"name": "runtime_static_tests", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_runtime_adapter.py", "tests/test_nmbot_diag_script_static.py", "tests/test_nmbot_release_manifest.py", "-q"], "evidence": ["selector, diagnostic and release manifest static tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"},
+        {"name": "architecture_preflight", "argv": ["{python}", "scripts/nmbot_architecture_preflight.py", "--repo", ".", "--json"], "evidence": ["static architecture preflight runs locally"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"}
+      ]
+    },
+    "audit": {
+      "description": "Static source-only project audit for simplification mapping; never production proof or unused-file proof.",
+      "commands": [
+        {"name": "compile_project_audit", "argv": ["{python}", "-m", "py_compile", "scripts/nmbot_project_audit.py"], "evidence": ["project audit script compiles"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
+        {"name": "project_audit_json", "argv": ["{python}", "scripts/nmbot_project_audit.py", "--json"], "evidence": ["source-only audit JSON report prints with candidate labels only"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"}
+      ]
+    },
+    "quality": {
+      "description": "Offline answer-quality regression for fixed family, investment, rental, life and adjacent V2 fixtures.",
+      "commands": [
+        {"name": "compile_quality_modules", "argv": ["{python}", "-m", "py_compile", "nmbot_v2/quality.py", "scripts/nmbot_v2_quality_gate.py"], "evidence": ["quality evaluator and fixture runner compile"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
+        {"name": "quality_contract_tests", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_v2_quality.py", "-q"], "evidence": ["quality heuristics, fixed scenario coverage and first-failure behavior pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"},
+        {"name": "quality_fixture_replay", "argv": ["{python}", "scripts/nmbot_v2_quality_gate.py", "--all"], "evidence": ["all 15 fixed scenarios pass deterministic offline answer-quality gate"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "none"}
+      ]
+    }
+  }
+}

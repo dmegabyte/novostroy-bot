@@ -1,0 +1,60 @@
+{
+  "module": "project",
+  "cards": [
+    {
+      "field_id": "developer",
+      "domain": "project",
+      "source_fields": ["developer"],
+      "canonical_fact": "OptionCard.developer",
+      "client_label": "застройщик",
+      "value_type": "text",
+      "literal_meaning": "Название застройщика, нормализованное из карточки ЖК.",
+      "sales_strength": "supporting",
+      "freshness": {"policy": "static_until_mcp_changes", "cache_static": true, "reason": "Название застройщика не является ценой или наличием."},
+      "required_evidence": ["canonical developer is present"],
+      "scenario_angles": [
+        {"scenario": "general", "benefit": "Можно назвать, кто указан застройщиком, если клиент спрашивает об объекте или хочет сверить карточку.", "strength": "supporting", "requires_all": ["developer"], "requires_any": [], "do_not_say": ["надежный застройщик", "лучший застройщик"]}
+      ],
+      "combines_with": ["property_class", "location"],
+      "forbidden_claims": ["Не делать вывод о надежности, сроках, качестве строительства или финансовой устойчивости."],
+      "rendering_rules": ["Писать буквально: «застройщик указан как …». Не пересказывать developer_description как доказанный рейтинг."]
+    },
+    {
+      "field_id": "property_class",
+      "domain": "project",
+      "source_fields": ["new_building_class", "property_class", "building_type"],
+      "canonical_fact": "OptionCard.property_class",
+      "client_label": "класс проекта",
+      "value_type": "text",
+      "literal_meaning": "Класс объекта после canonical normalizer, например комфорт-класс или бизнес-класс.",
+      "sales_strength": "neutral",
+      "freshness": {"policy": "static_until_mcp_changes", "cache_static": true, "reason": "Класс проекта обычно не меняется в рамках одного ответа."},
+      "required_evidence": ["canonical property_class is present"],
+      "scenario_angles": [
+        {"scenario": "comfort", "benefit": "Можно использовать как ориентир позиционирования проекта, но не как гарантию качества.", "strength": "neutral", "requires_all": ["property_class"], "requires_any": [], "do_not_say": ["качественнее конкурентов", "премиальное качество без доказательств"]}
+      ],
+      "combines_with": ["developer", "location"],
+      "forbidden_claims": ["Не обещать качество, статусность, ликвидность или рост цены из одного класса."],
+      "rendering_rules": ["Формулировать нейтрально: «в карточке указан …». Если класс не нормализован, не показывать raw enum."]
+    },
+    {
+      "field_id": "location",
+      "domain": "project",
+      "source_fields": ["location", "location_id", "district", "street"],
+      "canonical_fact": "OptionCard.location",
+      "client_label": "локация",
+      "value_type": "text",
+      "literal_meaning": "Клиентски читаемая локация или район из карточки.",
+      "sales_strength": "supporting",
+      "freshness": {"policy": "static_until_mcp_changes", "cache_static": true, "reason": "Локация не является динамическим наличием или ценой."},
+      "required_evidence": ["canonical location is present"],
+      "scenario_angles": [
+        {"scenario": "general", "benefit": "Помогает быстро понять, где находится ЖК, без подмены района внутренним кодом.", "strength": "supporting", "requires_all": ["location"], "requires_any": [], "do_not_say": ["лучший район", "самая удобная локация"]},
+        {"scenario": "commute", "benefit": "Может быть отправной точкой для разговора о маршрутах, если дополнительно есть метро или транспортные данные.", "strength": "supporting", "requires_all": ["location"], "requires_any": ["metro"], "do_not_say": ["быстро доберетесь куда угодно"]}
+      ],
+      "combines_with": ["metro", "park_near", "water_near"],
+      "forbidden_claims": ["Не выводить престижность, транспортную доступность или экологию без отдельных фактов."],
+      "rendering_rules": ["Не показывать коды msk/mo/newmsk как район; использовать canonical location."]
+    }
+  ]
+}

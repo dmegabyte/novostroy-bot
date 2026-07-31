@@ -1,0 +1,17 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Найди двухкомнатные квартиры для семьи: цены, площади, школы, сады, парки, магазины, метро и готовность.
+Начальные params: {"purpose": "family", "rooms": "2", "facets": ["infrastructure"], "need": ["prices", "area", "schools", "kindergartens", "parks", "shops", "family_infrastructure", "property_metro", "stage", "ready_quarter"], "count": 5}
+
+MCP-запрос:   {"purpose": "family", "rooms": "2", "facets": ["infrastructure"], "need": ["prices", "area", "schools", "kindergartens", "parks", "shops", "family_infrastructure", "property_metro", "stage", "ready_quarter", "yard_without_cars"], "count": 5}
+[OK] Задача создана: id=2126626
+[WAIT] Задача 2126626: статус=queued (0с)
+[WAIT] Задача 2126626: статус=processing (3с)
+[OK] Задача создана: id=2126628
+[WAIT] Задача 2126628: статус=queued (0с)
+[OK] Задача создана: id=2126630
+[WAIT] Задача 2126630: статус=queued (0с)
+📊 tokens_used=73730 (cost: or_cost.py)

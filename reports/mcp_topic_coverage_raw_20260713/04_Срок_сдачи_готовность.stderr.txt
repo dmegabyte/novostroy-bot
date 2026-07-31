@@ -1,0 +1,19 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Покажи готовые или скоро сдающиеся варианты с ключами, сроками и ценами.
+Начальные params: {"purpose": "search", "facets": ["readiness"], "need": ["delivered_houses", "under_construction_houses", "keys_handover", "settlement_info", "stage", "ready_quarter", "project_ready_secondary", "prices", "area"], "count": 5}
+
+MCP-запрос:   {"purpose": "search", "facets": ["readiness"], "need": ["delivered_houses", "under_construction_houses", "keys_handover", "settlement_info", "stage", "ready_quarter", "project_ready_secondary", "prices", "area"], "count": 5}
+[OK] Задача создана: id=2126490
+[WAIT] Задача 2126490: статус=queued (0с)
+[WAIT] Задача 2126490: статус=processing (3с)
+[OK] Задача создана: id=2126494
+[WAIT] Задача 2126494: статус=queued (0с)
+[WAIT] Задача 2126494: статус=processing (3с)
+[OK] Задача создана: id=2126495
+[WAIT] Задача 2126495: статус=queued (0с)
+[WAIT] Задача 2126495: статус=processing (3с)
+📊 tokens_used=26162 (cost: or_cost.py)

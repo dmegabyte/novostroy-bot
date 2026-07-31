@@ -1,0 +1,144 @@
+[
+  {
+    "case_id": "answer_composer_family",
+    "scenario": "family",
+    "input": {
+      "answer_goal": "present_selected",
+      "brief": {
+        "combinations": [
+          {"client_meaning":"В карточке есть оба семейных инфраструктурных признака.","forbidden_leap":"Не обещать места, закрепление или точную пешую доступность.","id":"school_plus_kindergarten","required_cards":["school","kindergarten"],"required_evidence":["school evidence","kindergarten evidence"],"safe_phrasing":"Для семейного сценария в карточке указаны и школа, и детский сад; расстояния и места лучше уточнить отдельно."}
+        ],
+        "constraints": {"facts_are_canonical": true, "no_new_facts": true, "registry_version": "v1"},
+        "diagnostics": {"omitted_field_ids": [{"field_id": "ads_count", "reason": "not_relevant"}], "unknown_field_ids": ["legacy_hidden"]},
+        "fields": [
+          {"allowed_benefit":"Можно отметить семейную логистику, если школа подтверждена в карточке.","field_id":"school","forbidden_claims":["Не обещать качество школы, закрепление, места или точное расстояние без evidence."],"label":"школа рядом","literal_meaning":"В карточке есть подтверждение школы или школьной инфраструктуры.","rendering_rules":["Писать «в карточке указана школа», если нет расстояния или названия."],"required_evidence":["school flag or canonical infrastructure school label is present"],"strength":"strong","value":true},
+          {"allowed_benefit":"Можно отметить удобство для семьи с маленьким ребёнком, если детский сад подтверждён.","field_id":"kindergarten","forbidden_claims":["Не обещать места, качество сада или точную пешую доступность без evidence."],"label":"детский сад рядом","literal_meaning":"В карточке есть подтверждение детского сада.","rendering_rules":["Не усиливать формулировку сверх буквального признака."],"required_evidence":["kindergarten flag or canonical infrastructure kindergarten label is present"],"strength":"strong","value":true},
+          {"allowed_benefit":"Можно отметить дворовую инфраструктуру для ребёнка, если площадка подтверждена.","field_id":"children_ground","forbidden_claims":["Не описывать состояние, безопасность или возраст площадки без evidence."],"label":"детская площадка","literal_meaning":"В карточке подтверждена детская площадка.","rendering_rules":["Писать буквально: «есть детская площадка»."],"required_evidence":["children_ground flag or canonical label is present"],"strength":"supporting","value":true}
+        ],
+        "fresh_mcp": true,
+        "object_name": "Синтетический семейный ЖК",
+        "scenario": "family",
+        "schema_version": 1
+      },
+      "cta_template": "Хотите подробнее разобрать этот вариант?",
+      "schema_version": 1
+    },
+    "candidate": {"benefit":"Школа рядом и детский сад рядом могут упростить семейную логистику; расстояние и наличие мест лучше проверить отдельно.","caveat":"Тип и состояние площадки пока не уточнены.","fact_summary":"По этому варианту указаны школа рядом, детский сад рядом и детская площадка.","final_question":"Хотите подробнее разобрать этот вариант?","intro":"Да, этот вариант можно спокойно рассмотреть для семейного сценария.","used_combination_ids":["school_plus_kindergarten"],"used_field_ids":["school","kindergarten","children_ground"]},
+    "expected_valid": true,
+    "expected_used_field_ids": ["school", "kindergarten", "children_ground"],
+    "expected_used_combination_ids": ["school_plus_kindergarten"]
+  },
+  {
+    "case_id": "answer_composer_financing",
+    "scenario": "budget",
+    "input": {
+      "schema_version": 1,
+      "answer_goal": "present_selected",
+      "cta_template": "Хотите прикинуть этот вариант по бюджету?",
+      "brief": {
+        "schema_version": 1,
+        "scenario": "budget",
+        "object_name": "Синтетический финансовый ЖК",
+        "fresh_mcp": true,
+        "fields": [
+          {"field_id":"mortgage_rate","label":"ставка ипотеки","value":6.0,"literal_meaning":"Минимальная процентная ставка из свежего структурированного финансового envelope.","allowed_benefit":"Можно обсудить вариант оплаты, если ставка свежая и явно указана.","strength":"strong","required_evidence":["fresh response","exact allowlisted source field","matching object scope"],"forbidden_claims":["Не обещать одобрение, ежемесячный платёж, субсидию или итоговую переплату."],"rendering_rules":["Писать процент как указанное условие программы, не как персональное предложение."]},
+          {"field_id":"down_payment","label":"первоначальный взнос","value":20.0,"literal_meaning":"Минимальный первоначальный взнос в процентах.","allowed_benefit":"Можно уточнить процентный входной порог по ипотеке.","strength":"supporting","required_evidence":["fresh response","exact allowlisted source field","matching object scope"],"forbidden_claims":["Не делать персональный финансовый совет или обещание банка."],"rendering_rules":["Отделять процент условия программы от персонального одобрения."]},
+          {"field_id":"installment_months","label":"рассрочка","value":18,"literal_meaning":"Срок рассрочки в месяцах.","allowed_benefit":"Можно предложить уточнить рассрочку как способ оплаты, если срок указан.","strength":"supporting","required_evidence":["fresh response","exact allowlisted source field","matching object scope"],"forbidden_claims":["Не обещать одобрение, нулевую переплату или неизменность условий."],"rendering_rules":["Писать срок буквально: «рассрочка до … месяцев»."]},
+          {"field_id":"apartment_price","label":"цена квартиры","value":12000000,"literal_meaning":"Подтверждённая цена или минимальная входная цена.","allowed_benefit":"Можно честно сравнить с бюджетом клиента, если цена свежая и известная.","strength":"strong","required_evidence":["fresh response","canonical price is present"],"forbidden_claims":["Не обещать скидку, выгоду, будущий рост цены или доступность."],"rendering_rules":["Указывать как факт; просить свежую проверку перед решением."]}
+        ],
+        "combinations": [],
+        "constraints": {"facts_are_canonical": true, "no_new_facts": true, "registry_version": "v1"},
+        "diagnostics": {"omitted_field_ids": [], "unknown_field_ids": []}
+      }
+    },
+    "candidate": {"intro":"По бюджету здесь есть несколько точек для спокойного сравнения.","fact_summary":"Указана ставка 6,0% и первоначальный взнос от 20,0%; отдельно указан срок рассрочки 18 месяцев и цена 12 000 000 рублей.","benefit":"Это помогает заранее сопоставить условия оплаты с вашим бюджетом; окончательное решение зависит от программы и конкретной квартиры.","caveat":"Решение банка и итоговые условия нужно проверять отдельно.","final_question":"Хотите прикинуть этот вариант по бюджету?","used_field_ids":["mortgage_rate","down_payment","installment_months","apartment_price"],"used_combination_ids":[]},
+    "expected_valid": true,
+    "expected_used_field_ids": ["mortgage_rate", "down_payment", "installment_months", "apartment_price"],
+    "expected_used_combination_ids": []
+  },
+  {
+    "case_id": "answer_composer_parking",
+    "scenario": "parking",
+    "input": {
+      "schema_version": 1,
+      "answer_goal": "present_selected",
+      "cta_template": "Хотите отдельно сравнить условия по паркингу?",
+      "brief": {
+        "schema_version": 1,
+        "scenario": "parking",
+        "object_name": "Синтетический паркинг ЖК",
+        "fresh_mcp": true,
+        "fields": [
+          {"field_id":"parking","label":"паркинг","value":true,"literal_meaning":"Есть признак паркинга или гаража.","allowed_benefit":"Можно сказать, что паркинг заявлен.","strength":"supporting","required_evidence":["parking flag or canonical parking label is present"],"forbidden_claims":["Не обещать доступность машиноместа, стоимость или тип паркинга без отдельных полей."],"rendering_rules":["Разделять факт паркинга, цену и текущее число мест."]},
+          {"field_id":"parking_price","label":"цена паркинга","value":1500000,"literal_meaning":"Цена или минимальная цена машиноместа.","allowed_benefit":"Можно назвать ориентир по цене машиноместа, если он свежий.","strength":"strong","required_evidence":["fresh response","canonical parking_price is present"],"forbidden_claims":["Не обещать место, бронь или сохранение цены."],"rendering_rules":["Если цена не свежая, не использовать её как факт."]},
+          {"field_id":"parking_inventory","label":"число машиномест","value":7,"literal_meaning":"Текущее количество машиномест после safe dynamic inventory normalizer.","allowed_benefit":"Можно обсуждать паркинг предметно, если свежее число машиномест указано.","strength":"strong","required_evidence":["fresh response","canonical parking_inventory is present"],"forbidden_claims":["Не обещать бронь, дефицит или будущую доступность."],"rendering_rules":["Писать число буквально."]}
+        ],
+        "combinations": [],
+        "constraints": {"facts_are_canonical": true, "no_new_facts": true, "registry_version": "v1"},
+        "diagnostics": {"omitted_field_ids": [], "unknown_field_ids": []}
+      }
+    },
+    "candidate": {"intro":"По паркингу можно назвать только аккуратные ориентиры.","fact_summary":"В условиях указаны паркинг, цена 1 500 000 рублей и число 7 машиномест.","benefit":"Так проще сравнить расходы на квартиру и машиноместо отдельно, без обещания конкретного места.","caveat":"Цена и число машиномест могут меняться, поэтому их лучше проверить перед решением.","final_question":"Хотите отдельно сравнить условия по паркингу?","used_field_ids":["parking","parking_price","parking_inventory"],"used_combination_ids":[]},
+    "expected_valid": true,
+    "expected_used_field_ids": ["parking", "parking_price", "parking_inventory"],
+    "expected_used_combination_ids": []
+  },
+  {
+    "case_id": "answer_composer_investment",
+    "scenario": "investment",
+    "input": {
+      "schema_version": 1,
+      "answer_goal": "present_selected",
+      "cta_template": "Хотите сравнить эти счётчики с другими вариантами?",
+      "brief": {
+        "schema_version": 1,
+        "scenario": "investment",
+        "object_name": "Синтетический инвестиционный ЖК",
+        "fresh_mcp": true,
+        "fields": [
+          {"field_id":"sales_count","label":"сделки ЕГРН","value":0,"literal_meaning":"Только буквальное количество сделок ЕГРН.","allowed_benefit":"Можно назвать только сам счётчик сделок ЕГРН как справочный факт.","strength":"weak","required_evidence":["fresh response","canonical sales_count is present"],"forbidden_claims":["Не выводить спрос, ликвидность, доходность, рост цены, темп продаж или вероятность будущей продажи."],"rendering_rules":["Обязательно писать «по ЕГРН» или «сделки ЕГРН»."]},
+          {"field_id":"ads_count","label":"объявления на витрине","value":7,"literal_meaning":"Только буквальное количество объявлений на витрине.","allowed_benefit":"Можно назвать только количество объявлений как справочный факт по витрине.","strength":"weak","required_evidence":["fresh response","canonical ads_count is present"],"forbidden_claims":["Не выводить спрос, ликвидность, доходность, конкуренцию, рост цены или будущую продажу."],"rendering_rules":["Пояснять, что это число объявлений, а не показатель спроса."]}
+        ],
+        "combinations": [],
+        "constraints": {"facts_are_canonical": true, "no_new_facts": true, "registry_version": "v1"},
+        "diagnostics": {"omitted_field_ids": [], "unknown_field_ids": []}
+      }
+    },
+    "candidate": {"intro":"По инвестиционному сценарию здесь можно быть только буквальными.","fact_summary":"По ЕГРН указано 0 сделок, на витрине — 7 объявлений.","benefit":"Это можно использовать только как буквальные счётчики для сравнения; по ним нельзя делать вывод о рынке или заработке.","caveat":"Для финансового вывода нужны отдельные расчёты и проверка условий.","final_question":"Хотите сравнить эти счётчики с другими вариантами?","used_field_ids":["sales_count","ads_count"],"used_combination_ids":[]},
+    "expected_valid": true,
+    "expected_used_field_ids": ["sales_count", "ads_count"],
+    "expected_used_combination_ids": []
+  },
+  {
+    "case_id": "answer_composer_lot",
+    "scenario": "general",
+    "input": {
+      "schema_version": 1,
+      "answer_goal": "present_selected",
+      "cta_template": "Хотите сравнить этот лот с похожими вариантами?",
+      "brief": {
+        "schema_version": 1,
+        "scenario": "general",
+        "object_name": "Синтетический лот ЖК",
+        "fresh_mcp": true,
+        "fields": [
+          {"field_id":"lot_full_price","label":"полная цена лота","value":10100000,"literal_meaning":"Полная цена конкретного объявления/лота.","allowed_benefit":"Можно сравнить не общий диапазон ЖК, а конкретный лот, если полная цена свежая.","strength":"strong","required_evidence":["fresh response","LotExample.full_price is present"],"forbidden_claims":["Не обещать наличие, бронь или сохранение цены."],"rendering_rules":["Показывать как цену конкретного лота."]},
+          {"field_id":"lot_area","label":"площадь лота","value":35.2,"literal_meaning":"Площадь конкретного лота в м².","allowed_benefit":"Можно сравнить конкретные лоты по площади, если площадь указана.","strength":"supporting","required_evidence":["fresh response","LotExample.area_m2 is present"],"forbidden_claims":["Не делать вывод о планировке, виде или удобстве."],"rendering_rules":["Использовать площадь как literal discriminator между похожими лотами."]},
+          {"field_id":"lot_floor","label":"этаж лота","value":"3 из 12","literal_meaning":"Этаж конкретного лота и этажность дома.","allowed_benefit":"Можно помочь клиенту отличить похожие лоты по этажу.","strength":"supporting","required_evidence":["fresh response","LotExample.floor is present"],"forbidden_claims":["Не утверждать вид, шум, ликвидность или качество этажа."],"rendering_rules":["Если floors_total отсутствует, писать только этаж."]},
+          {"field_id":"lot_rooms","label":"комнатность лота","value":"студия","literal_meaning":"Комнатность конкретного лота.","allowed_benefit":"Можно связать конкретный формат с ценой, если оба поля есть.","strength":"supporting","required_evidence":["fresh response","LotExample.rooms is present"],"forbidden_claims":["Не распространять комнатность одного лота на весь ЖК."],"rendering_rules":["Отличать lot_rooms от общего room_formats проекта."]},
+          {"field_id":"lot_renovation","label":"отделка лота","value":"предчистовая отделка","literal_meaning":"Отделка конкретного лота после normalizer.","allowed_benefit":"Можно описать, с какой отделкой указан конкретный лот.","strength":"supporting","required_evidence":["fresh response","LotExample.renovation is present"],"forbidden_claims":["Не оценивать качество ремонта или готовность к заселению."],"rendering_rules":["Писать literal тип отделки."]},
+          {"field_id":"lot_status","label":"статус лота","value":"в продаже","literal_meaning":"Статус конкретного лота только после safe handling.","allowed_benefit":"Статус помогает понять, что именно нужно перепроверить перед следующим шагом.","strength":"weak","required_evidence":["fresh response","LotExample.status is present"],"forbidden_claims":["Не обещать availability, бронь или продажу."],"rendering_rules":["Если статус не нормализован, не рендерить его клиенту."]}
+        ],
+        "combinations": [
+          {"id":"exact_lot_price_area_floor","client_meaning":"Есть конкретный лот с полной ценой, площадью и этажом.","required_cards":["lot_full_price","lot_area","lot_floor"],"required_evidence":["fresh response","LotExample.full_price","LotExample.area_m2","LotExample.floor"],"safe_phrasing":"По конкретному лоту известны полная цена, площадь и этаж — его можно сравнить предметно, а не по общему диапазону вариантов.","forbidden_leap":"Не обещать наличие, бронь, вид, ликвидность или сохранение цены."}
+        ],
+        "constraints": {"facts_are_canonical": true, "no_new_facts": true, "registry_version": "v1"},
+        "diagnostics": {"omitted_field_ids": [], "unknown_field_ids": []}
+      }
+    },
+    "candidate": {"intro":"По конкретному лоту можно сравнить основные параметры.","fact_summary":"Конкретный лот: студия, 35,2 м², этаж лота — 3 из 12, цена 10 100 000 рублей, предчистовая отделка, статус лота — в продаже.","benefit":"По конкретному лоту известны полная цена, площадь и этаж — его можно сравнить предметно, а не по общему диапазону вариантов.","caveat":"Статус «в продаже» и условия по лоту лучше перепроверить перед решением.","final_question":"Хотите сравнить этот лот с похожими вариантами?","used_field_ids":["lot_full_price","lot_area","lot_floor","lot_rooms","lot_renovation","lot_status"],"used_combination_ids":["exact_lot_price_area_floor"]},
+    "expected_valid": true,
+    "expected_used_field_ids": ["lot_full_price", "lot_area", "lot_floor", "lot_rooms", "lot_renovation", "lot_status"],
+    "expected_used_combination_ids": ["exact_lot_price_area_floor"]
+  }
+]

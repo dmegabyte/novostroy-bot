@@ -1,0 +1,19 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Подбери варианты под аренду: цена, площадь, метро, готовность, отделка.
+Начальные params: {"purpose": "rental", "facets": ["finishing", "metro"], "need": ["prices", "area", "ads", "property_metro", "stage", "ready_quarter"], "count": 5}
+
+MCP-запрос:   {"purpose": "rental", "facets": ["finishing", "metro"], "need": ["prices", "area", "ads", "property_metro", "stage", "ready_quarter", "compact", "finishing", "metro", "ready", "demand"], "count": 5}
+[OK] Задача создана: id=2126598
+[WAIT] Задача 2126598: статус=queued (0с)
+[WAIT] Задача 2126598: статус=processing (3с)
+[OK] Задача создана: id=2126599
+[WAIT] Задача 2126599: статус=queued (0с)
+[WAIT] Задача 2126599: статус=processing (3с)
+[OK] Задача создана: id=2126602
+[WAIT] Задача 2126602: статус=queued (0с)
+[WAIT] Задача 2126602: статус=processing (3с)
+📊 tokens_used=26639 (cost: or_cost.py)

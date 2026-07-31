@@ -1,0 +1,74 @@
+{
+  "schema": "policy_bundle.v1",
+  "policies": [
+    {
+      "project_id": "nmbot",
+      "policy_version": "nmbot-passive-v1",
+      "policy_delta": "passive_local_outcome_store_only",
+      "owner_tbd": "TBD",
+      "effective_from": "2026-07-26-local",
+      "allowed_routes": [
+        "stage",
+        "ast",
+        "current_source",
+        "docs",
+        "canonical_notebook_handoff",
+        "fresh_authorized_production_handoff",
+        "clarify_evidence_type",
+        "deep_audit_handoff",
+        "fail_closed_cross_project",
+        "approved_one_hop_dependency",
+        "bounded_fallback"
+      ],
+      "allowed_evidence_types": [
+        "stage",
+        "symbol",
+        "current-source",
+        "docs",
+        "history",
+        "ambiguous",
+        "production"
+      ],
+      "allowed_target_kinds": [
+        "stage",
+        "symbol",
+        "docs",
+        "source",
+        "artifact"
+      ],
+      "allowed_phases": [
+        "shadow"
+      ],
+      "privacy_budget": {
+        "max_candidate_ids": 8,
+        "max_selected_source_count": 2,
+        "max_lines_loaded": 80,
+        "max_chars_loaded": 8000,
+        "forbidden_raw_fields": [
+          "query",
+          "question",
+          "path",
+          "code",
+          "log",
+          "body",
+          "payload",
+          "transcript",
+          "label",
+          "secret"
+        ]
+      },
+      "deny_rules": [
+        "adaptive_behavior_disabled",
+        "behavior_hints_disabled",
+        "failed_invalid_stale_records_diagnostics_only",
+        "no_runtime_prompt_model_provider_network_notebook_mempalace_changes",
+        "no_raw_query_code_log_payload_transcript_label_secret_storage"
+      ],
+      "threshold_profile": {
+        "status": "pilot_only_not_enforced",
+        "max_hints": 5,
+        "min_verifier_result": "not_enforced"
+      }
+    }
+  ]
+}

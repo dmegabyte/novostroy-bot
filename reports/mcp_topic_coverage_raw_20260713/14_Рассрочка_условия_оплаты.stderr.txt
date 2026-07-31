@@ -1,0 +1,21 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Проверь по ЖК Мичуринский парк рассрочку, скидки, условия оплаты, цены и площади.
+Начальные params: {"purpose": "fact_check", "selected_option_name": "Мичуринский парк", "facets": ["installment"], "need": ["payment_by_installments", "discount", "prices", "area"]}
+
+MCP-запрос:   {"purpose": "fact_check", "selected_option_name": "Мичуринский парк", "facets": ["installment", "mortgage"], "need": ["payment_by_installments", "discount", "prices", "area", "mortgage_calc", "mortgage", "price"]}
+[OK] Задача создана: id=2126580
+[WAIT] Задача 2126580: статус=queued (0с)
+[WAIT] Задача 2126580: статус=processing (3с)
+[OK] Задача создана: id=2126582
+[WAIT] Задача 2126582: статус=queued (0с)
+[WAIT] Задача 2126582: статус=processing (3с)
+[OK] Задача создана: id=2126584
+[WAIT] Задача 2126584: статус=queued (0с)
+[OK] Задача создана: id=2126586
+[WAIT] Задача 2126586: статус=queued (0с)
+[WAIT] Задача 2126586: статус=processing (3с)
+📊 tokens_used=58510 (cost: or_cost.py)

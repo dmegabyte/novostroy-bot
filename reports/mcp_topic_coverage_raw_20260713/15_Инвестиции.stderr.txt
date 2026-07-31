@@ -1,0 +1,20 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Подбери варианты для инвестиций: цена, площадь, метро, готовность, скидки и рекламные условия.
+Начальные params: {"purpose": "investment", "need": ["prices", "area", "ads", "property_metro", "stage", "ready_quarter", "mortgage", "mortgage_calc", "discount"], "count": 5}
+
+MCP-запрос:   {"purpose": "investment", "need": ["prices", "area", "ads", "property_metro", "stage", "ready_quarter", "mortgage", "mortgage_calc", "discount", "entry_price", "egrn_sales", "counter_novos", "compact_lots", "payment_by_installments", "price"], "count": 5, "facets": ["mortgage"]}
+[OK] Задача создана: id=2126589
+[WAIT] Задача 2126589: статус=queued (0с)
+[WAIT] Задача 2126589: статус=processing (3с)
+[WAIT] Задача 2126589: статус=processing (6с)
+[OK] Задача создана: id=2126593
+[WAIT] Задача 2126593: статус=queued (0с)
+[WAIT] Задача 2126593: статус=processing (3с)
+[OK] Задача создана: id=2126595
+[WAIT] Задача 2126595: статус=queued (0с)
+[WAIT] Задача 2126595: статус=processing (3с)
+📊 tokens_used=26725 (cost: or_cost.py)

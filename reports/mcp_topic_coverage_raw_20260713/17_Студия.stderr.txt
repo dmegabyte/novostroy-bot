@@ -1,0 +1,19 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Найди студии, где видны цены, площади, метро и готовность.
+Начальные params: {"purpose": "search", "rooms": "s", "need": ["prices", "area", "property_metro", "stage", "ready_quarter"], "count": 5}
+
+MCP-запрос:   {"purpose": "search", "rooms": "s", "need": ["prices", "area", "property_metro", "stage", "ready_quarter"], "count": 5}
+[OK] Задача создана: id=2126605
+[WAIT] Задача 2126605: статус=queued (0с)
+[WAIT] Задача 2126605: статус=processing (3с)
+[OK] Задача создана: id=2126607
+[WAIT] Задача 2126607: статус=queued (0с)
+[WAIT] Задача 2126607: статус=processing (3с)
+[OK] Задача создана: id=2126610
+[WAIT] Задача 2126610: статус=queued (0с)
+[WAIT] Задача 2126610: статус=processing (3с)
+📊 tokens_used=29888 (cost: or_cost.py)

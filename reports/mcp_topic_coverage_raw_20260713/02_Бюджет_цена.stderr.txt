@@ -1,0 +1,19 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Покажи варианты до 15 млн, где видно цену и площадь.
+Начальные params: {"purpose": "search", "need": ["prices", "area"], "count": 5}
+
+MCP-запрос:   {"purpose": "search", "need": ["prices", "area"], "count": 5}
+[OK] Задача создана: id=2126466
+[WAIT] Задача 2126466: статус=queued (0с)
+[WAIT] Задача 2126466: статус=processing (3с)
+[OK] Задача создана: id=2126475
+[WAIT] Задача 2126475: статус=queued (0с)
+[WAIT] Задача 2126475: статус=processing (3с)
+[OK] Задача создана: id=2126478
+[WAIT] Задача 2126478: статус=queued (0с)
+[WAIT] Задача 2126478: статус=processing (3с)
+📊 tokens_used=29905 (cost: or_cost.py)

@@ -1,0 +1,19 @@
+Поиск:        google/gemini-3.1-flash-lite-preview
+Общение:      google/gemini-2.5-flash
+MCP поиск:    True
+chat_max_tok: 2500
+Таймаут:      300с
+Запрос:       Проверь подробности по ЖК Мичуринский парк: цены, площади, метро, инфраструктура, готовность и корпуса.
+Начальные params: {"purpose": "fact_check", "selected_option_name": "Мичуринский парк", "fact_to_check": "details", "need": ["prices", "area", "property_metro", "schools", "kindergartens", "parks", "shops", "stage", "ready_quarter", "house"]}
+
+MCP-запрос:   {"purpose": "fact_check", "selected_option_name": "Мичуринский парк", "fact_to_check": "details", "need": ["prices", "area", "property_metro", "schools", "kindergartens", "parks", "shops", "stage", "ready_quarter", "house"]}
+[OK] Задача создана: id=2126519
+[WAIT] Задача 2126519: статус=queued (0с)
+[WAIT] Задача 2126519: статус=processing (3с)
+[OK] Задача создана: id=2126522
+[WAIT] Задача 2126522: статус=queued (0с)
+[WAIT] Задача 2126522: статус=processing (3с)
+[OK] Задача создана: id=2126525
+[WAIT] Задача 2126525: статус=queued (0с)
+[WAIT] Задача 2126525: статус=processing (3с)
+📊 tokens_used=58613 (cost: or_cost.py)

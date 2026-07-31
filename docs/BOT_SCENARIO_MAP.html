@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NMBOT / Ирина — карта сценариев, промтов и MCP</title>
+  <style>
+    :root {
+      --bg: #f6f7fb;
+      --card: #ffffff;
+      --ink: #1f2937;
+      --muted: #6b7280;
+      --line: #d8dee9;
+      --blue: #2563eb;
+      --green: #16a34a;
+      --orange: #ea580c;
+      --red: #dc2626;
+      --violet: #7c3aed;
+      --cyan: #0891b2;
+      --shadow: 0 8px 24px rgba(15, 23, 42, .08);
+      --radius: 18px;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      --sans: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); line-height: 1.55; }
+    header { padding: 44px 28px 22px; background: linear-gradient(135deg, #111827, #1e3a8a 55%, #0e7490); color: #fff; }
+    header h1 { margin: 0 0 12px; font-size: clamp(30px, 4vw, 52px); line-height: 1.05; }
+    header p { margin: 0; max-width: 1040px; font-size: 18px; color: #dbeafe; }
+    main { max-width: 1280px; margin: 0 auto; padding: 28px; }
+    nav { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin: 0 0 24px; }
+    nav a { display: block; padding: 14px 16px; border-radius: 14px; background: var(--card); color: var(--blue); text-decoration: none; box-shadow: var(--shadow); font-weight: 700; }
+    section { margin: 28px 0; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 22px; }
+    h2 { margin: 0 0 14px; font-size: 30px; }
+    h3 { margin: 22px 0 10px; font-size: 22px; }
+    h4 { margin: 18px 0 8px; font-size: 18px; }
+    .muted { color: var(--muted); }
+    .source { font-size: 13px; color: var(--muted); margin-top: 10px; }
+    .tag { display: inline-block; padding: 4px 9px; border-radius: 999px; background: #e0ecff; color: #174ea6; font-size: 12px; font-weight: 800; margin: 2px 4px 2px 0; }
+    .tag.green { background: #dcfce7; color: #166534; }
+    .tag.orange { background: #ffedd5; color: #9a3412; }
+    .tag.red { background: #fee2e2; color: #991b1b; }
+    .tag.violet { background: #ede9fe; color: #5b21b6; }
+    .tag.cyan { background: #cffafe; color: #155e75; }
+    .flow { display: flex; gap: 14px; overflow-x: auto; padding: 8px 2px 18px; }
+    .node { min-width: 210px; max-width: 260px; background: #fff; border: 2px solid var(--line); border-radius: 16px; padding: 14px; position: relative; box-shadow: 0 4px 16px rgba(15, 23, 42, .06); }
+    .node strong { display: block; font-size: 17px; margin-bottom: 6px; }
+    .node:after { content: "→"; position: absolute; right: -18px; top: 42%; color: var(--muted); font-size: 28px; font-weight: 900; }
+    .node:last-child:after { content: ""; }
+    .node.blue { border-color: #93c5fd; background: #eff6ff; }
+    .node.green { border-color: #86efac; background: #f0fdf4; }
+    .node.orange { border-color: #fdba74; background: #fff7ed; }
+    .node.violet { border-color: #c4b5fd; background: #f5f3ff; }
+    .node.cyan { border-color: #67e8f9; background: #ecfeff; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(290px, 1fr)); gap: 16px; }
+    .scenario { border-left: 6px solid var(--blue); }
+    .scenario.family { border-left-color: var(--green); }
+    .scenario.invest { border-left-color: var(--violet); }
+    .scenario.operator { border-left-color: var(--orange); }
+    .scenario.empty { border-left-color: var(--red); }
+    .scenario.followup { border-left-color: var(--cyan); }
+    .arrow-list { margin: 0; padding: 0; list-style: none; }
+    .arrow-list li { margin: 10px 0; padding-left: 24px; position: relative; }
+    .arrow-list li:before { content: "→"; position: absolute; left: 0; color: var(--blue); font-weight: 900; }
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; overflow: hidden; border-radius: 12px; }
+    th, td { border: 1px solid var(--line); padding: 10px 12px; vertical-align: top; }
+    th { background: #eef2ff; text-align: left; }
+    pre { margin: 10px 0; padding: 14px; background: #0b1020; color: #d1e7ff; border-radius: 14px; overflow-x: auto; font-family: var(--mono); font-size: 13px; line-height: 1.45; white-space: pre-wrap; }
+    code { font-family: var(--mono); background: #eef2ff; padding: 2px 5px; border-radius: 6px; }
+    details { margin: 12px 0; border: 1px solid var(--line); border-radius: 14px; background: #fff; overflow: hidden; }
+    summary { cursor: pointer; padding: 13px 16px; font-weight: 800; background: #f8fafc; }
+    details > div { padding: 0 16px 16px; }
+    .two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+    @media (max-width: 860px) { .two { grid-template-columns: 1fr; } }
+    .callout { border-radius: 16px; padding: 16px; background: #fff7ed; border: 1px solid #fdba74; }
+    .ok { background: #f0fdf4; border-color: #86efac; }
+    .bad { background: #fef2f2; border-color: #fecaca; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>NMBOT / Ирина — текущая карта сценариев</h1>
+    <p>Человеческая схема: как бот принимает сообщение, что решает LLM-оркестратор, когда вызывается MCP, какие поля приходят, какими промтами это управляется и какие ответы должны получаться.</p>
+  </header>
+
+  <main>
+    <nav>
+      <a href="#big-flow">1. Общий поток</a>
+      <a href="#stages">2. Сценарии</a>
+      <a href="#mcp">3. MCP-поля и примеры</a>
+      <a href="#prompts">4. Промты</a>
+      <a href="#state">5. State и память</a>
+      <a href="#examples">6. Реальные примеры</a>
+    </nav>
+
+    <section id="big-flow" class="card">
+      <h2>1. Общий поток ответа</h2>
+      <p>Если сказать просто: бот не должен сразу «болтать». Он сначала понимает сценарий, ищет факты через MCP, нормализует карточки ЖК, а потом stage-presenter собирает короткий клиентский ответ.</p>
+      <div class="flow">
+        <div class="node blue"><strong>Telegram</strong>Клиент пишет свободно: «нужна двушка для семьи», «а что посоветуешь», «как связаться с оператором».</div>
+        <div class="node violet"><strong>Dialog state</strong>Бот поднимает память: параметры, прошлый список, выбранный ЖК, ждём ли телефон.</div>
+        <div class="node orange"><strong>LLM-orchestrator</strong>Решает смысл: новый поиск, выбор ЖК, уточнение, ещё варианты, совет, оператор.</div>
+        <div class="node cyan"><strong>MCP/search</strong>Для любого квартирного запроса search model через Overmind обязательно вызывает MCP <code>novostroym</code>. Ответ «из головы» запрещён.</div>
+        <div class="node green"><strong>Normalizer</strong>Превращает сырой JSON в карточки: цена, район, отделка, школы, парки, метро.</div>
+        <div class="node violet"><strong>Presenter</strong>Собирает Stage 1 / Stage 2 / operator / recommendation.</div>
+        <div class="node blue"><strong>Telegram response</strong>Короткий ответ, максимум 3 ЖК, один следующий вопрос.</div>
+      </div>
+      <p class="source">Источники: <code>docs/BOT_ARCHITECTURE.md:31-44, 134-155, 170-208</code>; <code>scripts/chat_tester_bot.py:187-253</code>; <code>followup_intent_classifier.py:117-163</code>.</p>
+    </section>
+
+    <section id="stages">
+      <h2>2. Какие сценарии сейчас отрабатываются</h2>
+      <div class="grid">
+        <article class="card scenario">
+          <h3>Stage 0 — старт</h3>
+          <span class="tag">/start</span>
+          <p><strong>Когда:</strong> новый диалог или сброс.</p>
+          <p><strong>Что делает:</strong> коротко объясняет, что Ирина подбирает новостройки по Москве и МО. Старые параметры не должны всплывать.</p>
+          <p><strong>Следующий шаг:</strong> ждём свободный запрос.</p>
+          <pre>Привет. Помогу подобрать новостройку в Москве или области.
+
+Напишите, что ищете: район, бюджет, комнатность или цель покупки.</pre>
+        </article>
+
+        <article class="card scenario family">
+          <h3>Stage 1 — первый подбор / first_list</h3>
+          <span class="tag green">facts[]</span><span class="tag green">top-3</span><span class="tag green">visible_options</span>
+          <p><strong>Когда:</strong> «двушка для семьи», «студия до 8 млн», «с отделкой в Котельниках».</p>
+          <ul class="arrow-list">
+            <li>LLM/search вызывает MCP.</li>
+            <li>Берёт <code>facts[]</code>, если есть точные варианты.</li>
+            <li>Показывает максимум 3 ЖК.</li>
+            <li>Сохраняет видимый список в <code>state.visible_options</code>.</li>
+          </ul>
+          <pre>Подобрала три варианта для семьи.
+
+1. ЖК «Лучи» — 2 школы, 4 детских сада, Мещерский парк, Чоботовский лес, Солнцево.
+
+Для прогулок с детьми рядом есть Мещерский парк и Чоботовский лес.
+
+Какой ЖК хотите рассмотреть подробнее?</pre>
+        </article>
+
+        <article class="card scenario empty">
+          <h3>Stage 1B / 1C — near или пусто</h3>
+          <span class="tag orange">near[]</span><span class="tag red">missing</span>
+          <p><strong>Когда:</strong> точных совпадений нет.</p>
+          <p><strong>near:</strong> показываем близкие варианты и честно называем отличие через <code>why_close</code>.</p>
+          <p><strong>empty:</strong> не бросаем клиента, предлагаем расширить район, бюджет или условия.</p>
+          <pre>Точно под этот запрос вариантов не вижу, но есть близкие.
+
+1. МФК «Ситимикс Новокосино» — 6.6-8.0 млн, с отделкой.
+   Отличие: апартаменты, не квартира.
+
+Вас интересуют апартаменты?</pre>
+        </article>
+
+        <article class="card scenario family">
+          <h3>Stage 2 — выбран ЖК / selected_object</h3>
+          <span class="tag green">selected_option</span><span class="tag cyan">enriched_options</span>
+          <p><strong>Когда:</strong> клиент пишет «1», «второй», «расскажи про Лучи».</p>
+          <p><strong>Что делает:</strong> не начинает новый широкий поиск. Берёт ЖК из памяти, при возможности использует enrichment.</p>
+          <pre>ЖК «Лучи» — Солнцево, цены от 10,89 млн рублей, есть квартиры с отделкой, дом уже сдан.
+
+Для семьи это удобно: рядом Мещерский парк и Чоботовский лес, а в проекте есть детские сады и школы.
+
+Хотите, позвать оператора проверить актуальные квартиры по этому ЖК?</pre>
+        </article>
+
+        <article class="card scenario operator">
+          <h3>Stage 3 — оператор</h3>
+          <span class="tag orange">operator_handoff</span><span class="tag orange">awaiting_phone</span>
+          <p><strong>Когда:</strong> «наличие», «этажи», «бронь», «ипотека», «показ», «как связаться с оператором».</p>
+          <p><strong>Что делает:</strong> сохраняет контекст и просит телефон. Если ЖК не выбран, передаёт оператору текущий список и критерии.</p>
+          <pre>Да, можно связаться с оператором.
+
+Передам ему текущий контекст подбора: варианты — Переделкино Ближнее, Люблинский парк, Кузьминский лес; сценарий — family.
+
+Напишите номер для связи — оператор посмотрит актуальные квартиры и вернётся уже с конкретикой.</pre>
+        </article>
+
+        <article class="card scenario operator">
+          <h3>Stage 6 — клиент дал телефон</h3>
+          <span class="tag orange">phone_capture</span><span class="tag red">без LLM</span>
+          <p><strong>Когда:</strong> бот уже ждёт номер, клиент прислал телефон.</p>
+          <p><strong>Важно:</strong> номер телефона не отправляется в LLM. Это deterministic capture.</p>
+          <pre>Спасибо, номер получила.
+
+Передам оператору ваш запрос вместе с тем, что уже обсудили, чтобы не начинать всё заново.</pre>
+        </article>
+
+        <article class="card scenario followup">
+          <h3>Stage 4 — уточнение условий</h3>
+          <span class="tag cyan">update_search</span><span class="tag cyan">params_delta</span>
+          <p><strong>Когда:</strong> «до 12 млн», «только с отделкой», «готовый дом», «поближе к метро».</p>
+          <p><strong>Что делает:</strong> обновляет <code>state.params</code>, старается использовать память, а если данных не хватает — делает новый MCP/search.</p>
+          <pre>Поняла, смотрю уже с новым условием: до 12 млн и с отделкой.
+
+1. ...
+2. ...
+3. ...
+
+Какой ЖК хотите рассмотреть подробнее?</pre>
+        </article>
+
+        <article class="card scenario followup">
+          <h3>Stage 4.5 — ещё похожие варианты</h3>
+          <span class="tag cyan">expand_more_options</span><span class="tag cyan">fresh MCP</span>
+          <p><strong>Когда:</strong> «ещё варианты», «подбери похожие», «другие», «альтернативы».</p>
+          <p><strong>Что делает:</strong> запускает свежий поиск и не повторяет уже показанные ЖК.</p>
+          <pre>Хорошо, посмотрю ещё похожие варианты, но без повторов из прошлого списка.
+
+1. ...
+2. ...
+3. ...
+
+Какой из них разобрать дальше?</pre>
+        </article>
+
+        <article class="card scenario followup">
+          <h3>Stage 5 — сравнение</h3>
+          <span class="tag violet">compare_options</span>
+          <p><strong>Когда:</strong> «сравни», «чем отличаются», «какой дешевле», «какой быстрее сдан».</p>
+          <p><strong>Что делает:</strong> сравнивает только по реальным полям: цена, площадь, отделка, готовность, метро, локация.</p>
+          <pre>Если сравнивать по фактам:
+
+1. Переделкино Ближнее — ниже старт по цене и есть отделка.
+
+2. Скандинавия — шире диапазон площадей, тоже есть отделка.
+
+Какой из двух хотите рассмотреть подробнее?</pre>
+        </article>
+
+        <article class="card scenario followup">
+          <h3>Совет по текущему списку</h3>
+          <span class="tag violet">recommend_options</span>
+          <p><strong>Когда:</strong> «а что посоветуешь?», «твой совет какой?», «какой лучше выбрать?».</p>
+          <p><strong>Что делает:</strong> LLM выбирает action <code>recommend_options</code>, а код ранжирует уже показанные карточки по фактам сценария.</p>
+          <pre>Если выбирать из этих вариантов, я бы сначала смотрела Город-парк «Переделкино Ближнее».
+
+Почему: 2 школы, 7 детских садов, парки, набережная.
+
+Для семьи это удобно: 2 школы и 7 детских садов помогают закрыть ежедневную рутину рядом с домом.
+
+Хотите, разберу Город-парк «Переделкино Ближнее» подробнее?</pre>
+        </article>
+      </div>
+      <p class="source">Источники: <code>docs/IRINA_DIALOGUE_MAP_V1.md:48-152, 225-333, 337-534</code>; <code>scripts/chat_tester_bot.py:2567-2650</code>; <code>followup_intent_classifier.py:137-163</code>.</p>
+    </section>
+
+    <section id="mcp" class="card">
+      <h2>3. Что приходит от MCP/search и какие параметры возможны</h2>
+      <p>Search-фаза должна вернуть JSON с четырьмя верхними полями. Всё, что Ирина говорит клиенту как факт, должно быть внутри этого JSON.</p>
+      <div class="two">
+        <div>
+          <h3>Верхний формат</h3>
+          <pre>{
+  "facts": [
+    {
+      "name": "ЖК Лучи",
+      "location": "Солнцево",
+      "price_range": "10.89-31.58 млн",
+      "finishing": "с отделкой",
+      "ready": "дом сдан",
+      "area": "22.5-86.5 м²",
+      "metro": "Солнцево",
+      "schools": "2 школы",
+      "kindergartens": "4 детских сада",
+      "parks": "Мещерский парк",
+      "forest": "Чоботовский лес"
+    }
+  ],
+  "near": [],
+  "missing": "",
+  "params": {"rooms": "2", "purpose": "family"}
+}</pre>
+        </div>
+        <div>
+          <h3>Что значит каждое поле</h3>
+          <table>
+            <tr><th>Поле</th><th>Смысл</th></tr>
+            <tr><td><code>facts[]</code></td><td>Точные варианты под обязательные условия клиента.</td></tr>
+            <tr><td><code>near[]</code></td><td>Близкие варианты с 1–2 отличиями, обязательно с <code>why_close</code>.</td></tr>
+            <tr><td><code>missing</code></td><td>Что не удалось найти или подтвердить.</td></tr>
+            <tr><td><code>params</code></td><td>Изменившиеся параметры клиента: комнаты, бюджет, район, отделка, цель.</td></tr>
+          </table>
+        </div>
+      </div>
+
+      <h3>Поля объекта, которые бот умеет использовать</h3>
+      <table>
+        <tr><th>Группа</th><th>Поля</th><th>Как Ирина может это сказать</th></tr>
+        <tr><td>База</td><td><code>name</code>, <code>location</code>, <code>price_range</code>, <code>min_price</code>, <code>max_price</code>, <code>area</code>, <code>rooms</code>, <code>developer</code></td><td>Название, район, цена, площадь, типы квартир, застройщик — только если пришло.</td></tr>
+        <tr><td>Готовность и отделка</td><td><code>ready</code>, <code>delivered</code>, <code>deadline</code>, <code>finishing</code>, <code>renovation</code></td><td>«дом уже сдан», «есть квартиры с отделкой», «меньше ремонта».</td></tr>
+        <tr><td>Транспорт</td><td><code>metro</code>, <code>transport</code>, <code>walk_minutes</code>, <code>transport_minutes</code>, <code>mcd</code>, <code>bkl</code></td><td>«метро рядом», «удобнее ездить каждый день».</td></tr>
+        <tr><td>Семья</td><td><code>infrastructure</code>, <code>infrastructure_family</code>, <code>family_infrastructure</code>, <code>schools</code>, <code>kindergartens</code>, <code>parks</code>, <code>forest</code>, <code>embankment</code>, <code>clinics</code>, <code>pharmacies</code>, <code>playgrounds</code>, <code>yard_without_cars</code></td><td>Школы, сады, парк, лес, поликлиника, двор без машин — только если пришли.</td></tr>
+        <tr><td>Быт</td><td><code>shops</code>, <code>services</code>, <code>retail</code></td><td>«повседневные дела проще решать рядом с домом».</td></tr>
+        <tr><td>Near</td><td><code>why_close</code></td><td>Честное отличие: «апартаменты, не квартира», «чуть выше бюджет».</td></tr>
+      </table>
+
+      <h3>Параметры клиента</h3>
+      <table>
+        <tr><th>Параметр</th><th>Пример</th><th>Откуда</th></tr>
+        <tr><td><code>rooms</code></td><td><code>"2"</code>, <code>"studio"</code></td><td>«двушка», «студия».</td></tr>
+        <tr><td><code>max_price</code> / <code>min_price</code></td><td><code>12000000</code></td><td>«до 12 млн», «от 10».</td></tr>
+        <tr><td><code>district</code></td><td><code>"Солнцево"</code>, <code>"mo"</code></td><td>район, город, Москва/МО.</td></tr>
+        <tr><td><code>floor</code></td><td><code>"не последний"</code></td><td>этажность как условие.</td></tr>
+        <tr><td><code>has_renovation</code></td><td><code>true</code></td><td>«с отделкой».</td></tr>
+        <tr><td><code>purpose</code></td><td><code>family</code>, <code>investment</code>, <code>self_use</code>, <code>fast_move</code>, <code>budget</code></td><td>цель покупки.</td></tr>
+      </table>
+      <p class="source">Источники: <code>prompts/search_v1.txt:3-15</code>; <code>docs/BOT_ARCHITECTURE.md:423-460</code>; <code>docs/SCENARIO_COMMENT_ENRICHMENT_TZ.md:76-201</code>; <code>scripts/chat_tester_bot.py:1438-1478</code>.</p>
+    </section>
+
+    <section id="prompts">
+      <h2>4. Реальные промты, которые управляют сценарием</h2>
+      <p class="muted">Ниже не пересказ, а текущие реальные промты/контракты из файлов проекта. Их удобно читать через раскрывающиеся блоки.</p>
+
+      <details open>
+        <summary>4.1 Search prompt — MCP/search агент (<code>prompts/search_v1.txt</code>)</summary>
+        <div>
+          <pre>Ты — поисковый агент по новостройкам. Используй MCP novostroym для поиска информации.
+
+Верни JSON с тремя полями:
+- facts: варианты, ТОЧНО соответствующие всем обязательным условиям клиента (тип квартиры, бюджет, район, отделка, этаж). Для каждого варианта копируй ВСЕ доступные поля из MCP-ответа (name, location, price_range, finishing, metro, area, ready, link, developer — что MCP реально вернул) — НЕ выбрасывай, иначе chat-фаза не сможет их озвучить.
+- Для каждого ЖК дополнительно попробуй получить и пробросить lifestyle/infrastructure поля, если MCP их знает: infrastructure, infrastructure_family, family_infrastructure, schools, kindergartens, parks, forest, embankment, clinics, pharmacies, playgrounds, yard_without_cars, shops, services, transport, walk_minutes. Эти поля нужны, чтобы Ирина могла объяснять пользу ЖК: прогулки с детьми, школы/сады рядом, поликлиника, двор, метро, бытовые сервисы. Если поля нет в MCP — не выдумывай.
+- near: варианты, которые близки (1-2 отличия). Для каждого укажи {name, location, price_range, finishing, why_close: "отличие: &lt;что именно&gt;"} + дополнительно пробрось metro/area/ready/link/dev и lifestyle/infrastructure поля, если они пришли от MCP. Верни до 3 штук.
+- missing: что не удалось найти или подтвердить.
+- params: только изменившиеся поля из {rooms, max_price, min_price, district, floor, has_renovation}.
+
+Правила:
+- Если клиент указал обязательное условие (студия, однокомнатная, бюджет, район) — в facts включай только варианты с подтверждённым соответствием.
+- В near включай варианты с ОДНИМ-двумя отличиями и обязательно помечай что именно отличается.
+- Не придумывай отсутствующие данные (цену, площадь, метро, срок сдачи).
+- Не придумывай инфраструктуру: школы, детские сады, парки, лес, поликлиники, двор, магазины, метро и транспорт можно возвращать только если они реально пришли из MCP.
+- Если в базе вообще нет объектов по региону (например СПб) — это missing, не facts и не near.</pre>
+        </div>
+      </details>
+
+      <details>
+        <summary>4.2 Chat prompt — голос Ирины и JSON-контракт (<code>prompts/chat_v1.txt</code>)</summary>
+        <div>
+          <pre>Ключевые правила chat prompt:
+
+1. Ирина — живой консультант по новостройкам в Москве и МО.
+2. Если показываем 2+ ЖК — обязательно нумерованный список 1./2./3.
+3. Использовать только факты MCP/search JSON.
+4. Нельзя придумывать цену, площадь, метро, срок, школы, парк, двор, ипотеку, скидки, класс, доходность.
+5. Если клиент пишет «для семьи», ответ должен отразить семейный мотив.
+6. В конце ровно один полезный вопрос.
+7. Не предлагать оператора в первом списке, если варианты уже найдены.
+
+Выход строго JSON:
+{
+  "response": "ответ клиенту",
+  "params": {},
+  "visible_options": [
+    {"idx": 1, "name": "точное название ЖК из facts/near"}
+  ],
+  "buttons": []
+}</pre>
+          <p>Полный файл находится в <code>prompts/chat_v1.txt</code>. В HTML вынесен именно рабочий контракт, чтобы схема не превращалась в простыню.</p>
+        </div>
+      </details>
+
+      <details>
+        <summary>4.3 Follow-up intent prompt — что клиент хочет сделать дальше (<code>followup_intent_classifier.py</code>)</summary>
+        <div>
+          <pre>Допустимые intent:
+- choose_option — клиент выбрал вариант из видимого списка;
+- compare_selected — клиент согласился сравнить выбранный ЖК с похожими;
+- operator_for_selected — клиент хочет оператора/наличие/бронь/этаж/показ/детали;
+- recommend_options — клиент просит совет: «что посоветуешь», «твой совет», «какой лучше выбрать»;
+- continue_selection — продолжить подбор здесь;
+- update_search_params — уточнил или отверг параметр поиска;
+- new_search — начал новый поиск;
+- reject_operator / reject_phone / reject_selected_option / reject_similar_options;
+- clarify_negation / clarify.
+
+Важные правила:
+- «1», «первый вариант» — choose_option только если есть надёжный visible_options.
+- «что посоветуешь» — recommend_options, а не compare_options.
+- «как связаться с оператором» — operator_for_selected, даже если selected_option пустой.
+- Отрицания не должны автоматически запускать новый поиск.
+- Деньги в тексте — это бюджет, а не номер варианта.</pre>
+        </div>
+      </details>
+
+      <details>
+        <summary>4.4 Dialog state planner prompt — как обновлять state (<code>followup_intent_classifier.py</code>)</summary>
+        <div>
+          <pre>dialog_action enum:
+new_search | update_search | expand_more_options | compare_options | recommend_options |
+continue_from_memory | select_option | ask_clarification | operator_live_check |
+reject_offer | reject_operator | reject_phone | reject_selected_option |
+reject_similar_options | clarify_negation
+
+Ключевой принцип:
+«Ты — единственный слой, который понимает смысл фразы клиента. Код ниже только исполняет твой dialog_action.»
+
+Примеры решений:
+- «подбери похожие» → expand_more_options, visible_options_policy=rebuild, numeric_choice_policy=reject.
+- «сравни» → compare_options.
+- «что посоветуешь» → recommend_options.
+- «как связаться с оператором» → operator_live_check.
+- «1» при надёжном visible_options → select_option + exact selected_option_name.</pre>
+        </div>
+      </details>
+      <p class="source">Источники: <code>prompts/search_v1.txt</code>; <code>prompts/chat_v1.txt:1-116</code>; <code>followup_intent_classifier.py:51-163</code>.</p>
+    </section>
+
+    <section id="state" class="card">
+      <h2>5. Память диалога: что бот хранит между сообщениями</h2>
+      <p>Главная идея: после первого списка бот должен помнить, какие ЖК реально показал клиенту. Поэтому ответ «1» или «второй» не должен запускать новый поиск.</p>
+      <pre>{
+  "params": {"rooms": "2", "purpose": "family", "max_price": 15000000},
+  "last_search_response": {"facts": [...], "near": [], "missing": "", "params": {...}},
+  "last_options": [
+    {"idx": 1, "name": "ЖК Лучи", "location": "Солнцево", "price": "10.89-31.58 млн"}
+  ],
+  "visible_options": [
+    {"idx": 1, "name": "ЖК Лучи"},
+    {"idx": 2, "name": "Жилой район Скандинавия"}
+  ],
+  "selected_option": null,
+  "last_offer_type": "selected_option_details",
+  "last_answer_kind": "first_list",
+  "awaiting_phone": false,
+  "enriched_options": {}
+}</pre>
+      <table>
+        <tr><th>Поле</th><th>Зачем</th></tr>
+        <tr><td><code>last_search_response</code></td><td>Полный MCP/search JSON. Нужен для истории, объяснения и безопасного повторного использования фактов.</td></tr>
+        <tr><td><code>last_options</code></td><td>Нормализованные карточки ЖК из последнего поиска.</td></tr>
+        <tr><td><code>visible_options</code></td><td>Только те ЖК, которые клиент реально увидел в нумерованном списке.</td></tr>
+        <tr><td><code>selected_option</code></td><td>ЖК, который клиент выбрал.</td></tr>
+        <tr><td><code>awaiting_phone</code></td><td>Если true, телефон ловится кодом без отправки в LLM.</td></tr>
+        <tr><td><code>enriched_options</code></td><td>Обогащённые карточки top-3 ЖК для Stage 2.</td></tr>
+      </table>
+      <p class="source">Источники: <code>docs/BOT_ARCHITECTURE.md:100-133</code>; <code>docs/IDEAL_IRINA_UX.md:63-118</code>; <code>scripts/chat_tester_bot.py:1481-1517</code>.</p>
+    </section>
+
+    <section id="examples">
+      <h2>6. Реальные сценарные примеры</h2>
+
+      <div class="card">
+        <h3>6.1 Семья: нужны школа, сад, парк или лес</h3>
+        <div class="two">
+          <div>
+            <h4>Что пришло из MCP/search</h4>
+            <pre>{
+  "facts": [
+    {
+      "name": "Город-парк «Переделкино Ближнее»",
+      "location": "Внуковское поселение",
+      "price_range": "от 9.56 млн",
+      "finishing": "с отделкой",
+      "ready": "2028",
+      "schools": "2 школы",
+      "kindergartens": "7 детских садов",
+      "clinics": "поликлиника",
+      "parks": "парки",
+      "embankment": "набережная"
+    }
+  ],
+  "params": {"purpose": "family"}
+}</pre>
+          </div>
+          <div>
+            <h4>Что должен ответить бот</h4>
+            <pre>Подобрала три варианта для семьи.
+
+1. Город-парк «Переделкино Ближнее» — 2 школы, 7 детских садов, парки, набережная, поликлиника.
+
+Для семьи это удобно: 2 школы и 7 детских садов помогают закрыть ежедневную рутину рядом с домом.
+
+Какой ЖК хотите рассмотреть подробнее?</pre>
+          </div>
+        </div>
+        <p class="source">Реальные проверенные family-факты: <code>docs/SCENARIO_COMMENT_ENRICHMENT_TZ.md:106-112</code>.</p>
+      </div>
+
+      <div class="card">
+        <h3>6.2 Инвестиция: без обещаний доходности</h3>
+        <div class="two">
+          <div>
+            <h4>MCP/search пример</h4>
+            <pre>{
+  "facts": [
+    {
+      "name": "ЖК Южные Сады",
+      "location": "Южное Бутово",
+      "price_range": "11.4-14.8 млн",
+      "area": "от 22 м²",
+      "finishing": "с отделкой",
+      "metro": "Бунинская аллея"
+    }
+  ],
+  "params": {"purpose": "investment"}
+}</pre>
+          </div>
+          <div>
+            <h4>Ответ</h4>
+            <pre>Подобрала три варианта под инвестицию.
+
+1. ЖК «Южные Сады» — цены от 11.4 до 14.8 млн, площади от 22 м², есть квартиры с отделкой, метро: Бунинская аллея.
+
+По цене сразу понятно, с чем сравнивать этот вариант.
+
+Какой ЖК хотите рассмотреть подробнее?</pre>
+          </div>
+        </div>
+        <div class="callout bad"><strong>Нельзя:</strong> «выгодная инвестиция», «будет расти цена», «хорошо под аренду», если MCP не дал таких фактов. Контракт прямо запрещает выводить доходность, аренду, ликвидность и рост цены.</div>
+      </div>
+
+      <div class="card">
+        <h3>6.3 Клиент просит совет</h3>
+        <div class="flow">
+          <div class="node blue"><strong>Клиент</strong>«А ты что посоветуешь?»</div>
+          <div class="node orange"><strong>Planner</strong><code>dialog_action="recommend_options"</code></div>
+          <div class="node green"><strong>Code ranking</strong>По сценарию family: школы + сады + парки + клиники + двор.</div>
+          <div class="node violet"><strong>Presenter</strong>Один приоритетный совет, не сухое сравнение.</div>
+        </div>
+        <pre>Если выбирать из этих вариантов, я бы сначала смотрела Город-парк «Переделкино Ближнее».
+
+Почему: 2 школы, 7 детских садов, парки, набережная.
+
+Хотите, разберу Город-парк «Переделкино Ближнее» подробнее?</pre>
+      </div>
+
+      <div class="card">
+        <h3>6.4 Клиент просит оператора без выбранного ЖК</h3>
+        <div class="flow">
+          <div class="node blue"><strong>Клиент</strong>«Как связаться с оператором?»</div>
+          <div class="node orange"><strong>Planner</strong><code>operator_live_check</code></div>
+          <div class="node green"><strong>State</strong>Берём текущий список + параметры.</div>
+          <div class="node violet"><strong>Ответ</strong>Просим номер и сохраняем контекст.</div>
+        </div>
+        <pre>Да, можно связаться с оператором.
+
+Передам ему текущий контекст подбора: варианты — Переделкино Ближнее, Люблинский парк, Кузьминский лес; сценарий — family.
+
+Напишите номер для связи — оператор посмотрит актуальные квартиры и вернётся уже с конкретикой.</pre>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>7. Короткая шпаргалка: где что чинить</h2>
+      <table>
+        <tr><th>Проблема</th><th>Где смотреть</th><th>Почему</th></tr>
+        <tr><td>Бот не получил школы/парки из MCP</td><td><code>prompts/search_v1.txt</code>, MCP payload, <code>_extract_options()</code></td><td>Search обязан пробросить поля; normalizer обязан их не потерять.</td></tr>
+        <tr><td>Бот получил факты, но не показал их в первом списке</td><td><code>_stage_option_fact_parts()</code>, <code>_render_stage_first_list()</code></td><td>Порядок фактов сценарный: family сначала infra, investment сначала цена/площадь.</td></tr>
+        <tr><td>«Что посоветуешь?» даёт сухое сравнение</td><td><code>DIALOG_STATE_PLANNER_PROMPT</code>, <code>_render_stage_recommendation()</code></td><td>Это <code>recommend_options</code>, не <code>compare_options</code>.</td></tr>
+        <tr><td>«Как связаться с оператором?» просит выбрать 1/2/3</td><td><code>operator_live_check</code>, <code>_format_operator_handoff_for_context()</code></td><td>Оператор может получить текущий список без selected_option.</td></tr>
+        <tr><td>Бот принял «1» не из списка</td><td><code>visible_options</code>, <code>numeric_choice_policy</code>, <code>_apply_dialog_plan_to_state()</code></td><td>Номер можно принимать только если список надёжный.</td></tr>
+      </table>
+    </section>
+  </main>
+</body>
+</html>

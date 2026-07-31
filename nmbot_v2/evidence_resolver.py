@@ -18,6 +18,14 @@ class EvidenceStatus(str, Enum):
     PREREQUISITE_MISSING = "prerequisite_missing"
 
 
+class RootState(str, Enum):
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    MISSING = "missing"
+    AMBIGUOUS = "ambiguous"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class EvidenceResult:
     status: EvidenceStatus
@@ -29,6 +37,7 @@ class EvidenceResult:
     # not contain enough structural evidence to make that particular claim.
     identity_match: bool | None = None
     active_root: bool | None = None
+    root_state: RootState = RootState.UNKNOWN
 
     @property
     def data(self) -> dict[str, Any]:
@@ -54,15 +63,17 @@ def _bind_selected_mortgage_terms(request: CapabilityRequest, raw_evidence: Mapp
     # Top-level sections can belong to a different ЖК, so never inspect them.
     facts = _rows(source.get("facts"))
     same_identity = [fact for fact in facts if str(fact.get("id")) == str(request.entity_id)]
-    matching = [fact for fact in same_identity if _active(fact)]
+    root_state = _root_state(same_identity)
+    matching = [fact for fact in same_identity if root_state == RootState.ACTIVE]
     if len(matching) != 1:
         identity_match = True if same_identity else (False if facts else None)
-        active_root = False if len(same_identity) == 1 and not matching else None
+        active_root = False if root_state in {RootState.INACTIVE, RootState.MISSING, RootState.AMBIGUOUS} else None
         return EvidenceResult(
             EvidenceStatus.EVIDENCE_REJECTED,
             rejected_rows=len(facts),
             identity_match=identity_match,
             active_root=active_root,
+            root_state=root_state,
         )
     source = matching[0]
     rows = _rows(source.get("mortgage_calc"))
@@ -96,6 +107,7 @@ def _bind_selected_mortgage_terms(request: CapabilityRequest, raw_evidence: Mapp
             rejected_rows=rejected,
             identity_match=True,
             active_root=True,
+            root_state=RootState.ACTIVE,
         )
     # A result intentionally contains only the contract's three public numeric fields.
     merged: dict[str, Any] = {}
@@ -105,7 +117,7 @@ def _bind_selected_mortgage_terms(request: CapabilityRequest, raw_evidence: Mapp
             merged[field] = values[0]
     missing = tuple(field for field in _TERM_FIELDS if field not in merged)
     status = EvidenceStatus.EVIDENCE_COMPLETE if not missing else EvidenceStatus.EVIDENCE_PARTIAL
-    return EvidenceResult(status, tuple(merged.items()), missing, len(accepted), rejected, True, True)
+    return EvidenceResult(status, tuple(merged.items()), missing, len(accepted), rejected, True, True, RootState.ACTIVE)
 
 
 def _rows(value: Any) -> tuple[Mapping[str, Any], ...]:
@@ -118,6 +130,25 @@ def _rows(value: Any) -> tuple[Mapping[str, Any], ...]:
 
 def _active(row: Mapping[str, Any]) -> bool:
     return str(row.get("state")) == "2"
+
+
+def _root_state(rows: list[Mapping[str, Any]]) -> RootState:
+    """Classify only the selected root's status without retaining its value."""
+    if not rows:
+        return RootState.UNKNOWN
+    if len(rows) != 1:
+        return RootState.AMBIGUOUS
+    root = rows[0]
+    if "state" not in root:
+        return RootState.MISSING
+    value = root.get("state")
+    if isinstance(value, bool):
+        return RootState.AMBIGUOUS
+    if str(value) == "2":
+        return RootState.ACTIVE
+    if isinstance(value, (int, float)) or (isinstance(value, str) and value.strip().isdigit()):
+        return RootState.INACTIVE
+    return RootState.AMBIGUOUS
 
 
 def _verified_percent(value: Any) -> bool:

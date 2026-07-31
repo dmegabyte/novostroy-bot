@@ -3293,6 +3293,7 @@ _JOURNAL_RUNTIME_QUALITY_BLOCKERS = {
 }
 _JOURNAL_CAPABILITY_STATUSES = {"selected_capability_prerequisite", "selected_capability_capability_missing", "selected_capability_entity_mismatch", "selected_capability_timeout", "selected_capability_transport", "selected_capability_provider", "selected_capability_parse", "selected_capability_rejected", "selected_capability_empty", "selected_capability_evidence_partial", "selected_capability_evidence_complete"}
 _JOURNAL_CAPABILITY_EVIDENCE = {"complete", "partial", "empty", "rejected", "capability_missing", "prerequisite_missing", "unknown"}
+_JOURNAL_CAPABILITY_ROOT_STATES = {"active", "inactive", "missing", "ambiguous", "unknown"}
 _JOURNAL_CAPABILITY_FACTS = {"parking", "parking_price", "parking_inventory", "apartment_price", "apartment_inventory", "mortgage_terms", "location", "metro", "schools", "readiness", "finishing", "parks", "developer", "lot_examples", "installment_terms", "discounts", "layouts"}
 _JOURNAL_COMPOSER_VALIDATION_CODES = {
     "empty_response", "invalid_json", "json_root_must_be_object", "schema_required_field_missing",
@@ -3361,7 +3362,7 @@ def _journal_capability_outcome(value: Any) -> dict[str, Any] | None:
     if status == "selected_capability_prerequisite": evidence = "prerequisite_missing"
     elif status == "selected_capability_capability_missing": evidence = "capability_missing"
     elif evidence not in _JOURNAL_CAPABILITY_EVIDENCE: evidence = "unknown"
-    out: dict[str, Any] = {"requested_facts": list(dict.fromkeys(str(item) for item in facts if str(item) in _JOURNAL_CAPABILITY_FACTS))[:8], "status": status, "request_count": _journal_int(value.get("request_count"), 0, 1), "evidence_status": evidence, "accepted_count": _journal_int(value.get("accepted_count"), 0, 10), "rejected_count": _journal_int(value.get("rejected_count"), 0, 10), "identity_match": value.get("identity_match") if isinstance(value.get("identity_match"), bool) else None, "active_root": value.get("active_root") if isinstance(value.get("active_root"), bool) else None}
+    out: dict[str, Any] = {"requested_facts": list(dict.fromkeys(str(item) for item in facts if str(item) in _JOURNAL_CAPABILITY_FACTS))[:8], "status": status, "request_count": _journal_int(value.get("request_count"), 0, 1), "evidence_status": evidence, "accepted_count": _journal_int(value.get("accepted_count"), 0, 10), "rejected_count": _journal_int(value.get("rejected_count"), 0, 10), "identity_match": value.get("identity_match") if isinstance(value.get("identity_match"), bool) else None, "active_root": value.get("active_root") if isinstance(value.get("active_root"), bool) else None, "root_state": value.get("root_state") if value.get("root_state") in _JOURNAL_CAPABILITY_ROOT_STATES else "unknown"}
     if value.get("transport_class") in {"gateway", "timeout", "transport", "provider"}: out["transport_class"] = value["transport_class"]
     if value.get("parse_class") in {"structured", "invalid"}: out["parse_class"] = value["parse_class"]
     return out

@@ -65,6 +65,7 @@ def _valid_request(**overrides):
             "effective_hard": {},
             "preferences": {},
             "relaxation_audit": [],
+            "lot_hard": {},
         },
         "response_viewpoint": "life",
         "base_viewpoint": None,
@@ -74,6 +75,8 @@ def _valid_request(**overrides):
         "search_mode": "broad",
         "current_option_names": [],
         "facts_needed": [],
+        "lot_hard": {},
+        "required_evidence_fields": [],
     }
     payload.update(overrides)
     return payload
@@ -169,6 +172,7 @@ def test_synthetic_fixture_request_scenarios_match_request_schema(request_valida
         executable_constraints = {
             **constraints,
             "preferences": {key: value for key, value in constraints["preferences"].items() if key in ALLOWED_PREFERENCES},
+            "lot_hard": dict(constraints.get("lot_hard") or {}),
         }
         payload = _valid_request(
             search_goal=scenario["search_goal"],

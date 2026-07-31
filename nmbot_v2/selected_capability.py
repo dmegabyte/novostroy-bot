@@ -16,6 +16,8 @@ def build_selected_capability_request(card: OptionCard, request: CapabilityReque
     name = str(card.name).strip()
     entity_id = str(request.entity_id)
     need = tuple(request.need)
+    required_evidence = tuple(dict.fromkeys((*request.required_root_fields, *request.required_evidence_fields)))
+    available_fields = tuple(dict.fromkeys((*need, *required_evidence)))
     return V2SearchRequest(
         search_goal={
             "entity_type": "residential_complex",
@@ -24,7 +26,8 @@ def build_selected_capability_request(card: OptionCard, request: CapabilityReque
         },
         requested_hard={}, effective_hard={}, preferences={"format": "selected_evidence"},
         relaxation_audit=[], response_viewpoint="financing", base_viewpoint=None,
-        available_fact_fields=list(need), count=1, ignored_preferences=[],
+        available_fact_fields=list(available_fields), required_evidence_fields=required_evidence,
+        count=1, ignored_preferences=[],
     )
 
 
@@ -81,6 +84,7 @@ def _safe_meta(
         "rejected_rows": max(0, min(int(evidence.rejected_rows), 10)),
         "identity_match": evidence.identity_match if isinstance(evidence.identity_match, bool) else None,
         "active_root": evidence.active_root if isinstance(evidence.active_root, bool) else None,
+        "root_state": evidence.root_state.value,
     }
     if transport_class in {"gateway", "timeout", "transport", "provider"}:
         meta["transport_class"] = transport_class

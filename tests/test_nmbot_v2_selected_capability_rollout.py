@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from nmbot_v2.capability_registry import compile_capability_request
 from nmbot_v2.card_normalizer import normalize_card
@@ -9,6 +10,7 @@ from nmbot_v2.evidence_resolver import EvidenceStatus, bind_evidence
 from nmbot_v2.pending_action import offer_pending_action
 from nmbot_v2.runtime import TurnProcessor
 from nmbot_v2.selected_capability import build_selected_capability_request, fetch_selected_capability
+from nmbot_v2.search_contract import build_query
 from nmbot_v2.state import ConversationState, apply_state_delta
 
 
@@ -40,8 +42,12 @@ def test_request_is_exactly_identity_bound_and_bounded() -> None:
     confirmed = __import__("nmbot_v2.pending_action", fromlist=["confirm_pending_action"]).confirm_pending_action(state, "verify-mortgage-42").state
     request = compile_capability_request(confirmed)
     wire = build_selected_capability_request(confirmed.visible_options[0], request)
+    envelope = json.loads(build_query(wire).split("\n", 1)[0].split("=", 1)[1])
     assert wire.count == 1 and "42" in wire.search_goal["explicit_terms"]
     assert "Лучи" in wire.search_goal["explicit_terms"] and set(request.need) <= set(wire.search_goal["explicit_terms"])
+    assert request.required_root_fields == ("id", "state")
+    assert {"id", "state"} <= set(wire.available_fact_fields)
+    assert {"id", "state"} <= set(envelope["required_evidence_fields"])
 
 
 def test_binder_rejects_foreign_or_inactive_facts_wrapper() -> None:

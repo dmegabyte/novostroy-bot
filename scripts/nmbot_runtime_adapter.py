@@ -3975,6 +3975,7 @@ _SAFE_RUNTIME_QUALITY_BLOCKERS = {
 _SAFE_RUNTIME_GROUNDING_SCOPES = {"canonical_response_plan"}
 _SAFE_CAPABILITY_STATUSES = {"selected_capability_prerequisite", "selected_capability_capability_missing", "selected_capability_entity_mismatch", "selected_capability_timeout", "selected_capability_transport", "selected_capability_provider", "selected_capability_parse", "selected_capability_rejected", "selected_capability_empty", "selected_capability_evidence_partial", "selected_capability_evidence_complete"}
 _SAFE_CAPABILITY_EVIDENCE = {"complete", "partial", "empty", "rejected", "capability_missing", "prerequisite_missing", "unknown"}
+_SAFE_CAPABILITY_ROOT_STATES = {"active", "inactive", "missing", "ambiguous", "unknown"}
 _SAFE_CAPABILITY_FACTS = {"parking", "parking_price", "parking_inventory", "apartment_price", "apartment_inventory", "mortgage_terms", "location", "metro", "schools", "readiness", "finishing", "parks", "developer", "lot_examples", "installment_terms", "discounts", "layouts"}
 
 
@@ -4039,6 +4040,7 @@ def _safe_capability_outcome(value: Any) -> dict[str, Any] | None:
         "rejected_count": _bounded_int(value.get("rejected_count"), 0, 10),
         "identity_match": value.get("identity_match") if isinstance(value.get("identity_match"), bool) else None,
         "active_root": value.get("active_root") if isinstance(value.get("active_root"), bool) else None,
+        "root_state": value.get("root_state") if value.get("root_state") in _SAFE_CAPABILITY_ROOT_STATES else "unknown",
     }
     if value.get("transport_class") in {"gateway", "timeout", "transport", "provider"}:
         out["transport_class"] = value["transport_class"]

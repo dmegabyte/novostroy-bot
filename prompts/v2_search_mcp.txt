@@ -39,6 +39,7 @@ SEARCH_CONTRACT_ENVELOPE={
 - `base_viewpoint` — явная базовая перспектива, которую нужно сохранить при `response_viewpoint="financing"`. Финансовый слой добавляет поля, но не заменяет приоритеты базовой перспективы.
 - `available_fact_fields` — whitelist полей, которые runtime умеет принять. Верни все реально пришедшие MCP-поля из whitelist, не выбрасывай полезные факты.
 - `hard_evidence_requirements` — runtime-owned карта активных hard-полей к MCP-полям evidence. В envelope попадают только поля, актуальные для текущего запроса; не придумывай дополнительные phrase-specific правила.
+- `required_evidence_fields` — runtime-owned обязательные поля evidence для capability-запроса. Верни каждое только как точный MCP-факт в объекте `facts`; если MCP его не вернул, объяви поле в `missing`. Никогда не придумывай значение или замену.
 - `count` — желаемое число точных результатов. Если точных меньше, не добивай `facts` альтернативами.
 
 ## Инструмент

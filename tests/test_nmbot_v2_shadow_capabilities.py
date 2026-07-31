@@ -2,7 +2,7 @@ from dataclasses import replace
 
 import pytest
 
-from nmbot_v2.capability_registry import CapabilityStatus, compile_capability_request
+from nmbot_v2.capability_registry import CapabilitySpec, CapabilityStatus, compile_capability_request
 from nmbot_v2.contracts import PendingAction, SelectedEntity
 from nmbot_v2.evidence_resolver import EvidenceStatus, bind_evidence
 from nmbot_v2.pending_action import (
@@ -112,3 +112,15 @@ def test_unknown_contract_values_fail_closed():
         PendingAction("unknown_action", ("mortgage_terms",), "residential_complex", 42, "pending", "x")
     with pytest.raises(ValueError):
         PendingAction("verify_selected_facts", ("mortgage_terms",), "residential_complex", 42, "unknown_status", "x")
+
+
+def test_future_capability_specs_can_declare_closed_root_and_evidence_requirements():
+    spec = CapabilitySpec(
+        "parking", ("parking",), executable=True,
+        required_root_fields=("id", "state"), required_evidence_fields=("parking",),
+    )
+
+    assert spec.required_root_fields == ("id", "state")
+    assert spec.required_evidence_fields == ("parking",)
+    with pytest.raises(ValueError):
+        CapabilitySpec("parking", ("parking",), required_root_fields=("raw_secret",))

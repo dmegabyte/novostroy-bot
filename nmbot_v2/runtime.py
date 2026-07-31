@@ -877,6 +877,7 @@ _CAPABILITY_STATUSES = frozenset({
     "selected_capability_rejected", "selected_capability_empty", "selected_capability_evidence_partial", "selected_capability_evidence_complete",
 })
 _CAPABILITY_EVIDENCE_STATUSES = frozenset({"complete", "partial", "empty", "rejected", "capability_missing", "prerequisite_missing", "unknown"})
+_CAPABILITY_ROOT_STATES = frozenset({"active", "inactive", "missing", "ambiguous", "unknown"})
 
 
 def _is_capability_status(value: Any) -> bool:
@@ -890,6 +891,7 @@ def _capability_attempt(request: Any, status: str, meta: Mapping[str, Any] | Non
         "request_count": request_count, "evidence_status": source.get("evidence_status"),
         "accepted_rows": source.get("accepted_rows", 0), "rejected_rows": source.get("rejected_rows", 0),
         "identity_match": source.get("identity_match"), "active_root": source.get("active_root"),
+        "root_state": source.get("root_state"),
         "transport_class": source.get("transport_class"), "parse_class": source.get("parse_class"),
     }
 
@@ -904,7 +906,7 @@ def _capability_outcome_runtime_summary(attempts: list[dict[str, Any]], bridge_s
     if status == "selected_capability_prerequisite": evidence = "prerequisite_missing"
     elif status == "selected_capability_capability_missing": evidence = "capability_missing"
     elif evidence not in _CAPABILITY_EVIDENCE_STATUSES: evidence = "unknown"
-    out: dict[str, Any] = {"requested_facts": list(dict.fromkeys(facts)), "status": status, "request_count": _bounded_int((attempt or {}).get("request_count"), 0, 1), "evidence_status": evidence, "accepted_count": _bounded_int((attempt or {}).get("accepted_rows"), 0, 10), "rejected_count": _bounded_int((attempt or {}).get("rejected_rows"), 0, 10), "identity_match": (attempt or {}).get("identity_match") if isinstance((attempt or {}).get("identity_match"), bool) else None, "active_root": (attempt or {}).get("active_root") if isinstance((attempt or {}).get("active_root"), bool) else None}
+    out: dict[str, Any] = {"requested_facts": list(dict.fromkeys(facts)), "status": status, "request_count": _bounded_int((attempt or {}).get("request_count"), 0, 1), "evidence_status": evidence, "accepted_count": _bounded_int((attempt or {}).get("accepted_rows"), 0, 10), "rejected_count": _bounded_int((attempt or {}).get("rejected_rows"), 0, 10), "identity_match": (attempt or {}).get("identity_match") if isinstance((attempt or {}).get("identity_match"), bool) else None, "active_root": (attempt or {}).get("active_root") if isinstance((attempt or {}).get("active_root"), bool) else None, "root_state": (attempt or {}).get("root_state") if (attempt or {}).get("root_state") in _CAPABILITY_ROOT_STATES else "unknown"}
     for key, allowed in (("transport_class", {"gateway", "timeout", "transport", "provider"}), ("parse_class", {"structured", "invalid"})):
         if (attempt or {}).get(key) in allowed:
             out[key] = (attempt or {})[key]

@@ -118,6 +118,7 @@ PRESENTATION_MISSING_CATEGORIES = {
     "sales", "ads", "location", "budget", "rooms", "readiness", "finishing", "details",
 }
 ALLOWED_MISSING_VALUES = set(COMMON_FACT_FIELDS) | MISSING_REASON_CODES | PRESENTATION_MISSING_CATEGORIES
+MAX_REQUIRED_EVIDENCE_FIELDS = 8
 
 
 @dataclass(frozen=True)
@@ -138,6 +139,7 @@ class V2SearchRequest:
     current_option_names: tuple[str, ...] = ()
     facts_needed: tuple[str, ...] = ()
     lot_hard: dict[str, Any] = field(default_factory=dict)
+    required_evidence_fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # A typed request is the executable MCP boundary regardless of whether
@@ -156,6 +158,7 @@ class V2SearchRequest:
         ))[:3])
         object.__setattr__(self, "facts_needed", normalize_facts(self.facts_needed))
         object.__setattr__(self, "lot_hard", _safe_lot_hard(self.lot_hard))
+        object.__setattr__(self, "required_evidence_fields", _closed_required_evidence_fields(self.required_evidence_fields))
 
     @property
     def constraints(self) -> dict[str, Any]:
@@ -180,6 +183,7 @@ class V2SearchRequest:
             "current_option_names": list(self.current_option_names),
             "facts_needed": list(self.facts_needed),
             "lot_hard": dict(self.lot_hard),
+            "required_evidence_fields": list(self.required_evidence_fields),
         }
 
 
@@ -328,6 +332,21 @@ def build_current_options_fact_check_request(
     )
 
 
+def _closed_required_evidence_fields(value: Any) -> tuple[str, ...]:
+    """Keep the serialized evidence requirement within the closed MCP vocabulary."""
+    if not isinstance(value, (tuple, list)):
+        raise ValueError("required evidence fields must be an array")
+    if len(value) > MAX_REQUIRED_EVIDENCE_FIELDS:
+        raise ValueError("too many required evidence fields")
+    if any(not isinstance(item, str) or not item or item != item.strip() for item in value):
+        raise ValueError("malformed required evidence field")
+    if len(set(value)) != len(value):
+        raise ValueError("duplicate required evidence field")
+    if any(item not in COMMON_FACT_FIELDS for item in value):
+        raise ValueError("unknown required evidence field")
+    return tuple(value)
+
+
 def build_query(request: V2SearchRequest, *, output_keys: list[str] | None = None, forbidden_keys: list[str] | None = None) -> str:
     envelope = {
         "contract": "v2_search_mcp_contract",
@@ -345,6 +364,7 @@ def build_query(request: V2SearchRequest, *, output_keys: list[str] | None = Non
         "hard_evidence_requirements": hard_evidence_requirements(request),
         "lot_hard": dict(request.lot_hard),
         "lot_hard_evidence_requirements": lot_hard_evidence_requirements(request),
+        "required_evidence_fields": list(request.required_evidence_fields),
     }
     current_params = {
         "search_goal": dict(request.search_goal),
@@ -357,6 +377,7 @@ def build_query(request: V2SearchRequest, *, output_keys: list[str] | None = Non
         "current_option_names": list(request.current_option_names),
         "facts_needed": list(request.facts_needed),
         "lot_hard": dict(request.lot_hard),
+        "required_evidence_fields": list(request.required_evidence_fields),
     }
     client_query = _clean_text(str(request.search_goal.get("query_summary") or "")) or "base catalogue search for new building flats"
     return (

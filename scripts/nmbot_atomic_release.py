@@ -171,6 +171,12 @@ SECRET_ERROR_RE = re.compile(r"(?i)\b[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSW
 SECRET_ASSIGNMENT_LINE_RE = re.compile(
     r"(?im)^.*\b[A-Za-z0-9_]*(?:TOKEN|API_KEY|SECRET|PASSWORD)[A-Za-z0-9_]*\b\s*(?::|=).*$(?:\n)?"
 )
+# These are literal environment-variable names, not secret values. Keep this
+# exception closed to the two references used by nmbot_bridge_smoke.py.
+ENV_NAME_REFERENCE_VALUES = frozenset({
+    "JIVO_PROVIDER_TOKEN",
+    "NMBOT_N8N_BRIDGE_TOKEN",
+})
 SAFE_DIAGNOSTIC_LINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.,:;@%+=/()\[\]{}!?\-]{0,300}$")
 RUNTIME_DIRS = {"nmbot_v0", "nmbot_v1", "nmbot_v2", "nmbot_v4", "scripts", "prompts", "schemas"}
 DEPLOY_RUNTIME_DIRS = {"deploy"}
@@ -203,6 +209,10 @@ API_RUNTIME_SCRIPT_FILES = frozenset({
     "scripts/nmbot_crm_outbox.py",
     "scripts/nmbot_egress_policy.py",
     "scripts/nmbot_gateway_client.py",
+    "scripts/nmbot_bridge_smoke.py",
+    "scripts/nmbot_jivo_audit.sh",
+    "scripts/nmbot_jivo_dialogue_diagnose.py",
+    "scripts/nmbot_jivo_trace_analyze.py",
     "scripts/nmbot_planner_context.py",
     "scripts/nmbot_release_identity.py",
     "scripts/nmbot_runtime_adapter.py",
@@ -220,7 +230,6 @@ NMBOT_DIALOGUE_EXPORTER_DEPENDENCY_FILES = frozenset({
     "scripts/bluesminds_client.py",
     "scripts/nmbot_google_sheets.py",
 })
-NMBOT_DIALOGUE_EXPORTER_NAME_ONLY_SECRET_REFERENCE_FILES = frozenset()
 NMBOT_DIALOGUE_EXPORTER_REMOTE_SCRIPT = f"{DEFAULT_REMOTE_ROOT}/{NMBOT_DIALOGUE_EXPORTER_SCRIPT}"
 NMBOT_DIALOGUE_EXPORTER_REMOTE_SERVICE = "/home/neiro/.config/systemd/user/nmbot-dialogue-sheet-export.service"
 NMBOT_DIALOGUE_EXPORTER_REMOTE_TIMER = "/home/neiro/.config/systemd/user/nmbot-dialogue-sheet-export.timer"
@@ -229,13 +238,15 @@ OPTIONAL_API_RUNTIME_SCRIPT_FILES = frozenset({
     "scripts/bluesminds_v0_answer_writer.py",
     "scripts/gateway_v0_answer_writer.py",
 })
-REMOTE_PREFLIGHT_PY_FILES = tuple(sorted((API_RUNTIME_SCRIPT_FILES - OPTIONAL_API_RUNTIME_SCRIPT_FILES) | {
+REMOTE_PREFLIGHT_SOURCE_FILES = tuple(sorted((API_RUNTIME_SCRIPT_FILES - OPTIONAL_API_RUNTIME_SCRIPT_FILES) | {
     "followup_intent_classifier.py",
     "search_profiles.py",
     "nmbot_v2/runtime.py",
     "nmbot_v2/response_composer.py",
     "nmbot_v2/manager_rewriter.py",
 }))
+REMOTE_PREFLIGHT_PY_FILES = tuple(path for path in REMOTE_PREFLIGHT_SOURCE_FILES if path.endswith(".py"))
+REMOTE_PREFLIGHT_SH_FILES = tuple(path for path in REMOTE_PREFLIGHT_SOURCE_FILES if path.endswith(".sh"))
 EXCLUDED_DIR_NAMES = {
     ".git", ".venv", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", ".opencode", ".github",
     "node_modules", "__pycache__", "logs", "backups", "data", "results", "reports", "eval", "release_bundles", "tests", "candidates",
@@ -249,7 +260,11 @@ API_ONLY_SCRIPT_DENY = {
     "scripts/nmbot_callback_sheet_worker.py",
 }
 TEST_API_OVERLAY_SCRIPT_FILES = frozenset({
+    "scripts/nmbot_bridge_smoke.py",
     "scripts/nmbot_env_secrets.py",
+    "scripts/nmbot_jivo_audit.sh",
+    "scripts/nmbot_jivo_dialogue_diagnose.py",
+    "scripts/nmbot_jivo_trace_analyze.py",
 })
 FIXED_DATA_ENV_PATHS = {
     "NMBOT_RELEASE_IDENTITY_FILE": IDENTITY_EXTERNAL,
@@ -462,10 +477,6 @@ def _reject_secret_like(path: Path, rel: str) -> None:
         raise ReleaseError(f"secret-like filename rejected: {rel}")
     if rel.endswith((".py", ".txt", ".json", ".yaml", ".yml", ".cfg", ".ini")):
         text = path.read_text(encoding="utf-8", errors="ignore")
-        if rel in NMBOT_DIALOGUE_EXPORTER_NAME_ONLY_SECRET_REFERENCE_FILES:
-            if PRIVATE_KEY_RE.search(text) or BEARER_LITERAL_RE.search(text):
-                raise ReleaseError(f"secret-like content rejected: {rel}")
-            return
         if _has_secret_like_content(text, python_source=rel.endswith(".py")):
             raise ReleaseError(f"secret-like content rejected: {rel}")
 
@@ -490,6 +501,11 @@ def _has_secret_assignment_literal(text: str) -> bool:
             quote = value[0]
             end = value.find(quote, 1)
             literal = value[1:end] if end >= 1 else value[1:]
+            # A diagnostic may name (but never contain) a secret-bearing
+            # environment variable. This narrow reference form is the sole
+            # exception to literal-secret assignment screening.
+            if _is_env_name_reference(name, literal):
+                continue
             if literal and (strong_name or _looks_like_credential_literal(literal)):
                 return True
             continue
@@ -498,6 +514,14 @@ def _has_secret_assignment_literal(text: str) -> bool:
         if re.search(r"[A-Za-z0-9_./+~:-]{8,}", value):
             return True
     return False
+
+
+def _is_env_name_reference(name: str, value: str) -> bool:
+    """Allow only closed-allowlist environment-name references in diagnostics."""
+    return bool(
+        re.fullmatch(r"[A-Z][A-Z0-9_]*_ENV", name)
+        and value in ENV_NAME_REFERENCE_VALUES
+    )
 
 
 def _looks_like_credential_literal(value: str) -> bool:
@@ -538,11 +562,38 @@ def _remote_preflight_py_files(paths: set[str] | None = None) -> tuple[str, ...]
     return tuple(sorted(set(REMOTE_PREFLIGHT_PY_FILES) | v1_files))
 
 
+def _remote_preflight_source_files(paths: set[str] | None = None) -> tuple[str, ...]:
+    return tuple(sorted(set(REMOTE_PREFLIGHT_SOURCE_FILES) | set(_remote_preflight_py_files(paths))))
+
+
 def _assert_remote_preflight_sources_present(root: Path, paths: set[str] | None = None) -> None:
     available = paths if paths is not None else {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
-    missing = [rel for rel in _remote_preflight_py_files(available) if rel not in available or not (root / rel).is_file() or (root / rel).is_symlink()]
+    missing = [rel for rel in _remote_preflight_source_files(available) if rel not in available or not (root / rel).is_file() or (root / rel).is_symlink()]
     if missing:
         raise ReleaseError("remote preflight source missing from artifact: " + ",".join(missing))
+
+
+def _local_preflight_source_files(root: Path, artifact_paths: set[str]) -> tuple[list[Path], list[Path]]:
+    """Return Python and shell sources that local preflight must syntax-check.
+
+    The remote-preflight closure historically has a Python-oriented name, but it
+    also contains approved shell diagnostics.  Keep that closure fail-closed:
+    every source must have an explicitly supported syntax checker.
+    """
+    sources = {*root.rglob("*.py"), *(root / rel for rel in _remote_preflight_source_files(artifact_paths))}
+    py_files: list[Path] = []
+    sh_files: list[Path] = []
+    unsupported: list[str] = []
+    for path in sorted(sources):
+        if path.suffix == ".py":
+            py_files.append(path)
+        elif path.suffix == ".sh":
+            sh_files.append(path)
+        else:
+            unsupported.append(path.relative_to(root).as_posix())
+    if unsupported:
+        raise ReleaseError("unsupported local preflight executable extension: " + ",".join(unsupported))
+    return py_files, sh_files
 
 
 def _deterministic_generated_at() -> str:
@@ -835,9 +886,13 @@ def local_preflight(*, archive: Path, manifest_path: Path) -> str:
         _assert_remote_preflight_sources_present(root, artifact_paths)
         identity = json.loads((root / IDENTITY_IN_RELEASE).read_text(encoding="utf-8"))
         validate_release_identity(identity, manifest)
-        py_files = sorted({*root.rglob("*.py"), *(root / rel for rel in _remote_preflight_py_files(artifact_paths))})
+        py_files, sh_files = _local_preflight_source_files(root, artifact_paths)
         for idx, path in enumerate(py_files):
             py_compile.compile(str(path), cfile=str(Path(tmp) / f"compiled-{idx}.pyc"), doraise=True)
+        for path in sh_files:
+            shell = subprocess.run(["bash", "-n", str(path)], text=True, capture_output=True, check=False)
+            if shell.returncode != 0:
+                raise ReleaseError(f"shell syntax check failed: {path.relative_to(root).as_posix()}: " + (shell.stdout + shell.stderr)[-2000:])
         code = "import importlib, json, sys\nfor name in json.loads(sys.argv[1]):\n    importlib.import_module(name)\nprint('import=ok')\n"
         env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
         pythonpath = os.pathsep.join([str(root), str(root / "scripts")])
@@ -1186,6 +1241,7 @@ private_key=re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----", re.M)
 bearer_literal=re.compile(r"[Bb]earer\s+[A-Za-z0-9._~+/=-]{20,}")
 secret_assignment=re.compile(r"^\s*(?:export\s+)?['\"]?(?P<name>[A-Za-z0-9_-]*(?:TOKEN(?!S)|SECRET|PASSWORD|PASSWD|PRIVATE[_-]?KEY|API[_-]?KEY)[A-Za-z0-9_-]*)['\"]?\s*(?::|=)\s*(?P<value>.+?)\s*$", re.I)
 benign_secret_value=re.compile(r"^(?:None|True|False|[A-Z][A-Z0-9_]*|os\.getenv\(|os\.environ\.|environ\.get\(|getenv\(|settings\.|config\.|self\.|args\.|kwargs\.|[A-Za-z_][A-Za-z0-9_]*\(|[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?)")
+env_name_reference_values={"JIVO_PROVIDER_TOKEN", "NMBOT_N8N_BRIDGE_TOKEN"}
 excluded_dirs={".git",".venv",".pytest_cache",".mypy_cache",".ruff_cache",".cache",".opencode",".github","node_modules","__pycache__","logs","backups","data","results","reports","eval","release_bundles","tests"}
 excluded_suffixes=(".pyc",".pyo",".log",".jsonl",".bak",".tmp",".swp")
 deploy_re=re.compile(r"(^|/)(?:deploy|rollback|release|nmbot_atomic_release|nmbot_release)(?:[_-].*)?\.py$")
@@ -1259,6 +1315,7 @@ def has_secret_assignment_literal(text):
         strong_name=any(marker in name for marker in ("SECRET", "PASSWORD", "PASSWD", "PRIVATE_KEY", "API_KEY", "API_TOKEN"))
         if value.startswith(("'", '"')) and len(value) >= 2:
             quote=value[0]; end=value.find(quote, 1); literal=value[1:end] if end >= 1 else value[1:]
+            if re.fullmatch(r"[A-Z][A-Z0-9_]*_ENV", name) and literal in env_name_reference_values: continue
             if literal and (strong_name or looks_like_credential_literal(literal)): return True
             continue
         if benign_secret_value.match(value): continue
@@ -1286,7 +1343,9 @@ for top in list(roots)+sorted(root_files):
         if not inside(p): continue
         try: data, st=read_openat_no_follow(rel)
         except OSError: continue
-        if rel.endswith((".py",".txt",".json",".yaml",".yml",".cfg",".ini")) and has_secret_like_content(data.decode("utf-8", errors="ignore"), rel): continue
+        if rel.endswith((".py",".txt",".json",".yaml",".yml",".cfg",".ini")):
+            text=data.decode("utf-8", errors="ignore")
+            if has_secret_like_content(text, rel): continue
         mode=0o755 if rel.startswith("scripts/") and rel.endswith(".py") else 0o644
         rows.append({"path": rel, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data), "mode": mode, "data": data})
 seen=set(); uniq=[]
@@ -1960,7 +2019,11 @@ def _write_manifest_driven_source_copy(*, source_dir: Path, dest_dir: Path, mani
     for row in manifest["files"]:
         rel = row["path"]
         data, mode = _read_file_openat_no_follow(source_dir, rel, row)
-        if SECRET_NAME_RE.search(PurePosixPath(rel).name) or _has_secret_like_content(data.decode("utf-8", errors="ignore"), python_source=rel.endswith(".py")):
+        text = data.decode("utf-8", errors="ignore")
+        if (
+            SECRET_NAME_RE.search(PurePosixPath(rel).name)
+            or _has_secret_like_content(text, python_source=rel.endswith(".py"))
+        ):
             raise ReleaseError(f"secret-like snapshot file rejected: {rel}")
         target = dest_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -3398,10 +3461,10 @@ def _remote_preflight_command(release_dir: str, modules: list[str] | None = None
     selected_compile_files = list(REMOTE_PREFLIGHT_PY_FILES) if compile_files is None else compile_files
     if not set(selected_compile_files).issubset(allowed_compile_files):
         raise ReleaseError("remote preflight compile files must match release contract")
-    payload = json.dumps({"modules": list(IMPORT_MODULES), "compile_files": sorted(selected_compile_files)}, sort_keys=True)
+    payload = json.dumps({"modules": list(IMPORT_MODULES), "compile_files": sorted(selected_compile_files), "shell_files": list(REMOTE_PREFLIGHT_SH_FILES)}, sort_keys=True)
     code = r'''
-import hashlib, importlib, json, os, pathlib, py_compile, sys, tempfile
-cfg=json.loads(sys.argv[1]); root=pathlib.Path.cwd().resolve(); modules=cfg["modules"]; compile_files=cfg["compile_files"]
+import hashlib, importlib, json, os, pathlib, py_compile, subprocess, sys, tempfile
+cfg=json.loads(sys.argv[1]); root=pathlib.Path.cwd().resolve(); modules=cfg["modules"]; compile_files=cfg["compile_files"]; shell_files=cfg["shell_files"]
 def fail(msg): print(json.dumps({"ok": False, "error": msg})); sys.exit(2)
 def v1_py_files():
     base=root/"nmbot_v1"
@@ -3430,6 +3493,11 @@ with tempfile.TemporaryDirectory(prefix="nmbot-preflight-pyc-") as td:
         p=root/rel
         if not p.is_file() or p.is_symlink(): fail("compile file missing: "+rel)
         py_compile.compile(str(p), cfile=str(tmp/(str(idx)+".pyc")), doraise=True)
+for rel in shell_files:
+    p=root/rel
+    if not p.is_file() or p.is_symlink(): fail("shell file missing: "+rel)
+    check=subprocess.run(["bash", "-n", str(p)], text=True, capture_output=True, check=False)
+    if check.returncode != 0: fail("shell syntax check failed: "+rel)
 os.environ["PYTHONDONTWRITEBYTECODE"]="1"
 sys.dont_write_bytecode=True
 release_paths={str(root), str(root/"scripts")}
@@ -3438,7 +3506,7 @@ for name in modules:
     importlib.import_module(name)
 after=snapshot()
 if after != before: fail("release file set/hash changed during preflight")
-print(json.dumps({"ok": True, "import": "ok", "py_compile": len(compile_files), "import_modules": len(modules)}))
+print(json.dumps({"ok": True, "import": "ok", "py_compile": len(compile_files), "bash_n": len(shell_files), "import_modules": len(modules)}))
 '''
     return " && ".join([
         "test -d " + shlex.quote(release_dir),
@@ -4188,10 +4256,18 @@ def bridge_deploy(*, release_id: str, archive: Path, manifest_path: Path, confir
     cleanup_error: str | None = None
     unit_path = BRIDGE_UNIT_PATH
     try:
+        # This is only a fast-fail precheck.  It cannot authorize a mutation:
+        # another deploy can change the baseline while this invocation waits
+        # for the release lock.
         state = _remote_json(remote, _bridge_remote_guard_command(remote_root, manifest, source_snapshot_manifest_sha256))
         unit_path = str(state.get("unit_path") or BRIDGE_UNIT_PATH)
         _remote_ok(remote.run("mkdir " + shlex.quote(paths["lock_dir"])))
         lock_acquired = True
+        # Re-read every source/baseline guard under the lock.  In particular,
+        # never use the pre-lock snapshot to choose files that will be backed
+        # up, uploaded, or made current.
+        state = _remote_json(remote, _bridge_remote_guard_command(remote_root, manifest, source_snapshot_manifest_sha256))
+        unit_path = str(state.get("unit_path") or BRIDGE_UNIT_PATH)
         _remote_ok(remote.run(_bridge_backup_command(remote_root, rid, unit_path, state)))
         _remote_ok(remote.run("mkdir -p " + shlex.quote(paths["staging"]) + " " + shlex.quote(f"{remote_root}/{BRIDGE_RELEASES}")))
         remote_archive = paths["staging"] + "/" + archive.name

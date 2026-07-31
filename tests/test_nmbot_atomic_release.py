@@ -197,7 +197,11 @@ class LocalBinaryCommandRemote:
 
 
 def _copy_contract_tree(dest: Path) -> None:
-    for relpath in rel._contract_capture_paths(ROOT):
+    # Synthetic snapshot fixtures must model the full fail-closed API build
+    # closure, not only the source-capture contract.  In particular, the
+    # diagnostic smoke harness is compiled by remote preflight.
+    source_paths = set(rel._contract_capture_paths(ROOT)) | set(rel.REMOTE_PREFLIGHT_SOURCE_FILES)
+    for relpath in sorted(source_paths):
         target = dest / relpath
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes((ROOT / relpath).read_bytes())
@@ -539,6 +543,7 @@ def test_build_excludes_secrets_runtime_noise_and_manifest_has_names_only(tmp_pa
     assert ".env" not in paths
     assert not any(path.startswith(("logs/", "data/", "release_bundles/", "eval/", "results/", "reports/")) for path in paths)
     assert "scripts/nmbot_api_server.py" in paths
+    assert "scripts/nmbot_bridge_smoke.py" in paths
     assert "scripts/nmbot_n8n_bridge_server.py" not in paths
     assert "scripts/nmbot_callback_sheet_worker.py" not in paths
     assert "nmbot_v1" in rel.RUNTIME_DIRS
@@ -627,6 +632,40 @@ def test_local_preflight_starts_extracted_api_without_provider_requests(tmp_path
     assert "startup=create_app" in result
 
 
+def test_local_preflight_checks_audit_shell_with_bash_not_py_compile(tmp_path: Path, monkeypatch) -> None:
+    artifact = rel.build(release_id="REL-audit-shell-syntax", out_dir=tmp_path)
+    compiled: list[Path] = []
+    bash_checks: list[list[str]] = []
+    original_compile = rel.py_compile.compile
+    original_run = rel.subprocess.run
+
+    def capture_compile(source: str, *args, **kwargs):
+        compiled.append(Path(source))
+        return original_compile(source, *args, **kwargs)
+
+    def capture_run(command, *args, **kwargs):
+        if isinstance(command, list) and command[:2] == ["bash", "-n"]:
+            bash_checks.append(command)
+        return original_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(rel.py_compile, "compile", capture_compile)
+    monkeypatch.setattr(rel.subprocess, "run", capture_run)
+
+    assert rel.local_preflight(archive=artifact.archive, manifest_path=artifact.manifest).startswith("preflight=ok")
+    assert any(command[2].endswith("scripts/nmbot_jivo_audit.sh") for command in bash_checks)
+    assert all(not str(path).endswith("scripts/nmbot_jivo_audit.sh") for path in compiled)
+
+
+def test_local_preflight_rejects_malformed_audit_shell(tmp_path: Path) -> None:
+    root = tmp_path / "malformed-audit-source"
+    _copy_contract_tree(root)
+    (root / "scripts" / "nmbot_jivo_audit.sh").write_text("if then\n", encoding="utf-8")
+    artifact = rel.build(release_id="REL-malformed-audit-shell", out_dir=tmp_path / "out", root=root)
+
+    with pytest.raises(rel.ReleaseError, match="shell syntax check failed: scripts/nmbot_jivo_audit.sh"):
+        rel.local_preflight(archive=artifact.archive, manifest_path=artifact.manifest)
+
+
 def test_secret_filter_rejects_database_filenames_and_json_yaml_secret_assignments(tmp_path: Path) -> None:
     root = tmp_path / "src"
     _copy_contract_tree(root)
@@ -649,6 +688,33 @@ def test_secret_filter_rejects_database_filenames_and_json_yaml_secret_assignmen
         else:  # pragma: no cover
             raise AssertionError(f"secret-like file/content must fail: {relative}")
         candidate.unlink()
+
+
+@pytest.mark.parametrize(
+    "reference",
+    ["JIVO_PROVIDER_TOKEN", "NMBOT_N8N_BRIDGE_TOKEN"],
+)
+def test_secret_filter_allows_exact_smoke_env_name_references(tmp_path: Path, reference: str) -> None:
+    root = tmp_path / "smoke-harness-secret"
+    _copy_contract_tree(root)
+    harness = root / "scripts" / "nmbot_bridge_smoke.py"
+    original = harness.read_text(encoding="utf-8")
+
+    assert rel._is_env_name_reference("PROVIDER_TOKEN_ENV", reference)
+    assert rel.build(release_id="REL-smoke-env-reference", out_dir=tmp_path / "reference", root=root)
+
+
+def test_secret_filter_rejects_unallowlisted_uppercase_token_looking_literal(tmp_path: Path) -> None:
+    root = tmp_path / "smoke-harness-secret"
+    _copy_contract_tree(root)
+    harness = root / "scripts" / "nmbot_bridge_smoke.py"
+    original = harness.read_text(encoding="utf-8")
+    literal = "UNRELATED_PROVIDER_TOKEN"
+
+    assert not rel._is_env_name_reference("PROVIDER_TOKEN_ENV", literal)
+    harness.write_text(original + f'\nPROVIDER_TOKEN_ENV = "{literal}"\n', encoding="utf-8")
+    with pytest.raises(rel.ReleaseError, match="secret-like content rejected: scripts/nmbot_bridge_smoke.py"):
+        rel.build(release_id="REL-smoke-secret", out_dir=tmp_path / "malicious", root=root)
 
 
 def test_manifest_and_archive_tamper_detection(tmp_path: Path) -> None:
@@ -1004,6 +1070,8 @@ def test_remote_preflight_has_import_smoke_without_tautological_archive_sha() ->
     assert "compile_files=sorted(set(compile_files)|set(v1_py_files()))" in command
     assert "release file set/hash changed during preflight" in command
     assert "PYTHONPATH=/remote/releases/REL:/remote/releases/REL/scripts" in command
+    assert '"bash", "-n"' in command
+    assert "scripts/nmbot_jivo_audit.sh" in command
     assert "archive_sha" not in command
 
 
@@ -1277,6 +1345,18 @@ def test_generated_remote_preflight_executes_without_pyc_mutation(tmp_path: Path
     assert before == after
     assert not list(release_dir.rglob("__pycache__"))
     assert not list(release_dir.rglob("*.pyc"))
+
+
+def test_generated_remote_preflight_rejects_malformed_allowlisted_shell(tmp_path: Path) -> None:
+    artifact = rel.build(release_id="REL-remote-malformed-shell", out_dir=tmp_path / "bundle")
+    release_dir = tmp_path / "release"
+    rel.safe_extract(artifact.archive, release_dir)
+    (release_dir / "scripts" / "nmbot_jivo_audit.sh").write_text("if then\n", encoding="utf-8")
+
+    proc = _run_generated(rel._remote_preflight_command(str(release_dir)))
+
+    assert proc.returncode != 0
+    assert "shell syntax check failed: scripts/nmbot_jivo_audit.sh" in proc.stdout
 
 
 def test_generated_previous_state_probe_executes_and_rejects_bad_generated_at(tmp_path: Path) -> None:
@@ -2642,6 +2722,7 @@ def test_snapshot_publish_worktree_no_clobber_and_compare_metadata_only(tmp_path
     result = rel.snapshot_vps_source(remote=LocalBinaryCommandRemote(), out_dir=out)
     snapshot_dir = Path(result["snapshot_dir"])
     assert (snapshot_dir / "source" / "scripts" / "nmbot_api_server.py").is_file()
+    assert (snapshot_dir / "source" / "scripts" / "nmbot_bridge_smoke.py").is_file()
     assert (snapshot_dir / "snapshot.tar").is_file()
 
     race_out = Path("/tmp/opencode") / f"nmbot-test-source-snapshot-race-{tmp_path.name}"
@@ -2923,6 +3004,7 @@ def test_test_release_overlay_can_add_env_helper_to_test_artifact_only(tmp_path:
 
     assert diff["changed"] == []
     assert [item["path"] for item in diff["added"]] == ["scripts/nmbot_env_secrets.py"]
+    assert "scripts/nmbot_bridge_smoke.py" in paths
     assert "scripts/nmbot_env_secrets.py" in paths
     assert "scripts/nmbot_n8n_bridge_server.py" not in paths
     assert "scripts/nmbot_callback_sheet_worker.py" not in paths
@@ -3991,6 +4073,34 @@ def test_bridge_deploy_rejects_before_write_on_baseline_mismatch(tmp_path: Path)
         rel.bridge_deploy(release_id="bridge-rel-001", archive=artifact.archive, manifest_path=artifact.manifest, confirm=True, remote=remote, source_snapshot_manifest_sha256=snapshot_sha)
     assert remote.uploads == []
     assert not any("mkdir /home/neiro/novostroy-bot/.bridge_release_lock" in c for c in remote.commands)
+
+
+def test_bridge_deploy_revalidates_baseline_after_lock_before_upload_or_mutation(tmp_path: Path) -> None:
+    artifact, snapshot_sha = _build_bridge_artifact(tmp_path)
+
+    class DriftAfterPrecheckRemote(BridgeRemote):
+        def __init__(self) -> None:
+            super().__init__()
+            self.guard_calls = 0
+
+        def run(self, command: str, *, input_text: str | None = None):
+            if "previous_state" in command and "bridge baseline hash mismatch" in command:
+                self.commands.append(command)
+                self.guard_calls += 1
+                if self.guard_calls == 2:
+                    return subprocess.CompletedProcess([], 1, stdout=json.dumps({"ok": False, "error": "bridge baseline hash mismatch"}) + "\n", stderr="")
+                return subprocess.CompletedProcess([], 0, stdout=json.dumps({"ok": True, "unit_path": rel.BRIDGE_UNIT_PATH, "previous_state": "absent", "previous_target": "", "previous_working_directory": rel.DEFAULT_REMOTE_ROOT, "previous_exec_argv": ["/usr/bin/python3", f"{rel.DEFAULT_REMOTE_ROOT}/{rel.BRIDGE_ENTRYPOINT}", "--host", "0.0.0.0", "--port", "8093"], "previous_environment_file": f"{rel.DEFAULT_REMOTE_ROOT}/.env", "previous_inline_environment": rel.BRIDGE_INLINE_ENVIRONMENT, "previous_fragment_path": rel.BRIDGE_UNIT_PATH}) + "\n", stderr="")
+            return super().run(command, input_text=input_text)
+
+    remote = DriftAfterPrecheckRemote()
+    with pytest.raises(rel.ReleaseError, match="baseline hash mismatch"):
+        rel.bridge_deploy(release_id="bridge-rel-001", archive=artifact.archive, manifest_path=artifact.manifest, confirm=True, remote=remote, source_snapshot_manifest_sha256=snapshot_sha)
+
+    lock = "mkdir /home/neiro/novostroy-bot/.bridge_release_lock"
+    assert remote.commands.index(lock) < max(i for i, command in enumerate(remote.commands) if "previous_state" in command)
+    assert remote.uploads == []
+    assert not any("bridge_backup" in command or ".bridge-current.bridge-rel-001.tmp" in command for command in remote.commands)
+    assert remote.commands[-1] == "rmdir /home/neiro/novostroy-bot/.bridge_release_lock"
 
 
 def test_bridge_deploy_success_order_restarts_bridge_only(tmp_path: Path) -> None:

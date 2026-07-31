@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,23 @@ SENSITIVE_KEY_PARTS = ("payload", "text", "token", "authorization", "url", "body
 TERMINAL_OK_MARKERS = ("final", "final_answer", "bot_message", "answered", "handoff", "invite_agent")
 TERMINAL_BAD_MARKERS = ("explicit_failure", "failure", "failed", "error", "timeout")
 ASYNC_ACK_MARKERS = ("accepted_async", "accepted_for_async_processing")
+DELIVERY_TRACE_SCHEMA = "nmbot.jivo.delivery_trace.v1"
+DELIVERY_V1_FULL_LIFECYCLE = (
+    "bridge_accepted", "api_completed", "terminal_selected",
+    "jivo_send_attempted", "jivo_response", "terminal_delivery",
+)
+# These are the only shortened v1 lifecycles.  They represent an explicitly
+# recorded non-send, never Jivo terminal acceptance.
+DELIVERY_V1_API_FAILURE_LIFECYCLE = ("bridge_accepted", "api_failed", "terminal_delivery")
+DELIVERY_V1_PRE_SEND_FAILURE_LIFECYCLES = (
+    ("bridge_accepted", "api_completed", "terminal_delivery"),
+    ("bridge_accepted", "api_failed", "terminal_delivery"),
+)
+DELIVERY_V1_SELECTED_FAILURE_PREFIXES = (
+    ("bridge_accepted", "api_completed", "terminal_selected", "terminal_delivery"),
+    ("bridge_accepted", "api_failed", "terminal_selected", "terminal_delivery"),
+)
+TRACE_REF_RE = re.compile(r"trace_[0-9a-f]{12}")
 NONTERMINAL_STATUS_MARKERS = ("status_sent", "fallback_status_sent", "status_update")
 UPSTREAM_MARKERS = ("upstream_response", "nmbot_response", "local_response", "api_response", "llm_response", "gateway_response")
 
@@ -45,8 +63,22 @@ def _first_present(row: dict[str, Any], keys: Iterable[str]) -> Any:
     return None
 
 
-def trace_id_of(row: dict[str, Any]) -> str:
-    value = _first_present(row, ("trace_id", "traceId", "request_id", "requestId", "event_id", "eventId", "correlation_id"))
+def canonical_trace_ref(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text if TRACE_REF_RE.fullmatch(text) else None
+
+
+def trace_id_of(row: dict[str, Any]) -> str | None:
+    # Privacy-safe delivery projections are keyed only by trace_ref. Keep
+    # legacy identifiers as a backwards-compatible fallback for old logs.
+    if row.get("schema") == DELIVERY_TRACE_SCHEMA:
+        # Delivery v1 is a privacy boundary: do not fall back to raw IDs, and
+        # never use an arbitrary supplied reference as an output/grouping key.
+        return canonical_trace_ref(row.get("trace_ref"))
+    # Legacy logs may contain arbitrary `trace_ref` values. Prefer their raw
+    # trace identifier for internal grouping so downstream sanitizers can
+    # derive an opaque reference instead of exposing the supplied value.
+    value = _first_present(row, ("trace_id", "traceId", "request_id", "requestId", "event_id", "eventId", "correlation_id", "trace_ref", "safe_trace_ref"))
     return str(value) if value not in (None, "") else "__missing_trace_id__"
 
 
@@ -81,20 +113,34 @@ def is_accepted_async(row: dict[str, Any]) -> bool:
 
 def is_upstream_response(row: dict[str, Any]) -> bool:
     hay = _haystack(row)
-    return any(marker in hay for marker in UPSTREAM_MARKERS) or any(key in row for key in UPSTREAM_MARKERS)
+    return row.get("stage") in {"api_completed", "api_failed"} or any(marker in hay for marker in UPSTREAM_MARKERS) or any(key in row for key in UPSTREAM_MARKERS)
 
 
 def terminal_kind(row: dict[str, Any]) -> str | None:
     hay = _haystack(row)
+    # The delivery projection has an explicit lifecycle contract: API results
+    # describe intermediate progress, even when the API failed.  Do this
+    # before the legacy marker heuristics below, which remain necessary for
+    # older structured logs without this schema.
+    if row.get("schema") == DELIVERY_TRACE_SCHEMA:
+        if row.get("stage") != "terminal_delivery":
+            return None
+        outcome = str(row.get("outcome") or "").lower()
+        # A Jivo HTTP response below 400 acknowledges only the terminal send.
+        # It is deliberately not classified as client delivery or success.
+        return "terminal_send_accepted" if outcome == "terminal_send_accepted" else "failure" if outcome in {"failed", "not_sent"} else None
     # The bridge uses the same stage (`jivo_response_returned`) for the early
     # webhook acknowledgement and the later final Jivo POST.  The outcome is
     # therefore part of the terminal contract; an async acknowledgement is
-    # evidence of the bug, not a terminal result.
+    # progress evidence, not a terminal result.
     if any(marker in hay for marker in ASYNC_ACK_MARKERS):
         return None
     # A progress BOT_MESSAGE is intentionally followed by the final answer.
     if any(marker in hay for marker in NONTERMINAL_STATUS_MARKERS):
         return None
+    if row.get("stage") == "terminal_delivery":
+        outcome = str(row.get("outcome") or "").lower()
+        return "success" if outcome == "delivered" else "failure" if outcome in {"failed", "not_sent"} else None
     if any(marker in hay for marker in TERMINAL_BAD_MARKERS):
         return "failure"
     stage = str(row.get("stage") or "").lower()
@@ -108,6 +154,55 @@ def terminal_kind(row: dict[str, Any]) -> str | None:
     if row.get("terminal") is True or row.get("is_terminal") is True:
         return "success" if str(row.get("status", "")).lower() not in {"error", "failed", "timeout"} else "failure"
     return None
+
+
+def client_delivery_confirmed(row: dict[str, Any]) -> bool:
+    """Accept a future client-delivery claim only with independent evidence.
+
+    The current bridge never emits either field, so a Jivo HTTP acceptance stays
+    unconfirmed.  This narrow allowlist reserves an explicit contract for a
+    future receipt/acknowledgement integration without trusting a free-form flag.
+    """
+    return (
+        row.get("client_delivery_status") == "client_delivery_confirmed"
+        and row.get("client_delivery_evidence") in {"jivo_receipt", "client_acknowledgement"}
+    )
+
+
+def delivery_v1_lifecycle(events: list[dict[str, Any]]) -> tuple[bool, str | None]:
+    """Validate a delivery-v1 terminal lifecycle without inferring success.
+
+    A terminal Jivo acceptance is meaningful only after every projected stage
+    has occurred in order.  Shorter paths are deliberately limited to recorded
+    cancellation and failures where no terminal send was possible.
+    """
+    lifecycle = [stage_of(event) for event in events if event.get("schema") == DELIVERY_TRACE_SCHEMA]
+    terminal = next((event for event in reversed(events) if event.get("schema") == DELIVERY_TRACE_SCHEMA and stage_of(event) == "terminal_delivery"), None)
+    if terminal is None:
+        return False, "missing_terminal"
+    outcome = str(terminal.get("outcome") or "").lower()
+    error_class = str(terminal.get("error_class") or "none").lower()
+    if (
+        len(lifecycle) == len(DELIVERY_V1_FULL_LIFECYCLE)
+        and lifecycle[0] == "bridge_accepted"
+        and lifecycle[1] in {"api_completed", "api_failed"}
+        and tuple(lifecycle[2:]) == DELIVERY_V1_FULL_LIFECYCLE[2:]
+    ):
+        return True, None
+    if outcome == "not_sent" and error_class == "cancelled":
+        # Cancellation may interrupt any already-started prefix, but cannot
+        # skip/reorder it or claim a Jivo response that never arrived.
+        for api_stage in ("api_completed", "api_failed"):
+            prefix = ("bridge_accepted", api_stage, "terminal_selected", "jivo_send_attempted")
+            if tuple(lifecycle) in {(*prefix[:length], "terminal_delivery") for length in range(1, len(prefix) + 1)}:
+                return True, None
+    if tuple(lifecycle) == DELIVERY_V1_API_FAILURE_LIFECYCLE and outcome in {"failed", "not_sent"} and error_class in {"api_exception", "hard_timeout"}:
+        return True, None
+    if tuple(lifecycle) in DELIVERY_V1_PRE_SEND_FAILURE_LIFECYCLES and outcome == "failed" and error_class == "invalid_terminal":
+        return True, None
+    if tuple(lifecycle) in DELIVERY_V1_SELECTED_FAILURE_PREFIXES and outcome in {"failed", "not_sent"} and error_class in {"stale_event", "provider_config", "invalid_terminal"}:
+        return True, None
+    return False, "invalid_delivery_lifecycle"
 
 
 def is_static_trace(events: list[dict[str, Any]]) -> bool:
@@ -167,11 +262,22 @@ def percentile(values: list[float], pct: float) -> float | None:
     return round(ordered[lo] * (1 - frac) + ordered[hi] * frac, 3)
 
 
-def analyze_rows(rows: list[dict[str, Any]], malformed: list[dict[str, Any]] | None = None, trace_filter: str | None = None) -> dict[str, Any]:
+def analyze_rows(
+    rows: list[dict[str, Any]],
+    malformed: list[dict[str, Any]] | None = None,
+    trace_filter: str | None = None,
+    *,
+    strict_delivery_lifecycle: bool = False,
+) -> dict[str, Any]:
     malformed = malformed or []
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         tid = trace_id_of(row)
+        if tid is None:
+            # Invalid delivery-v1 references must not be emitted, even as a
+            # synthetic missing bucket, because that permits correlation keys
+            # outside the canonical privacy contract.
+            continue
         if trace_filter and tid != trace_filter:
             continue
         grouped[tid].append(row)
@@ -196,18 +302,46 @@ def analyze_rows(rows: list[dict[str, Any]], malformed: list[dict[str, Any]] | N
             latencies.append(latency)
 
         counters["static" if is_static_trace(events) else "real"] += 1
+        # A trace without terminal_delivery is unfinished, not an unconfirmed
+        # client delivery. Keep the result absent so consumers cannot mistake
+        # intermediate lifecycle evidence for a delivery verdict.
+        terminal_result = None
+        delivery_v1 = any(event.get("schema") == DELIVERY_TRACE_SCHEMA for event in events)
+        lifecycle_ok, lifecycle_error = delivery_v1_lifecycle(events) if delivery_v1 else (True, None)
+        if strict_delivery_lifecycle and not delivery_v1:
+            # Legacy traces remain useful informational evidence, but lack the
+            # explicit projection required to prove the complete Jivo lifecycle.
+            violations.append({"type": "legacy_trace_insufficient_for_strict_delivery_lifecycle", "trace_id": tid, "evidence": [safe_event(e) for e in events[-3:]]})
         if not terminals:
             counters["unfinished"] += 1
             violations.append({"type": "missing_terminal", "trace_id": tid, "evidence": [safe_event(e) for e in events[-3:]]})
         else:
             last_kind = terminals[-1][1]
-            counters["completed" if last_kind == "success" else "errors"] += 1
+            last_event = terminals[-1][2]
+            if delivery_v1 and not lifecycle_ok:
+                # Keep the raw terminal row observable in evidence, but do not
+                # turn an incomplete/reordered projection into acceptance.
+                violations.append({"type": lifecycle_error, "trace_id": tid, "evidence": [safe_event(e) for e in events]})
+            elif last_kind == "terminal_send_accepted":
+                counters["jivo_accepted"] += 1
+                if client_delivery_confirmed(last_event):
+                    counters["client_delivery_confirmed"] += 1
+                    terminal_result = "client_delivery_confirmed"
+                else:
+                    counters["client_delivery_unconfirmed"] += 1
+                    terminal_result = "client_delivery_unconfirmed"
+            elif last_kind == "failure":
+                counters["terminal_failures"] += 1
+                terminal_result = "terminal_send_failed"
+            else:
+                # Legacy rows have no delivery-v1 semantics; retain a separate
+                # count rather than describing them as client delivery.
+                counters["legacy_terminal_outcomes"] += 1
+                terminal_result = "legacy_terminal_outcome"
             if last_kind == "failure" and "timeout" in _haystack(terminals[-1][2]):
                 counters["timeouts"] += 1
         if len(terminals) > 1:
             violations.append({"type": "duplicate_terminal", "trace_id": tid, "evidence": [safe_event(e) for _, _, e in terminals]})
-        if accepted:
-            violations.append({"type": "accepted_async_present", "trace_id": tid, "evidence": [safe_event(e) for e in accepted[:3]]})
         for idx, kind, event in terminals:
             if kind == "success" and upstream_indexes and idx < min(upstream_indexes):
                 violations.append({"type": "final_before_upstream_response", "trace_id": tid, "evidence": [safe_event(event), safe_event(events[min(upstream_indexes)])]})
@@ -221,7 +355,13 @@ def analyze_rows(rows: list[dict[str, Any]], malformed: list[dict[str, Any]] | N
             "events": len(events),
             "kind": "static" if is_static_trace(events) else "real",
             "terminal_count": len(terminals),
-            "terminal_kind": terminals[-1][1] if terminals else None,
+            "terminal_kind": terminals[-1][1] if terminals and (not delivery_v1 or lifecycle_ok) else None,
+            "terminal_result": terminal_result,
+            "delivery_lifecycle_valid": lifecycle_ok if delivery_v1 else None,
+            # The bridge's async acknowledgement is progress evidence, not a
+            # delivery outcome. Keep it observable without making a completed
+            # trace fail strict audit.
+            "accepted_async_seen": bool(accepted),
             "latency_sec": latency,
             "stages": stages,
             "lines": [e.get("__line__") for e in events],
@@ -236,8 +376,11 @@ def analyze_rows(rows: list[dict[str, Any]], malformed: list[dict[str, Any]] | N
             "traces": len(grouped),
             "real_traces": counters["real"],
             "static_traces": counters["static"],
-            "completed": counters["completed"],
-            "errors": counters["errors"],
+            "jivo_accepted": counters["jivo_accepted"],
+            "client_delivery_confirmed": counters["client_delivery_confirmed"],
+            "client_delivery_unconfirmed": counters["client_delivery_unconfirmed"],
+            "terminal_failures": counters["terminal_failures"],
+            "legacy_terminal_outcomes": counters["legacy_terminal_outcomes"],
             "timeouts": counters["timeouts"],
             "unfinished": counters["unfinished"],
             "malformed_lines": len(malformed),
@@ -255,7 +398,12 @@ def print_human(result: dict[str, Any]) -> None:
     print("nmbot/Jivo trace analyzer")
     print("Сводка:")
     print(f"  событий: {s['events']}, traces: {s['traces']} (real: {s['real_traces']}, static: {s['static_traces']})")
-    print(f"  completed: {s['completed']}, errors: {s['errors']}, timeouts: {s['timeouts']}, unfinished: {s['unfinished']}")
+    print(
+        "  Jivo accepted: "
+        f"{s['jivo_accepted']}, client delivery confirmed: {s['client_delivery_confirmed']}, "
+        f"client delivery unconfirmed: {s['client_delivery_unconfirmed']}, "
+        f"terminal failures: {s['terminal_failures']}, timeouts: {s['timeouts']}, unfinished: {s['unfinished']}"
+    )
     lat = result["latency_sec"]
     print(f"  latency sec: min={lat['min']} p50={lat['p50']} p95={lat['p95']} max={lat['max']}")
     print("\nStage sequences:")
@@ -281,8 +429,7 @@ def self_test() -> int:
     ]
     result = analyze_rows(rows)
     assert result["summary"]["traces"] == 2
-    assert result["summary"]["completed"] == 1
-    assert any(v["type"] == "accepted_async_present" for v in result["violations"])
+    assert result["summary"]["legacy_terminal_outcomes"] == 1
     assert any(v["type"] == "missing_terminal" for v in result["violations"])
     print("self-test ok")
     return 0
@@ -302,7 +449,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.log_path:
         parser.error("log_path is required unless --self-test is used")
     rows, malformed = read_jsonl(args.log_path, args.last)
-    result = analyze_rows(rows, malformed, args.trace)
+    result = analyze_rows(rows, malformed, args.trace, strict_delivery_lifecycle=args.strict)
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
     else:

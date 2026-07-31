@@ -46,7 +46,7 @@ ACCEPTED_ASYNC_FINAL_DELIVERY_REQUIREMENTS = [
     [r"_post_event_to_jivo"],
     [r"delivery_role\s*=\s*[\"']final[\"']", r"delivery_role[^\n]+final"],
     [r"BOT_MESSAGE", r"INVITE_AGENT"],
-    [r"outcome\s*=.*sent", r"sent.*outcome", r"delivery_status\s*=\s*delivery_status", r"delivery_status.*sent"],
+    [r"terminal_send_accepted", r"delivery_status\s*=\s*delivery_status"],
 ]
 
 REGISTRY_REL_PATH = "config/nmbot_stage_map.json"
@@ -127,7 +127,7 @@ def find_runtime_requirement_refs(repo: Path, requirements: list[list[str]], *, 
     return refs
 
 
-def find_accepted_async_delivery_evidence(repo: Path, *, window: int = 360) -> tuple[list[Ref], list[Ref]]:
+def find_accepted_async_delivery_evidence(repo: Path, *, window: int = 600) -> tuple[list[Ref], list[Ref]]:
     """Return accepted_async refs and linked final-delivery evidence in one source file.
 
     `accepted_async` is allowed only as a fast webhook acknowledgement when the

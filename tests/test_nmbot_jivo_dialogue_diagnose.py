@@ -41,6 +41,93 @@ def test_complete_bridge_chain_is_delivery_complete_and_strict_passes(tmp_path: 
     assert "raw-chat-1" not in proc.stdout
 
 
+def test_delivery_v1_terminal_acceptance_is_not_client_delivery_success(tmp_path: Path):
+    log = tmp_path / "delivery.jsonl"
+    write_jsonl(log, [
+        {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123456", "stage": "bridge_accepted", "outcome": "accepted"},
+        {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123456", "stage": "api_completed", "outcome": "completed", "api_status": 200},
+        {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123456", "stage": "terminal_selected", "outcome": "selected"},
+        {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123456", "stage": "jivo_send_attempted", "outcome": "attempted"},
+        {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123456", "stage": "jivo_response", "outcome": "accepted_by_jivo", "jivo_status": 202},
+        {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123456", "stage": "terminal_delivery", "outcome": "terminal_send_accepted", "client_delivery_status": "client_delivery_unconfirmed"},
+    ])
+
+    proc = subprocess.run([sys.executable, str(SCRIPT), str(log), "--json", "--strict"], text=True, capture_output=True, check=False)
+
+    assert proc.returncode == 0
+    trace = json.loads(proc.stdout)["traces"][0]
+    assert trace["stage"] == "jivo_accepted"
+    assert trace["outcome"] == "terminal_send_accepted_client_delivery_unconfirmed"
+    assert trace["actual"]["terminal_kind"] == "terminal_send_accepted"
+    assert trace["actual"]["client_delivery_status"] == "client_delivery_unconfirmed"
+    assert "delivery_complete" not in proc.stdout
+
+
+def test_delivery_v1_invalid_trace_refs_are_dropped_before_grouping():
+    result = mod.diagnose_rows([
+        {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "not-a-canonical-ref", "stage": "terminal_delivery", "outcome": "terminal_send_accepted"},
+        {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123456-extra", "stage": "terminal_delivery", "outcome": "terminal_send_accepted"},
+        {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123456", "stage": "bridge_accepted", "outcome": "accepted"},
+        {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123456", "stage": "api_completed", "outcome": "completed", "api_status": 200},
+        {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123456", "stage": "terminal_delivery", "outcome": "terminal_send_accepted"},
+    ])
+
+    assert result["summary"] == {
+        "traces": 1,
+        "events": 3,
+        "malformed_lines": 0,
+        "audit_malformed_lines": 0,
+        "strict_failures": 1,
+        "coverage_gaps": 0,
+    }
+    assert [trace["trace_ref"] for trace in result["traces"]] == ["trace_abcdef123456"]
+    assert result["traces"][0]["stage"] == "delivery_lifecycle_invalid"
+    assert result["traces"][0]["actual"]["terminal_kind"] is None
+    assert result["coverage_gaps"] == []
+
+
+def test_delivery_v1_incomplete_or_reordered_lifecycle_strict_fails_without_jivo_acceptance(tmp_path: Path):
+    ref = "trace_abcdef123462"
+    for rows in (
+        [
+            {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "bridge_accepted", "outcome": "accepted"},
+            {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "api_completed", "outcome": "completed"},
+            {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "terminal_delivery", "outcome": "terminal_send_accepted"},
+        ],
+        [
+            {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "bridge_accepted", "outcome": "accepted"},
+            {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "terminal_selected", "outcome": "selected"},
+            {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "api_completed", "outcome": "completed"},
+            {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "jivo_send_attempted", "outcome": "attempted"},
+            {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "jivo_response", "outcome": "accepted_by_jivo", "jivo_status": 202},
+            {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "terminal_delivery", "outcome": "terminal_send_accepted"},
+        ],
+    ):
+        log = tmp_path / "delivery.jsonl"
+        write_jsonl(log, rows)
+        proc = subprocess.run([sys.executable, str(SCRIPT), str(log), "--json", "--strict"], text=True, capture_output=True, check=False)
+        data = json.loads(proc.stdout)
+        assert proc.returncode == 1
+        assert data["traces"][0]["stage"] == "delivery_lifecycle_invalid"
+        assert data["traces"][0]["actual"]["terminal_kind"] is None
+        assert "jivo_accepted" not in proc.stdout
+
+
+def test_delivery_v1_jivo_rejection_is_delivery_failure_not_upstream_failure():
+    result = mod.diagnose_rows([
+        {"__line__": 1, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123463", "stage": "bridge_accepted", "outcome": "accepted"},
+        {"__line__": 2, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123463", "stage": "api_completed", "outcome": "completed"},
+        {"__line__": 3, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123463", "stage": "terminal_selected", "outcome": "selected"},
+        {"__line__": 4, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123463", "stage": "jivo_send_attempted", "outcome": "attempted"},
+        {"__line__": 5, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123463", "stage": "jivo_response", "outcome": "rejected_by_jivo", "jivo_status": 403},
+        {"__line__": 6, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123463", "stage": "terminal_delivery", "outcome": "failed"},
+    ])
+    trace = result["traces"][0]
+    assert trace["stage"] == "transport_auth_or_http_failure"
+    assert trace["outcome"] == "transport_failed"
+    assert result["summary"]["strict_failures"] == 1
+
+
 def test_upstream_explicit_error_without_final_is_strict_failure(tmp_path: Path):
     log = tmp_path / "bridge.jsonl"
     write_jsonl(log, [

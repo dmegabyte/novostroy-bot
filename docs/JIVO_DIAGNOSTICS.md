@@ -258,6 +258,39 @@ fallback: отсутствие V1-подтверждения в diagnostics — 
 bash scripts/nmbot_jivo_audit.sh --last 200
 ```
 
+## Один локальный bridge smoke
+
+`scripts/nmbot_bridge_smoke.py` — отдельный diagnostic harness, не runtime
+клиент и не часть обычного production-потока. Он предназначен только для
+явно разрешённой локальной проверки пути API → bridge → Jivo: без `--live`
+сеть не вызывается, а с ним выполняется ровно один synthetic
+`CLIENT_MESSAGE` в literal loopback bridge (`127.0.0.1:8093` по умолчанию).
+Удалённые host'ы, URL в `--host` и небезопасные port'ы отклоняются.
+
+Перед запуском в окружении процесса должны быть только два нужных секрета:
+`JIVO_PROVIDER_TOKEN` и `NMBOT_N8N_BRIDGE_TOKEN`. Скрипт не читает `.env`, не
+принимает секреты в аргументах и не печатает/сохраняет токены, URL, payload,
+headers, synthetic IDs или текст. Его единственный результат — bounded JSON:
+HTTP status, `accepted_async` и `trace_ref`, только если bridge сам его вернул.
+`accepted_async` означает лишь приём bridge, а не terminal delivery.
+
+```bash
+python3 scripts/nmbot_bridge_smoke.py --live
+```
+
+После единственного smoke подтверждайте terminal delivery отдельно, read-only
+audit-маршрутом (он читает delivery trace с VPS, но не вызывает Jivo):
+
+```bash
+bash scripts/nmbot_jivo_audit.sh --delivery-trace
+```
+
+Для copy/paste этой postcondition-команды без HTTP-запроса есть также:
+
+```bash
+python3 scripts/nmbot_bridge_smoke.py --delivery-trace
+```
+
 Локальный анализ файла:
 
 ```bash
@@ -440,9 +473,11 @@ backup/sync файла больше не используется: примен�
 `bridge-deploy`). После deploy проверить `:8093/health`, затем выполнить один
 Jivo turn. В trace должны появиться несколько
 `stage=status_update` и соответствующие `jivo_response_returned` с
-`delivery_role=status`, после них — один финальный `jivo_response_returned` с
-`delivery_role=final`. Нельзя считать интеграцию подтверждённой только по
-`accepted_async` или unit-status.
+`delivery_role=status`, после них — один финальный `terminal_delivery` с
+`terminal_event=BOT_MESSAGE` или `INVITE_AGENT`. `accepted_async` — только
+промежуточный транспортный ack. `terminal_send_accepted` подтверждает, что
+Jivo API принял финальное событие, но не доказывает его показ клиенту: для
+этого нужно отдельное Jivo-side evidence.
 
 Откат конфигурации без удаления кода:
 
@@ -455,8 +490,11 @@ systemctl --user restart novostroy-bot-n8n-bridge.service
 Trace должен позволять связать безопасные `trace_id`/`event_id_ref` с этапами:
 
 ```text
-request_received -> upstream_request_start -> upstream_response
--> jivo_request_start -> jivo_response_returned(sent|delivered)
+bridge_accepted -> api_completed|api_failed -> terminal_selected
+-> jivo_send_attempted -> jivo_response -> terminal_delivery
+
+terminal_delivery=terminal_send_accepted + client_delivery_unconfirmed
+не следует называть delivery_complete без независимого Jivo-side receipt.
 ```
 
 Скрипты намеренно не печатают текст клиента, payload, токены и Authorization.

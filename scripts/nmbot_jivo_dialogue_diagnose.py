@@ -426,6 +426,21 @@ def _is_success_http(row: dict[str, Any]) -> bool:
     return status is not None and 200 <= status < 300
 
 
+def _is_jivo_delivery_failure(row: dict[str, Any]) -> bool:
+    """Recognize a terminal Jivo rejection without confusing it with API failure."""
+    stage = _stage_of(row).lower()
+    if stage not in {"jivo_response", "jivo_response_returned", "terminal_delivery"}:
+        return False
+    try:
+        jivo_status = int(row.get("jivo_status"))
+    except (TypeError, ValueError):
+        jivo_status = None
+    if jivo_status is not None and jivo_status >= 400:
+        return True
+    outcome = str(row.get("outcome") or "").lower()
+    return any(marker in outcome for marker in ("failed", "failure", "rejected", "error", "timeout", "not_sent"))
+
+
 def _matching_audit_records(
     audit_rows: list[dict[str, Any]],
     *,
@@ -485,22 +500,33 @@ def _runtime_actual(audit_rows: list[dict[str, Any]]) -> dict[str, Any]:
 def _classify(events: list[dict[str, Any]], audit_rows: list[dict[str, Any]]) -> tuple[str, str, str, str, bool]:
     terminals = [(idx, trace_analyze.terminal_kind(row), row) for idx, row in enumerate(events) if trace_analyze.terminal_kind(row)]
     upstream = [row for row in events if trace_analyze.is_upstream_response(row)]
-    delivery_rows = [row for row in events if _stage_of(row) == "jivo_response_returned" or "jivo" in _haystack(row)]
+    delivery_v1 = any(row.get("schema") == trace_analyze.DELIVERY_TRACE_SCHEMA for row in events)
+    lifecycle_ok, lifecycle_error = trace_analyze.delivery_v1_lifecycle(events) if delivery_v1 else (True, None)
+    delivery_rows = [row for row in events if _stage_of(row) in {"jivo_response", "jivo_response_returned", "terminal_delivery"} or "jivo" in _haystack(row)]
     has_chat_closed = any("chat_closed" in _haystack(row) for row in events) or any("chat_closed" in str(row.get("terminal_event", "")).lower() for row in audit_rows)
 
     audit_stage = _audit_stage(audit_rows)
     upstream_fail = any(_is_failureish(row) for row in upstream)
-    delivery_fail = any(_is_failureish(row) and ("jivo" in _haystack(row) or _stage_of(row) == "jivo_response_returned") for row in delivery_rows)
+    delivery_fail = any(_is_jivo_delivery_failure(row) for row in delivery_rows)
     terminal_failure = bool(terminals and terminals[-1][1] == "failure")
     has_terminal_success = bool(terminals and terminals[-1][1] == "success")
+    has_terminal_send_accepted = bool(terminals and terminals[-1][1] == "terminal_send_accepted")
     upstream_success = any(_is_success_http(row) or not _is_failureish(row) for row in upstream)
 
     if has_chat_closed:
         return "chat_closed", "non_client_answer_terminal", "high", "No client answer expected; keep closed-chat noise separate from answer failures.", False
+    if delivery_v1 and not lifecycle_ok:
+        return "delivery_lifecycle_invalid", str(lifecycle_error or "invalid_delivery_lifecycle"), "high", "Use a complete ordered delivery-v1 lifecycle before making any Jivo acceptance claim.", True
     if delivery_fail:
         return "transport_auth_or_http_failure", "transport_failed", "high", "Check bridge/Jivo delivery HTTP status and auth configuration from safe logs.", True
     if upstream_fail or terminal_failure:
         return "upstream_failure", "upstream_failed", "high", "Check API/run_chat upstream error path using sanitized server logs.", True
+    if has_terminal_send_accepted:
+        # delivery-v1's accepted terminal proves only that Jivo accepted the
+        # outbound POST. It does not prove client receipt or rendering.
+        if not upstream:
+            return "upstream_missing", "terminal_send_accepted_client_delivery_unconfirmed", "medium", "Add or inspect safe upstream evidence; client delivery remains unconfirmed without an independent receipt.", False
+        return "jivo_accepted", "terminal_send_accepted_client_delivery_unconfirmed", "high", "Jivo accepted the terminal send; client delivery remains unconfirmed without independent receipt evidence.", False
     if audit_stage in {"api_safe_fallback", "main_search_clarify", "main_search", "operator_handoff", "phone_captured"}:
         return audit_stage, "completed_with_audit", "high", "Use audit stage to inspect the named layer; do not infer raw dialogue content.", False
     if has_terminal_success:
@@ -529,6 +555,10 @@ def diagnose_rows(
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         trace_id = trace_analyze.trace_id_of(row)
+        # delivery-v1 is keyed only by a canonical privacy-safe trace_ref.
+        # Invalid refs return None and must not form a synthetic group.
+        if trace_id is None:
+            continue
         if trace_filter and trace_id != trace_filter:
             continue
         grouped[trace_id].append(row)
@@ -546,14 +576,19 @@ def diagnose_rows(
         turn_refs = _safe_turn_refs(events)
         matched_audit = _matching_audit_records(audit_rows, trace_ref=trace_ref, turn_refs=turn_refs)
         stage, outcome, confidence, next_check, strict_failure = _classify(events, matched_audit)
-        terminal_success = any(trace_analyze.terminal_kind(row) == "success" for row in events)
-        if terminal_success and not matched_audit:
+        delivery_v1 = any(row.get("schema") == trace_analyze.DELIVERY_TRACE_SCHEMA for row in events)
+        lifecycle_ok, _ = trace_analyze.delivery_v1_lifecycle(events) if delivery_v1 else (True, None)
+        terminal_send_accepted = lifecycle_ok and any(trace_analyze.terminal_kind(row) == "terminal_send_accepted" for row in events)
+        terminal_success = lifecycle_ok and any(trace_analyze.terminal_kind(row) == "success" for row in events)
+        if (terminal_send_accepted or terminal_success) and not matched_audit:
             coverage_gaps.append({"trace_ref": trace_ref, "gap": "missing_sanitized_turn_audit"})
         first_ts = next((_ts_of(row) for row in events if _ts_of(row)), None)
         last_ts = next((_ts_of(row) for row in reversed(events) if _ts_of(row)), None)
         actual = {
             "bridge_events": len(events),
-            "terminal_kind": next((trace_analyze.terminal_kind(row) for row in reversed(events) if trace_analyze.terminal_kind(row)), None),
+            "terminal_kind": next((trace_analyze.terminal_kind(row) for row in reversed(events) if lifecycle_ok and trace_analyze.terminal_kind(row)), None),
+            "delivery_lifecycle_valid": lifecycle_ok if delivery_v1 else None,
+            "client_delivery_status": next((str(row.get("client_delivery_status")) for row in reversed(events) if row.get("client_delivery_status") in {"client_delivery_unconfirmed", "client_delivery_confirmed"}), "client_delivery_unconfirmed" if terminal_send_accepted else None),
             "upstream_events": sum(1 for row in events if trace_analyze.is_upstream_response(row)),
             "accepted_async_seen": any(trace_analyze.is_accepted_async(row) for row in events),
             "audit_events": len(matched_audit),
@@ -607,8 +642,10 @@ def print_human(result: dict[str, Any]) -> None:
         print(f"  Contract: {CONTRACTS['bridge_transport']}")
         print(f"  Desired: {trace['desired']}")
         print(f"  Next: {trace['next_check']}")
-        if actual.get("terminal_kind") == "success" and not trace.get("audit"):
-            print("  Coverage gap: terminal bridge delivery exists, but no matching sanitized audit event was supplied.")
+        if actual.get("terminal_kind") == "terminal_send_accepted":
+            print("  Delivery: Jivo accepted the terminal send; client delivery is unconfirmed without independent receipt evidence.")
+        elif actual.get("terminal_kind") == "success" and not trace.get("audit"):
+            print("  Coverage gap: terminal bridge outcome exists, but no matching sanitized audit event was supplied.")
 
 
 def print_audit_only_human(result: dict[str, Any]) -> None:

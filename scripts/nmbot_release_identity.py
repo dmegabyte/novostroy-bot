@@ -39,7 +39,6 @@ DEFAULT_TRACKED_FILES = tuple(sorted((
     "scripts/nmbot_dialogue_report.py",
     "scripts/nmbot_gateway_client.py",
     "scripts/nmbot_planner_context.py",
-    "scripts/nmbot_release.py",
     "scripts/nmbot_release_identity.py",
     "scripts/nmbot_runtime_adapter.py",
     *(str(path.relative_to(ROOT)) for path in (ROOT / "nmbot_v2").glob("*.py")),

@@ -14,7 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from nmbot_v0 import V0State, V0TurnProcessor
 from nmbot_v0.runtime import OPERATOR_PHONE_QUESTION, SELECTED_OBJECT_PRESENTATION_QUESTION
-from nmbot_v2.contracts import OptionCard
+from nmbot_v0.contracts import OptionCard
 
 
 JsonDict = dict[str, Any]
@@ -34,40 +34,14 @@ def _search_decision() -> JsonDict:
         },
         "search": {
             "facts": [
-                {"name": "ЖК Первый", "location": "Москва", "min_price": 9_800_000, "finishing": "с отделкой", "ready": "сдан", "school": True, "kindergarten": True},
-                {"name": "ЖК Второй", "location": "Новая Москва", "min_price": 10_500_000, "finishing": "white box", "park_near": True},
-                {"name": "ЖК Третий", "location": "Москва", "min_price": 12_000_000, "ready": "ready"},
-                {"name": "ЖК Четвёртый", "location": "Москва", "min_price": 13_000_000},
+                {"name": "ЖК Первый", "location": "Москва", "rooms": "2", "min_price": 9_800_000, "finishing": "с отделкой", "ready": "сдан", "school": True, "kindergarten": True},
+                {"name": "ЖК Второй", "location": "Новая Москва", "rooms": "2", "min_price": 9_900_000, "finishing": "white box", "park_near": True},
+                {"name": "ЖК Третий", "location": "Москва", "rooms": "2", "min_price": 10_000_000, "ready": "ready"},
             ],
             "near": [],
             "missing": [],
             "params": {"max_price": 10_000_000},
         },
-    }
-
-
-def _successful_answer(brief: JsonDict) -> JsonDict:
-    allowed = brief["allowed_cards"]
-    options = []
-    for card in allowed:
-        parts = []
-        if card.get("location"):
-            parts.append(str(card["location"]))
-        if card.get("price_min"):
-            parts.append(f"от {int(card['price_min']) // 1_000_000} млн")
-        if card.get("finishing"):
-            parts.append(str(card["finishing"]))
-        if card.get("ready"):
-            parts.append(str(card["ready"]))
-        options.append({"name": card["name"]})
-    return {
-        "answer_kind": "search_many",
-        "scope": "shortlist",
-        "intro": "Нашла три понятных варианта.",
-        "options": options,
-        "recommendation": "Я бы начала с первого: там есть отделка и понятный бюджет.",
-        "missing_note": "",
-        "final_question": "Какой вариант хотите разобрать подробнее?",
     }
 
 
@@ -88,22 +62,7 @@ def run_successful_flow() -> JsonDict:
             }
         return _search_decision()
 
-    def answer(brief: JsonDict) -> JsonDict:
-        calls.append("answer")
-        if brief["decision"]["action"] == "selected_object":
-            card = brief["allowed_cards"][0]
-            return {
-                "answer_kind": "selected_object",
-                "scope": "one_card",
-                "intro": f"По {card['name']} в сохранённой подборке есть подтверждённые факты.",
-                "options": [{"name": card["name"]}],
-                "recommendation": "",
-                "missing_note": "",
-                "final_question": FAMILY_SELECTED_CTA,
-            }
-        return _successful_answer(brief)
-
-    processor = V0TurnProcessor(scenario_search=scenario_search, answer=answer)
+    processor = V0TurnProcessor(scenario_search=scenario_search)
     first = processor.process("Подбери двушку для семьи до 10 млн", conversation_ref="fixture-success")
     second = processor.process("Расскажи про первый", state=first.state, conversation_ref="fixture-success")
 
@@ -112,10 +71,10 @@ def run_successful_flow() -> JsonDict:
         second.ok,
         [card.name for card in first.state.visible_options] == ["ЖК Первый", "ЖК Второй", "ЖК Третий"],
         "рядом: школа, детский сад" in first.message,
-        "выше указанного бюджета" in first.message,
+        "вписывается в указанный бюджет" in first.message,
         FAMILY_SELECTED_CTA in second.message,
         second.state.selected_option_name == "ЖК Первый",
-        calls == ["scenario_search", "answer", "scenario_search", "answer"],
+        calls == ["scenario_search", "scenario_search"],
     ]
     return _scenario_output("successful_flow", checks, [first, second], calls=calls)
 
@@ -133,18 +92,7 @@ def run_missing_fact() -> JsonDict:
             "search": {"facts": [], "near": [], "missing": ["parking_price"], "params": {}},
         }
 
-    def answer(brief: JsonDict) -> JsonDict:
-        return {
-            "answer_kind": "operator",
-            "scope": "operator_phone",
-            "intro": "Стоимость места пока не указана, поэтому цену не назову.",
-            "options": [],
-            "recommendation": "",
-            "missing_note": "Оператор сможет проверить цену паркинга по актуальным данным.",
-            "final_question": brief["decision"]["operator_handoff_template"],
-        }
-
-    result = V0TurnProcessor(scenario_search=scenario_search, answer=answer).process("Сколько стоит паркинг?", conversation_ref="fixture-missing")
+    result = V0TurnProcessor(scenario_search=scenario_search).process("Сколько стоит паркинг?", conversation_ref="fixture-missing")
     checks = [result.ok, result.answer is not None, result.answer.final_question == OPERATOR_PHONE_QUESTION, OPERATOR_PHONE_QUESTION in result.message]
     return _scenario_output("missing_fact", checks, [result])
 
@@ -155,24 +103,13 @@ def run_unknown_card() -> JsonDict:
     def scenario_search(_context: JsonDict) -> JsonDict:
         return {"decision": {"action": "current_options", "viewpoint": "life"}}
 
-    def answer(_brief: JsonDict) -> JsonDict:
-        return {
-            "answer_kind": "search_many",
-            "scope": "shortlist",
-            "intro": "Вот вариант.",
-            "options": [{"name": "ЖК Чужой"}],
-            "recommendation": "",
-            "missing_note": "",
-            "final_question": "Разобрать подробнее?",
-        }
-
-    result = V0TurnProcessor(scenario_search=scenario_search, answer=answer).process("А что по ним?", state=initial, conversation_ref="fixture-unknown-card")
+    result = V0TurnProcessor(scenario_search=scenario_search).process("А что по ним?", state=initial, conversation_ref="fixture-unknown-card")
     checks = [
-        result.ok is False,
-        result.error_code == "invalid_answer_output",
-        result.state is initial,
+        result.ok is True,
+        result.error_code is None,
         result.state.visible_options == initial.visible_options,
-        OPERATOR_PHONE_QUESTION in result.message,
+        [option["name"] for option in result.answer.options] == ["ЖК Свой"],
+        "ЖК «Чужой»" not in result.message,
     ]
     return _scenario_output("unknown_card", checks, [result])
 
@@ -196,19 +133,7 @@ def run_rental_third_typo_accept() -> JsonDict:
             ], "near": [], "missing": [], "params": {"budget": "30 млн"}},
         }
 
-    def answer(brief: JsonDict) -> JsonDict:
-        scope = brief["decision"]["expected_scope"]
-        return {
-            "answer_kind": brief["decision"]["expected_answer_kind"],
-            "scope": scope,
-            "intro": "runtime replaces this",
-            "options": [{"name": card["name"]} for card in brief["allowed_cards"]] if scope in {"shortlist", "one_card"} else [],
-            "recommendation": "",
-            "missing_note": "",
-            "final_question": brief["decision"]["cta_template"],
-        }
-
-    processor = V0TurnProcessor(scenario_search=scenario_search, answer=answer)
+    processor = V0TurnProcessor(scenario_search=scenario_search)
     first = processor.process("под сдачу что то есть, у меня на руках 30 млн", conversation_ref="fixture-rental-typo")
     second = processor.process("третий", state=first.state, conversation_ref="fixture-rental-typo")
     third = processor.process("хчоу", state=second.state, conversation_ref="fixture-rental-typo")
@@ -225,19 +150,6 @@ def run_rental_third_typo_accept() -> JsonDict:
     return _scenario_output("rental_third_typo_accept", checks, [first, second, third], calls=calls)
 
 
-def _names_only_answer(brief: JsonDict) -> JsonDict:
-    scope = brief["decision"]["expected_scope"]
-    return {
-        "answer_kind": brief["decision"]["expected_answer_kind"],
-        "scope": scope,
-        "intro": "runtime replaces this",
-        "options": [{"name": card["name"]} for card in brief["allowed_cards"]] if scope in {"shortlist", "one_card"} else [],
-        "recommendation": "",
-        "missing_note": "",
-        "final_question": brief["decision"]["cta_template"],
-    }
-
-
 def run_ready_near_only() -> JsonDict:
     def scenario_search(_context: JsonDict) -> JsonDict:
         return {
@@ -250,12 +162,12 @@ def run_ready_near_only() -> JsonDict:
             },
         }
 
-    result = V0TurnProcessor(scenario_search=scenario_search, answer=_names_only_answer).process("Нужен сданный дом", conversation_ref="fixture-ready-near")
+    result = V0TurnProcessor(scenario_search=scenario_search).process("Нужен сданный дом", conversation_ref="fixture-ready-near")
     checks = [
-        result.ok,
-        [card.name for card in result.state.visible_options] == ["ЖК Альтернатива"],
-        result.state.visible_options[0].is_near if result.state.visible_options else False,
-        "Точного совпадения" in result.message or "Точных совпадений" in result.message,
+        result.ok is False,
+        result.error_code == "invalid_search_output",
+        result.state == V0State(),
+        "ЖК «Альтернатива»" not in result.message,
         "ЖК «Будущий»" not in result.message,
     ]
     return _scenario_output("ready_near_only", checks, [result])
@@ -273,7 +185,7 @@ def run_financing_check_all() -> JsonDict:
             }
         return {"decision": {"action": "current_options", "viewpoint": "financing", "followup_outcome": "accept", "confirmed_action": "check_current_options_financing", "confirmed_subject": "all_current_options"}, "search": {}}
 
-    processor = V0TurnProcessor(scenario_search=scenario_search, answer=_names_only_answer)
+    processor = V0TurnProcessor(scenario_search=scenario_search)
     first = processor.process("Ипотека без первоначального взноса", conversation_ref="fixture-financing-all")
     second = processor.process("проверьте по всем вариантам", state=first.state, conversation_ref="fixture-financing-all")
     checks = [
@@ -295,7 +207,7 @@ def run_named_first_turn_exact() -> JsonDict:
             "search": {"facts": [{"name": "ЖК Точный", "location": "Москва", "min_price": 8_000_000, "finishing": "с отделкой", "delivered": True}], "near": [], "missing": [], "params": {}},
         }
 
-    result = V0TurnProcessor(scenario_search=scenario_search, answer=_names_only_answer).process("Расскажите про ЖК Точный", conversation_ref="fixture-named-exact")
+    result = V0TurnProcessor(scenario_search=scenario_search).process("Расскажите про ЖК Точный", conversation_ref="fixture-named-exact")
     checks = [
         result.ok,
         result.state.selected_option_name == "ЖК Точный",
@@ -316,7 +228,7 @@ def run_current_options_cheapest() -> JsonDict:
     def scenario_search(_context: JsonDict) -> JsonDict:
         return {"decision": {"action": "current_options", "viewpoint": "life", "comparison_metric": "price_min"}, "search": {}}
 
-    result = V0TurnProcessor(scenario_search=scenario_search, answer=_names_only_answer).process("Какой самый дешёвый?", state=state, conversation_ref="fixture-cheapest")
+    result = V0TurnProcessor(scenario_search=scenario_search).process("Какой самый дешёвый?", state=state, conversation_ref="fixture-cheapest")
     checks = [
         result.ok,
         len(result.answer.options) == 1 if result.answer else False,

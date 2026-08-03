@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
-from nmbot_v2.contracts import LotExample, OptionCard, SearchResult
+from .contracts import LotExample, OptionCard, SearchResult
 
 
 @dataclass(frozen=True)

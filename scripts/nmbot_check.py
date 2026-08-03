@@ -15,7 +15,13 @@ from urllib.parse import urlsplit, urlunsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = ROOT / "tests" / "nmbot_check_manifest.yaml"
-SUPPORTED_SCOPES = {"docs", "contracts", "v0", "v1", "v2", "runtime", "audit", "quality"}
+SUPPORTED_SCOPES = {
+    "docs", "contracts", "v0", "v1", "v2", "v3", "runtime", "audit",
+    "quality", "artifact", "isolation",
+}
+TIER_ALIASES = {
+    "release": ("docs", "contracts", "v0", "v1", "v2", "v3", "runtime", "audit", "quality", "artifact", "isolation"),
+}
 DOCS_ROUTE_HEADINGS = (
     "## 1. Start and understand",
     "## 2. Build and verify",
@@ -292,34 +298,42 @@ def validate_documentation_structure(root: Path = ROOT) -> list[str]:
     return [*_validate_docs_readme(root), *_validate_documentation_owners(root)]
 
 
-def run_scopes(scopes: list[str], *, manifest_path: Path, dry_run: bool) -> tuple[int, list[dict[str, Any]]]:
+def run_scopes(
+    scopes: list[str], *, manifest_path: Path, dry_run: bool,
+    emit_output: bool = True,
+) -> tuple[int, list[dict[str, Any]]]:
     manifest = load_and_validate_manifest(manifest_path)
-    unknown = [scope for scope in scopes if scope not in manifest]
+    expanded_scopes = [expanded for scope in scopes for expanded in TIER_ALIASES.get(scope, (scope,))]
+    unknown = [scope for scope in expanded_scopes if scope not in manifest]
     if unknown:
         raise ManifestError(f"unknown scope: {', '.join(unknown)}")
     results: list[dict[str, Any]] = []
     exit_code = 0
-    for scope in scopes:
+    for scope in expanded_scopes:
         for command in manifest[scope]:
             record = {"scope": scope, "name": command["name"], "argv": command["argv"], "status": "skipped" if dry_run else "run"}
             if dry_run:
-                print(f"SKIPPED {scope}:{command['name']} — dry-run")
+                if emit_output:
+                    print(f"SKIPPED {scope}:{command['name']} — dry-run")
                 results.append(record)
                 continue
-            print(f"RUN {scope}:{command['name']}")
+            if emit_output:
+                print(f"RUN {scope}:{command['name']}")
             proc = subprocess.run(command["argv"], cwd=ROOT, text=True, capture_output=True, check=False)
             record.update({"returncode": proc.returncode, "stdout": proc.stdout[-4000:], "stderr": proc.stderr[-4000:]})
-            if proc.stdout:
+            if emit_output and proc.stdout:
                 print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
-            if proc.stderr:
+            if emit_output and proc.stderr:
                 print(proc.stderr, end="" if proc.stderr.endswith("\n") else "\n", file=sys.stderr)
             if proc.returncode == 0:
                 record["status"] = "passed"
-                print(f"PASSED {scope}:{command['name']}")
+                if emit_output:
+                    print(f"PASSED {scope}:{command['name']}")
             else:
                 record["status"] = "failed"
                 exit_code = proc.returncode or 1
-                print(f"FAILED {scope}:{command['name']} rc={proc.returncode}")
+                if emit_output:
+                    print(f"FAILED {scope}:{command['name']} rc={proc.returncode}")
                 results.append(record)
                 return exit_code, results
             results.append(record)
@@ -328,7 +342,13 @@ def run_scopes(scopes: list[str], *, manifest_path: Path, dry_run: bool) -> tupl
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run local read-only nmbot fast checks from manifest.")
-    parser.add_argument("scopes", nargs="*", help="docs/contracts/v0/v1/v2/runtime/audit/quality")
+    parser.add_argument(
+        "scopes", nargs="*",
+        help=(
+            "scopes: docs/contracts/v0/v1/v2/v3/runtime/audit/quality/artifact/isolation; "
+            "release: docs+contracts+v0+v1+v2+v3+runtime+audit+quality+artifact+isolation"
+        ),
+    )
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--json", action="store_true")
@@ -338,7 +358,10 @@ def main(argv: list[str] | None = None) -> int:
         return verify_docs()
     selected = args.scopes or ["docs"]
     try:
-        code, results = run_scopes(selected, manifest_path=args.manifest, dry_run=args.dry_run)
+        code, results = run_scopes(
+            selected, manifest_path=args.manifest, dry_run=args.dry_run,
+            emit_output=not args.json,
+        )
     except ManifestError as exc:
         if args.json:
             print(json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False, sort_keys=True))

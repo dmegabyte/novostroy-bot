@@ -26,7 +26,7 @@ OUTPUT_SCHEMA = "nmbot.navigation.v1"
 DEFAULT_MANIFEST = Path("config/nmbot_retrieval_sources.json")
 STAGE_MAP_PATH = Path("config/nmbot_stage_map.json")
 CONTEXT_PACKS_PATH = Path("docs/NMBOT_CONTEXT_PACKS.md")
-MAX_RESULTS = 3
+MAX_RESULTS = 5
 RAW_FALLBACK_LIMIT = 12
 DOC_WORDS = {
     "doc", "docs", "documentation", "document", "contract", "contracts",
@@ -122,24 +122,44 @@ def load_stage_map(*, root: Path = ROOT) -> dict[str, Any]:
     return data
 
 
-def _line_for_text(path: str, needle: str, *, root: Path) -> int:
-    lines = _repo_path(path, root=root).read_text(encoding="utf-8").splitlines()
+def _cached_source(path: str, *, root: Path, source_cache: dict[str, dict[str, Any]] | None = None) -> dict[str, Any]:
+    if source_cache is None:
+        source_cache = {}
+    cached = source_cache.get(path)
+    if cached is None:
+        target = _repo_path(path, root=root)
+        text = target.read_text(encoding="utf-8")
+        cached = {"target": target, "text": text, "hash": sha256_text(text)}
+        source_cache[path] = cached
+    return cached
+
+
+def _cached_ast(path: str, *, root: Path, source_cache: dict[str, dict[str, Any]] | None = None) -> ast.AST:
+    cached = _cached_source(path, root=root, source_cache=source_cache)
+    tree = cached.get("ast")
+    if tree is None:
+        tree = ast.parse(cached["text"], filename=path)
+        cached["ast"] = tree
+    return tree
+
+
+def _line_for_text(path: str, needle: str, *, root: Path, source_cache: dict[str, dict[str, Any]] | None = None) -> int:
+    lines = _cached_source(path, root=root, source_cache=source_cache)["text"].splitlines()
     for index, line in enumerate(lines, start=1):
         if needle in line:
             return index
     raise NavigationError(f"anchor not found in {path}: {needle}")
 
 
-def _line_count(path: str, *, root: Path) -> int:
-    return max(1, len(_repo_path(path, root=root).read_text(encoding="utf-8").splitlines()))
+def _line_count(path: str, *, root: Path, source_cache: dict[str, dict[str, Any]] | None = None) -> int:
+    return max(1, len(_cached_source(path, root=root, source_cache=source_cache)["text"].splitlines()))
 
 
-def _ast_symbol_span(path: str, symbol: str, *, root: Path) -> tuple[int, int, str]:
+def _ast_symbol_span(path: str, symbol: str, *, root: Path, source_cache: dict[str, dict[str, Any]] | None = None) -> tuple[int, int, str]:
     if not IDENT_RE.fullmatch(symbol):
         raise NavigationError(f"source_symbol must be a Python identifier in {path}: {symbol}")
-    text = _repo_path(path, root=root).read_text(encoding="utf-8")
     try:
-        tree = ast.parse(text, filename=path)
+        tree = _cached_ast(path, root=root, source_cache=source_cache)
     except SyntaxError as exc:
         raise NavigationError(f"AST parse failed for stage source {path}: line {exc.lineno}") from exc
     matches = [
@@ -175,7 +195,7 @@ def _expand_path_id(path_id: str, stage_map: dict[str, Any], *, stack: tuple[str
     return stage_ids
 
 
-def _stage_records(sources: list[dict[str, Any]], *, root: Path) -> list[dict[str, Any]]:
+def _stage_records(sources: list[dict[str, Any]], *, root: Path, source_cache: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     active = _active_path_map(sources)
     stage_map = load_stage_map(root=root)
     records: list[dict[str, Any]] = []
@@ -195,14 +215,14 @@ def _stage_records(sources: list[dict[str, Any]], *, root: Path) -> list[dict[st
                 continue
             if path not in active:
                 raise NavigationError(f"stage {stage_id} {field} is not active manifest path: {path}")
-            target = _repo_path(path, root=root)
+            cached = _cached_source(path, root=root, source_cache=source_cache)
             source_symbol = stage.get("source_symbol")
             start_line = 1
-            end_line = _line_count(path, root=root)
+            end_line = _line_count(path, root=root, source_cache=source_cache)
             symbol_type = None
             if isinstance(source_symbol, str) and source_symbol.strip():
                 if field == "source":
-                    start_line, end_line, symbol_type = _ast_symbol_span(path, source_symbol.strip(), root=root)
+                    start_line, end_line, symbol_type = _ast_symbol_span(path, source_symbol.strip(), root=root, source_cache=source_cache)
                 else:
                     source_symbol = source_symbol.strip()
             elif field == "source":
@@ -220,33 +240,39 @@ def _stage_records(sources: list[dict[str, Any]], *, root: Path) -> list[dict[st
                 "payload_stage": stage.get("payload_stage"),
                 "source_symbol": source_symbol,
                 "source_symbol_type": symbol_type,
-                "source_hash": sha256_text(target.read_text(encoding="utf-8")),
+                "source_hash": cached["hash"],
                 "terms": f"{stage_id} {field} {path} {stage.get('purpose','')} {stage.get('payload_stage','')} {stage.get('owner','')}",
             })
     return records
 
 
-def _find_related_test(symbol: str, source_path: str, active: dict[str, dict[str, Any]], *, root: Path) -> str | None:
+def _find_related_test(symbol: str, source_path: str, active: dict[str, dict[str, Any]], *, root: Path, test_texts: dict[str, str] | None = None, source_cache: dict[str, dict[str, Any]] | None = None) -> str | None:
     stem = Path(source_path).stem
     candidates = [p for p, meta in active.items() if meta.get("type") == "test" and p.endswith(".py")]
     candidates.sort(key=lambda p: (0 if stem in Path(p).stem else 1, p))
     for path in candidates:
-        text = _repo_path(path, root=root).read_text(encoding="utf-8")
+        text = test_texts[path] if test_texts is not None else _cached_source(path, root=root, source_cache=source_cache)["text"]
         if symbol in text or stem in Path(path).stem:
             return path
     return None
 
 
-def _symbol_records(sources: list[dict[str, Any]], *, root: Path) -> list[dict[str, Any]]:
+def _symbol_records(sources: list[dict[str, Any]], *, root: Path, source_cache: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     active = _active_path_map(sources)
+    test_texts = {
+        path: _cached_source(path, root=root, source_cache=source_cache)["text"]
+        for path, meta in active.items()
+        if meta.get("type") == "test" and path.endswith(".py")
+    }
     records: list[dict[str, Any]] = []
     for item in sources:
         path = item["path"]
         if item.get("type") != "python" or not path.endswith(".py"):
             continue
-        text = _repo_path(path, root=root).read_text(encoding="utf-8")
+        cached = _cached_source(path, root=root, source_cache=source_cache)
+        text = cached["text"]
         try:
-            tree = ast.parse(text, filename=path)
+            tree = _cached_ast(path, root=root, source_cache=source_cache)
         except SyntaxError as exc:
             raise NavigationError(f"AST parse failed for active Python source {path}: line {exc.lineno}") from exc
         for node in ast.walk(tree):
@@ -263,8 +289,8 @@ def _symbol_records(sources: list[dict[str, Any]], *, root: Path) -> list[dict[s
                 "start_line": start,
                 "end_line": end,
                 "owner": item.get("owner"),
-                "related_test": _find_related_test(symbol, path, active, root=root),
-                "source_hash": sha256_text(text),
+                "related_test": _find_related_test(symbol, path, active, root=root, test_texts=test_texts),
+                "source_hash": cached["hash"],
                 "terms": f"{symbol} {path} {item.get('module','')} {item.get('owner','')}",
             })
     return records
@@ -305,15 +331,16 @@ def _diagnostic_literal_role(stack: list[ast.AST]) -> str:
     return "reference"
 
 
-def _diagnostic_code_records(sources: list[dict[str, Any]], *, root: Path) -> list[dict[str, Any]]:
+def _diagnostic_code_records(sources: list[dict[str, Any]], *, root: Path, source_cache: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for item in sources:
         path = item["path"]
         if item.get("type") not in {"python", "test"} or not path.endswith(".py"):
             continue
-        text = _repo_path(path, root=root).read_text(encoding="utf-8")
+        cached = _cached_source(path, root=root, source_cache=source_cache)
+        text = cached["text"]
         try:
-            tree = ast.parse(text, filename=path)
+            tree = _cached_ast(path, root=root, source_cache=source_cache)
         except SyntaxError as exc:
             raise NavigationError(f"AST parse failed for active diagnostic source {path}: line {exc.lineno}") from exc
 
@@ -342,7 +369,7 @@ def _diagnostic_code_records(sources: list[dict[str, Any]], *, root: Path) -> li
                             "end_line": int(getattr(symbol_node, "end_lineno", getattr(symbol_node, "lineno", 1))),
                             "owner": item.get("owner"),
                             "source_role": "test" if item.get("type") == "test" else "source",
-                            "source_hash": sha256_text(text),
+                            "source_hash": cached["hash"],
                             "terms": f"diagnostic_code {code} {symbol_node.name} {path} {item.get('module','')} {item.get('owner','')} {item.get('type','')}",
                         })
             stack.append(node)
@@ -361,11 +388,11 @@ def _diagnostic_code_records(sources: list[dict[str, Any]], *, root: Path) -> li
     return [dedup[key] for key in sorted(dedup)]
 
 
-def _extract_context_pack_anchors(active: dict[str, dict[str, Any]], *, root: Path) -> list[dict[str, Any]]:
+def _extract_context_pack_anchors(active: dict[str, dict[str, Any]], *, root: Path, source_cache: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     path = _repo_path(CONTEXT_PACKS_PATH.as_posix(), root=root)
     if not path.is_file() or CONTEXT_PACKS_PATH.as_posix() not in active:
         return []
-    text = path.read_text(encoding="utf-8")
+    text = _cached_source(CONTEXT_PACKS_PATH.as_posix(), root=root, source_cache=source_cache)["text"]
     try:
         block = text.split("<!-- NMBOT_CONTEXT_PACKS_JSON_START -->", 1)[1].split("<!-- NMBOT_CONTEXT_PACKS_JSON_END -->", 1)[0]
         raw = re.search(r"```json\s*(.*?)\s*```", block, re.DOTALL).group(1)  # type: ignore[union-attr]
@@ -383,8 +410,8 @@ def _extract_context_pack_anchors(active: dict[str, dict[str, Any]], *, root: Pa
             anchor_text = anchor.get("anchor")
             if not isinstance(target_path, str) or not isinstance(anchor_text, str) or target_path not in active:
                 continue
-            line = _line_for_text(target_path, anchor_text, root=root)
-            target_text = _repo_path(target_path, root=root).read_text(encoding="utf-8")
+            line = _line_for_text(target_path, anchor_text, root=root, source_cache=source_cache)
+            target_text = _cached_source(target_path, root=root, source_cache=source_cache)["text"]
             records.append({
                 "kind": "doc_anchor",
                 "path": target_path,
@@ -400,14 +427,14 @@ def _extract_context_pack_anchors(active: dict[str, dict[str, Any]], *, root: Pa
     return records
 
 
-def _doc_records(sources: list[dict[str, Any]], *, root: Path) -> list[dict[str, Any]]:
+def _doc_records(sources: list[dict[str, Any]], *, root: Path, source_cache: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     active = _active_path_map(sources)
-    records = _extract_context_pack_anchors(active, root=root)
+    records = _extract_context_pack_anchors(active, root=root, source_cache=source_cache)
     for item in sources:
         if item.get("type") not in {"doc", "prompt", "json", "text"}:
             continue
         path = item["path"]
-        text = _repo_path(path, root=root).read_text(encoding="utf-8")
+        text = _cached_source(path, root=root, source_cache=source_cache)["text"]
         for line_no, line in enumerate(text.splitlines(), start=1):
             stripped = line.strip()
             if HEADING_RE.match(stripped):
@@ -436,32 +463,39 @@ def _doc_records(sources: list[dict[str, Any]], *, root: Path) -> list[dict[str,
 
 def build_registry(*, root: Path = ROOT, manifest_path: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
     sources = load_active_manifest(manifest_path, root=root)
-    records = _stage_records(sources, root=root) + _symbol_records(sources, root=root) + _diagnostic_code_records(sources, root=root) + _doc_records(sources, root=root)
+    source_cache: dict[str, dict[str, Any]] = {}
+    records = _stage_records(sources, root=root, source_cache=source_cache) + _symbol_records(sources, root=root, source_cache=source_cache) + _diagnostic_code_records(sources, root=root, source_cache=source_cache) + _doc_records(sources, root=root, source_cache=source_cache)
     for record in records:
         record["id"] = _json_digest({k: v for k, v in record.items() if k != "id"})[:24]
-    validate_registry(records, root=root, active_paths=set(_active_path_map(sources)))
+    validate_registry(records, root=root, active_paths=set(_active_path_map(sources)), source_cache=source_cache)
     fingerprint = _json_digest({"manifest": manifest_path.as_posix(), "records": records})
     return {"records": records, "fingerprint": fingerprint, "active_paths": set(_active_path_map(sources)), "sources": sources}
 
 
-def validate_registry(records: list[dict[str, Any]], *, root: Path = ROOT, active_paths: set[str] | None = None) -> None:
+def validate_registry(records: list[dict[str, Any]], *, root: Path = ROOT, active_paths: set[str] | None = None, source_cache: dict[str, dict[str, Any]] | None = None) -> None:
     errors: list[str] = []
     if active_paths is None:
         active_paths = set(_active_path_map(load_active_manifest(root=root)))
     stage_map = load_stage_map(root=root)
-    by_path_text: dict[str, str] = {}
-    by_path_ast: dict[str, ast.AST] = {}
+    source_cache = source_cache if source_cache is not None else {}
+    by_path_symbol_index: dict[str, dict[tuple[str, int, int], ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef]] = {}
+    by_path_diagnostic_codes: dict[str, dict[tuple[str, int, int], set[str]]] = {}
     for record in records:
         path = record.get("path")
         if not isinstance(path, str) or path not in active_paths:
             errors.append(f"path_not_active:{path}")
             continue
-        target = _repo_path(path, root=root)
-        if not target.is_file():
-            errors.append(f"path_missing:{path}")
-            continue
-        text = by_path_text.setdefault(path, target.read_text(encoding="utf-8"))
-        if record.get("source_hash") != sha256_text(text):
+        cached = source_cache.get(path)
+        if cached is None:
+            target = _repo_path(path, root=root)
+            if not target.is_file():
+                errors.append(f"path_missing:{path}")
+                continue
+            text = target.read_text(encoding="utf-8")
+            cached = {"target": target, "text": text, "hash": sha256_text(text)}
+            source_cache[path] = cached
+        text = cached["text"]
+        if record.get("source_hash") != cached["hash"]:
             errors.append(f"hash_mismatch:{record.get('kind')}:{path}:{record.get('start_line')}")
         kind = record.get("kind")
         if kind == "stage":
@@ -470,38 +504,29 @@ def validate_registry(records: list[dict[str, Any]], *, root: Path = ROOT, activ
                 errors.append(f"stage_resolve_failed:{record.get('stage_id')}:{record.get('stage_field')}:{path}")
             source_symbol = stage.get("source_symbol")
             if record.get("stage_field") == "source" and isinstance(source_symbol, str) and source_symbol.strip():
-                if path not in by_path_ast:
-                    try:
-                        by_path_ast[path] = ast.parse(text, filename=path)
-                    except SyntaxError as exc:
-                        errors.append(f"ast_parse_failed:{path}:{exc.lineno}")
-                        continue
-                found = any(
-                    isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-                    and node.name == source_symbol.strip()
-                    and int(getattr(node, "lineno", -1)) == int(record.get("start_line") or -1)
-                    and int(getattr(node, "end_lineno", getattr(node, "lineno", -1))) == int(record.get("end_line") or -1)
-                    for node in ast.walk(by_path_ast[path])
-                )
+                try:
+                    tree = _cached_ast(path, root=root, source_cache=source_cache)
+                except SyntaxError as exc:
+                    errors.append(f"ast_parse_failed:{path}:{exc.lineno}")
+                    continue
+                if path not in by_path_symbol_index:
+                    by_path_symbol_index[path] = _symbol_index(tree)
+                symbol_key = _symbol_record_key(record, name_key="source_symbol")
+                found = symbol_key in by_path_symbol_index[path]
                 if not found:
                     errors.append(f"stage_source_symbol_drift:{path}:{source_symbol}:{record.get('start_line')}-{record.get('end_line')}")
             if record.get("stage_field") == "test" and isinstance(source_symbol, str) and source_symbol.strip():
                 if _focused_test_span(text, source_symbol.strip(), filename=path) is None:
                     errors.append(f"stage_test_symbol_missing:{path}:{source_symbol}")
         elif kind == "symbol":
-            if path not in by_path_ast:
-                try:
-                    by_path_ast[path] = ast.parse(text, filename=path)
-                except SyntaxError as exc:
-                    errors.append(f"ast_parse_failed:{path}:{exc.lineno}")
-                    continue
-            found = any(
-                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-                and node.name == record.get("symbol")
-                and int(getattr(node, "lineno", -1)) == int(record.get("start_line") or -1)
-                and int(getattr(node, "end_lineno", getattr(node, "lineno", -1))) == int(record.get("end_line") or -1)
-                for node in ast.walk(by_path_ast[path])
-            )
+            try:
+                tree = _cached_ast(path, root=root, source_cache=source_cache)
+            except SyntaxError as exc:
+                errors.append(f"ast_parse_failed:{path}:{exc.lineno}")
+                continue
+            if path not in by_path_symbol_index:
+                by_path_symbol_index[path] = _symbol_index(tree)
+            found = _symbol_record_key(record) in by_path_symbol_index[path]
             if not found:
                 errors.append(f"symbol_missing:{path}:{record.get('symbol')}:{record.get('start_line')}")
         elif kind == "diagnostic_code":
@@ -514,24 +539,14 @@ def validate_registry(records: list[dict[str, Any]], *, root: Path = ROOT, activ
             if role not in DIAGNOSTIC_ROLE_PRIORITY:
                 errors.append(f"diagnostic_role_invalid:{path}:{symbol}:{role}")
                 continue
-            if path not in by_path_ast:
-                try:
-                    by_path_ast[path] = ast.parse(text, filename=path)
-                except SyntaxError as exc:
-                    errors.append(f"ast_parse_failed:{path}:{exc.lineno}")
-                    continue
-            found = False
-            for node in ast.walk(by_path_ast[path]):
-                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    continue
-                if node.name != symbol:
-                    continue
-                if int(getattr(node, "lineno", -1)) != int(record.get("start_line") or -1):
-                    continue
-                if int(getattr(node, "end_lineno", getattr(node, "lineno", -1))) != int(record.get("end_line") or -1):
-                    continue
-                found = _symbol_span_contains_diagnostic_code(node, code)
-                break
+            try:
+                tree = _cached_ast(path, root=root, source_cache=source_cache)
+            except SyntaxError as exc:
+                errors.append(f"ast_parse_failed:{path}:{exc.lineno}")
+                continue
+            if path not in by_path_diagnostic_codes:
+                by_path_diagnostic_codes[path] = _diagnostic_codes_by_symbol(tree)
+            found = code in by_path_diagnostic_codes[path].get(_symbol_record_key(record), set())
             if not found:
                 errors.append(f"diagnostic_code_drift:{path}:{symbol}:{code}:{record.get('start_line')}-{record.get('end_line')}")
         elif kind == "doc_anchor":
@@ -551,6 +566,55 @@ def validate_registry(records: list[dict[str, Any]], *, root: Path = ROOT, activ
                 errors.append(f"target_spec_owner_path_not_active:{record.get('kind')}:{owner_path}")
     if errors:
         raise NavigationError("navigation registry drift: " + "; ".join(errors[:5]))
+
+
+def _symbol_record_key(record: dict[str, Any], *, name_key: str = "symbol") -> tuple[str, int, int]:
+    return (
+        str(record.get(name_key) or ""),
+        int(record.get("start_line") or -1),
+        int(record.get("end_line") or -1),
+    )
+
+
+def _symbol_index(tree: ast.AST) -> dict[tuple[str, int, int], ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef]:
+    symbols: dict[tuple[str, int, int], ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            start = int(getattr(node, "lineno", 1))
+            end = int(getattr(node, "end_lineno", start))
+            symbols[(node.name, start, end)] = node
+    return symbols
+
+
+def _diagnostic_codes_by_symbol(tree: ast.AST) -> dict[tuple[str, int, int], set[str]]:
+    """Index canonical diagnostic literals for every function span in one AST walk."""
+    codes_by_symbol: dict[tuple[str, int, int], set[str]] = {}
+    stack: list[ast.AST] = []
+
+    def visit(node: ast.AST) -> None:
+        parent = stack[-1] if stack else None
+        if _is_docstring_expr(node, parent) or _inside_docstring_expr(node, stack):
+            return
+        functions = [
+            ancestor for ancestor in stack
+            if isinstance(ancestor, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            functions.append(node)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            code = _canonical_diagnostic_code(node.value)
+            if code:
+                for function in functions:
+                    start = int(getattr(function, "lineno", 1))
+                    end = int(getattr(function, "end_lineno", start))
+                    codes_by_symbol.setdefault((function.name, start, end), set()).add(code)
+        stack.append(node)
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+        stack.pop()
+
+    visit(tree)
+    return codes_by_symbol
 
 
 def _symbol_span_contains_diagnostic_code(symbol_node: ast.FunctionDef | ast.AsyncFunctionDef, code: str) -> bool:
@@ -647,7 +711,7 @@ def _result(record: dict[str, Any], *, fallback: bool = False, score: int | None
     return result
 
 
-def _target_spec(record: dict[str, Any]) -> dict[str, str] | None:
+def _target_spec(record: dict[str, Any]) -> dict[str, Any] | None:
     kind = record.get("kind")
     path = record.get("path")
     if not isinstance(path, str) or not path:
@@ -662,12 +726,12 @@ def _target_spec(record: dict[str, Any]) -> dict[str, str] | None:
     if kind == "symbol":
         symbol = record.get("symbol")
         if isinstance(symbol, str) and symbol:
-            return {"target_kind": "symbol", "target": symbol, "target_owner": path, "owner_path": path}
+            return {"target_kind": "symbol", "target": symbol, "target_owner": path, "owner_path": path, "start_line": int(record["start_line"]), "end_line": int(record["end_line"])}
         return None
     if kind == "diagnostic_code":
         symbol = record.get("symbol")
         if isinstance(symbol, str) and symbol:
-            return {"target_kind": "symbol", "target": symbol, "target_owner": path, "owner_path": path}
+            return {"target_kind": "symbol", "target": symbol, "target_owner": path, "owner_path": path, "start_line": int(record["start_line"]), "end_line": int(record["end_line"])}
         return None
     if kind == "doc_anchor":
         anchor = record.get("anchor")
@@ -705,7 +769,18 @@ def _stage_dispatch(query: str, registry: dict[str, Any], stage_map: dict[str, A
     else:
         ranked = [r for r in records if r.get("kind") == "stage" and r.get("stage_id") == chosen]
         reason = f"exact stage_id: {chosen}"
-    return _base_report(query, registry, route="stage", reason=reason, fallback=False, results=_distinct_path_results(ranked), next_action="grep/read returned stage-map paths before making claims")
+    exact_query = stripped == chosen
+    if not exact_query:
+        reason = f"stage token candidate: {chosen}"
+    return _base_report(
+        query,
+        registry,
+        route="stage",
+        reason=reason,
+        fallback=False,
+        results=_distinct_path_results(ranked, fallback=not exact_query),
+        next_action="grep/read returned stage-map paths before making claims" if exact_query else "select_candidate_then_context_gate",
+    )
 
 
 def _symbol_dispatch(query: str, registry: dict[str, Any]) -> dict[str, Any] | None:
@@ -715,7 +790,17 @@ def _symbol_dispatch(query: str, registry: dict[str, Any]) -> dict[str, Any] | N
         return None
     matches = [r for r in registry["records"] if r.get("kind") == "symbol" and r.get("symbol") == chosen]
     matches.sort(key=lambda r: (r["path"], r["start_line"], r["end_line"]))
-    return _base_report(query, registry, route="ast", reason=f"exact Python identifier: {chosen}", fallback=False, results=[_result(r) for r in matches[:MAX_RESULTS]], next_action="grep/read exact symbol range and optional related_test before making claims")
+    exact_query = query.strip().strip("`") == chosen
+    reason = f"exact Python identifier: {chosen}" if exact_query else f"Python identifier token candidate: {chosen}"
+    return _base_report(
+        query,
+        registry,
+        route="ast",
+        reason=reason,
+        fallback=False,
+        results=[_result(r, fallback=not exact_query) for r in matches[:MAX_RESULTS]],
+        next_action="grep/read exact symbol range and optional related_test before making claims" if exact_query else "select_candidate_then_context_gate",
+    )
 
 
 def _diagnostic_dispatch(query: str, registry: dict[str, Any]) -> dict[str, Any] | None:
@@ -751,8 +836,8 @@ def _docs_dispatch(query: str, registry: dict[str, Any]) -> dict[str, Any] | Non
     scored = [(sum(_score(query, r)), r) for r in docs]
     scored = [(s, r) for s, r in scored if s > 0]
     scored.sort(key=lambda sr: (-sr[0], sr[1]["path"], sr[1]["start_line"], sr[1].get("anchor", "")))
-    results = [_result(r, score=s) for s, r in scored[:MAX_RESULTS]]
-    return _base_report(query, registry, route="docs", reason="explicit documentation/contract/context/runbook wording", fallback=False, results=results, next_action="grep/read returned anchors before making claims")
+    results = [_result(r, fallback=True, score=s) for s, r in scored[:MAX_RESULTS]]
+    return _base_report(query, registry, route="docs", reason="documentation/contract/context/runbook candidates", fallback=False, results=results, next_action="select_candidate_then_context_gate")
 
 
 def _normalize_active_owner_path(owner_path: str, *, root: Path, active_paths: set[str]) -> str:
@@ -785,8 +870,8 @@ def resolve_doc_anchor(query: str, owner_path: str, *, root: Path = ROOT, manife
     if not scored:
         raise NavigationError(f"docs anchor not found in owner_path: {normalized_owner}")
     scored.sort(key=lambda sr: (-sr[0], sr[1]["path"], sr[1]["start_line"], sr[1].get("anchor", "")))
-    results = [_result(r, score=s) for s, r in scored[:MAX_RESULTS]]
-    return _base_report(query, registry, route="docs", reason="owner-scoped documentation anchor lookup", fallback=False, results=results, next_action="grep/read returned owner_path anchors before making claims")
+    results = [_result(r, fallback=True, score=s) for s, r in scored[:MAX_RESULTS]]
+    return _base_report(query, registry, route="docs", reason="owner-scoped documentation anchor candidates", fallback=False, results=results, next_action="select_candidate_then_context_gate")
 
 
 def _open_fallback_fts(records: list[dict[str, Any]]) -> tuple[sqlite3.Connection, dict[int, dict[str, Any]]]:
@@ -831,20 +916,75 @@ def _fallback_dispatch(query: str, registry: dict[str, Any]) -> dict[str, Any]:
 
 
 def _base_report(query: str, registry: dict[str, Any], *, route: str, reason: str, fallback: bool, results: list[dict[str, Any]], next_action: str) -> dict[str, Any]:
-    return {
+    bounded_results = results[:MAX_RESULTS]
+    for index, result in enumerate(bounded_results, start=1):
+        result["candidate_id"] = f"c{index}"
+    report = {
         "schema": OUTPUT_SCHEMA,
         "query": query,
         "route": route,
         "reason": reason,
-        "abstain": not results,
+        "abstain": not bounded_results,
         "fallback": fallback,
-        "results": results[:MAX_RESULTS],
+        "results": bounded_results,
         "next_action": next_action,
         "registry_fingerprint": registry["fingerprint"],
         "local_read_only": True,
         "candidates_are_not_evidence": True,
         "production_proof": False,
     }
+    target_specs = [_validated_target_spec(result.get("target_spec")) for result in bounded_results]
+    unique_target_specs = {json.dumps(spec, ensure_ascii=False, sort_keys=True) for spec in target_specs if spec is not None}
+    can_select_directly = (
+        not fallback
+        and bool(bounded_results)
+        and all(not result.get("candidate_only") for result in bounded_results)
+        and len(target_specs) == len(bounded_results)
+        and all(spec is not None for spec in target_specs)
+        and len(unique_target_specs) == 1
+        and (route != "ast" or len(bounded_results) == 1)
+    )
+    report["selection_required"] = not can_select_directly
+    if can_select_directly:
+        report["selection_mode"] = "automatic_exact"
+        report["selected_target_spec"] = target_specs[0]
+    else:
+        report["selection_mode"] = "required"
+    return report
+
+
+def _validated_target_spec(value: Any) -> dict[str, Any] | None:
+    """Return a copied target spec only when every required field is valid."""
+    if not isinstance(value, dict):
+        return None
+    required = ("target_kind", "target", "target_owner", "owner_path")
+    if any(not isinstance(value.get(key), str) or not value[key].strip() for key in required):
+        return None
+    result: dict[str, Any] = {key: value[key] for key in required}
+    start, end = value.get("start_line"), value.get("end_line")
+    if start is not None or end is not None:
+        if not isinstance(start, int) or isinstance(start, bool) or not isinstance(end, int) or isinstance(end, bool) or start < 1 or end < start:
+            return None
+        result.update(start_line=start, end_line=end)
+    return result
+
+
+def select_candidate(report: dict[str, Any], candidate_id: str) -> dict[str, Any]:
+    """Explicitly select one current navigation candidate without inferring a target."""
+    if not isinstance(report, dict) or report.get("abstain"):
+        raise NavigationError("cannot select a candidate from an abstained report")
+    if not isinstance(candidate_id, str) or not candidate_id:
+        raise NavigationError("candidate_id must be a non-empty string")
+    results = report.get("results")
+    if not isinstance(results, list):
+        raise NavigationError("navigation report has no candidates")
+    candidate = next((item for item in results if isinstance(item, dict) and item.get("candidate_id") == candidate_id), None)
+    if candidate is None:
+        raise NavigationError(f"unknown candidate_id: {candidate_id}")
+    target_spec = _validated_target_spec(candidate.get("target_spec"))
+    if target_spec is None:
+        raise NavigationError(f"candidate_id has no valid target_spec: {candidate_id}")
+    return target_spec
 
 
 def navigate(query: str, *, root: Path = ROOT, manifest_path: Path = DEFAULT_MANIFEST) -> dict[str, Any]:
@@ -874,9 +1014,13 @@ def render_human(report: dict[str, Any]) -> str:
         flags.append("abstain")
     suffix = f" ({', '.join(flags)})" if flags else ""
     lines = [f"NMBot navigate: route={report['route']}{suffix}", f"Reason: {report['reason']}"]
+    if report.get("selection_mode") == "explicit_candidate":
+        lines.append(f"Explicit selection: {report['selected_candidate_id']}")
+    elif report.get("selection_required"):
+        lines.append("Selection required: choose a candidate_id explicitly.")
     for index, item in enumerate(report.get("results", []), start=1):
         label = item.get("symbol") or item.get("stage_id") or item.get("anchor") or item["kind"]
-        lines.append(f"{index}. {item['path']}:{item['start_line']}-{item['end_line']} [{item['kind']}] {label}")
+        lines.append(f"{item['candidate_id']} ({index}). {item['path']}:{item['start_line']}-{item['end_line']} [{item['kind']}] {label}")
         if item.get("related_test"):
             lines.append(f"   related_test: {item['related_test']}")
     lines.append(f"Next: {report['next_action']}")
@@ -891,6 +1035,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--human", action="store_true", help="print human-readable output (default)")
     parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST), help="relative active retrieval manifest path")
     parser.add_argument("--validate-only", action="store_true", help="build and validate the in-memory registry, then exit")
+    parser.add_argument("--select", metavar="CANDIDATE_ID", help="explicitly select a candidate from this navigation report")
     return parser
 
 
@@ -901,11 +1046,18 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--json and --human are mutually exclusive")
     try:
         if args.validate_only:
+            if args.select:
+                parser.error("--select cannot be used with --validate-only")
             registry = build_registry(root=ROOT, manifest_path=Path(args.manifest))
             payload = {"schema": OUTPUT_SCHEMA, "valid": True, "record_count": len(registry["records"]), "registry_fingerprint": registry["fingerprint"]}
             print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) if args.json else f"navigation registry valid: {payload['record_count']} records")
             return 0
         report = navigate(args.query, root=ROOT, manifest_path=Path(args.manifest))
+        if args.select:
+            report["selected_target_spec"] = select_candidate(report, args.select)
+            report["selection_required"] = False
+            report["selection_mode"] = "explicit_candidate"
+            report["selected_candidate_id"] = args.select
     except NavigationError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2

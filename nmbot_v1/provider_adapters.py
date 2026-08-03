@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from time import monotonic
 from typing import Any, Mapping
 
 from .contracts import SCHEMA_VERSION, V1Error, V1IntentPlan, deep_thaw
@@ -84,7 +85,17 @@ class V1GatewaySearchPort:
 
     async def search(self, request: V1SearchRequest) -> dict[str, Any]:
         payload = self.request_payload(request)
-        raw, meta = await _run_gateway(self.gateway_client, payload, timeout_env=self.timeout_env, default_timeout=90)
+        deadline = monotonic() + _int_env(self.timeout_env, 90)
+        initial_timeout = _remaining_timeout_seconds(deadline)
+        if initial_timeout is None:
+            raise V1Error("upstream_error")
+        raw, meta = await _run_gateway(
+            self.gateway_client,
+            payload,
+            timeout_env=self.timeout_env,
+            default_timeout=90,
+            timeout=initial_timeout,
+        )
         try:
             data = _validated_search_data(raw, meta, request)
             retry_attempts: list[dict[str, Any]] = []
@@ -93,7 +104,16 @@ class V1GatewaySearchPort:
                 raise
             retry_payload = dict(payload)
             retry_payload["query"] = str(payload["query"]) + "\nFORMAT_RECOVERY=previous output was invalid JSON; return one compact complete JSON object and nothing else."
-            retry_raw, retry_meta = await _run_gateway(self.gateway_client, retry_payload, timeout_env=self.timeout_env, default_timeout=90)
+            remaining_timeout = _remaining_timeout_seconds(deadline)
+            if remaining_timeout is None:
+                raise V1Error("upstream_error")
+            retry_raw, retry_meta = await _run_gateway(
+                self.gateway_client,
+                retry_payload,
+                timeout_env=self.timeout_env,
+                default_timeout=90,
+                timeout=remaining_timeout,
+            )
             data = _validated_search_data(retry_raw, retry_meta, request)
             retry_attempts = [{"status": "failed", "code": "invalid_json", "model": self.model}]
         cards = data.get("cards") if isinstance(data.get("cards"), list) else []
@@ -128,13 +148,21 @@ class V1GatewayOneModelResponsePort:
         return parse_one_model_response(raw, model_input)
 
 
-async def _run_gateway(client: Any, request_data: dict[str, Any], *, timeout_env: str, default_timeout: int) -> tuple[str, dict[str, Any]]:
+async def _run_gateway(client: Any, request_data: dict[str, Any], *, timeout_env: str, default_timeout: int, timeout: int | None = None) -> tuple[str, dict[str, Any]]:
     if client is None or not hasattr(client, "_run_gateway_request"):
         raise V1Error("gateway_missing")
     headers = {"Authorization": f"Bearer {os.getenv('OVERMIND_TOKEN') or os.getenv('GATEWAY_POLL_TOKEN') or ''}"}
-    timeout = _int_env(timeout_env, default_timeout)
+    timeout = timeout if timeout is not None else _int_env(timeout_env, default_timeout)
     raw, meta = await client._run_gateway_request(request_data, headers, timeout)
     return str(raw or ""), meta if isinstance(meta, dict) else {}
+
+
+def _remaining_timeout_seconds(deadline: float) -> int | None:
+    remaining = deadline - monotonic()
+    timeout = min(int(remaining), 300)
+    if timeout < 1:
+        return None
+    return timeout
 
 
 def _raise_on_gateway_failure(raw: Any, meta: Mapping[str, Any]) -> None:

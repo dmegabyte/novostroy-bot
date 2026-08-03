@@ -29,13 +29,13 @@
       "name": "nmbot.py diagnose",
       "status": "current",
       "path": "scripts/nmbot.py",
-      "purpose": "Safe bounded local wrapper for one trace/task/latest, recent aggregation, timeline, and hourly summary.",
+      "purpose": "Safe bounded wrapper for one trace/task/latest, trace evidence-chain, recent aggregation, timeline, and hourly summary.",
       "canonical_wrapper": "python3 scripts/nmbot.py diagnose",
       "evidence_scope": "mixed",
-      "network": false,
+      "network": true,
       "side_effects": false,
       "replacement": null,
-      "notes": "Wrapper output is bounded and omits raw ids/text/payloads; task child may have its own read-only boundary."
+      "notes": "Network is conditional: ordinary trace/latest/recent/summary routes remain local, while task and --evidence-chain use read-only Overmind status/result. Output is bounded; evidence-chain excludes raw gateway response, URLs, prompts, payloads, contacts and tokens."
     },
     {
       "name": "nmbot_jivo_trace_analyze.py",
@@ -89,13 +89,13 @@
       "name": "nmbot_gateway_task_diag.py",
       "status": "specialized",
       "path": "scripts/nmbot_gateway_task_diag.py",
-      "purpose": "Diagnose one gateway/Overmind task result.",
+      "purpose": "Diagnose one gateway/Overmind task result or build a bounded trace evidence-chain across primary and candidate enrichment tasks.",
       "canonical_wrapper": "python3 scripts/nmbot.py diagnose --task TASK_ID",
       "evidence_scope": "unknown",
       "network": true,
       "side_effects": false,
       "replacement": null,
-      "notes": "Read-only task diagnostic; wrapper normalizes and bounds output."
+      "notes": "Read-only task diagnostic. Evidence-chain probes at most six following task IDs and accepts children only by bounded card-key and timestamp correlation; child lineage remains heuristic until runtime records authoritative IDs."
     },
     {
       "name": "nmbot_v2_version_compare.py",
@@ -122,16 +122,16 @@
       "notes": "Direct tool has mutating create --write; wrapper alias is intentionally restricted to read/show and remains read-only. Not deploy."
     },
     {
-      "name": "nmbot_release.py status",
-      "status": "specialized",
-      "path": "scripts/nmbot_release.py",
-      "purpose": "Explicit release status route.",
+      "name": "nmbot_atomic_release.py recon",
+      "status": "current",
+      "path": "scripts/nmbot_atomic_release.py",
+      "purpose": "Canonical atomic read-only release recon for systemd, canonical paths, environment names, identity, and health.",
       "canonical_wrapper": "python3 scripts/nmbot.py release status",
       "evidence_scope": "live",
       "network": true,
       "side_effects": false,
       "replacement": null,
-      "notes": "Only status is aliased; deploy/atomic release routes are intentionally not aliased."
+      "notes": "The wrapper delegates only to recon; exact source hash comparison is snapshot-vps-source plus compare-snapshot. Guarded deploy routes are intentionally not aliased."
     },
     {
       "name": "nmbot_architecture_preflight.py",

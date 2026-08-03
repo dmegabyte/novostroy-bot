@@ -674,6 +674,116 @@ def test_status_update_then_final_delivery_projection_passes_strict_lifecycle(tm
     asyncio.run(scenario())
 
 
+def test_jivo_post_exception_emits_safe_response_before_terminal_and_passes_strict(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        class Session:
+            def post(self, *_args, **_kwargs):
+                raise RuntimeError("private Jivo transport failure")
+
+        monkeypatch.setenv("JIVO_PROVIDER_ID", "provider")
+        monkeypatch.setattr(mod, "DELIVERY_TRACE_PATH", tmp_path / "delivery.jsonl")
+        raw_trace = "raw-trace-must-not-leak"
+        mod._append_delivery_trace(raw_trace, "bridge_accepted", "accepted")
+        mod._append_delivery_trace(raw_trace, "api_completed", "completed", api_status=200)
+        mod._append_delivery_trace(raw_trace, "terminal_selected", "selected", terminal_event="BOT_MESSAGE")
+
+        status, error = await mod._post_event_to_jivo(
+            Session(), "provider-token", b'{"event":"BOT_MESSAGE","message":{"text":"private response"}}',
+            raw_trace, {}, api_status=200,
+        )
+
+        assert (status, error) == (None, "jivo_exception")
+        rows = [json.loads(line) for line in (tmp_path / "delivery.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert [row["stage"] for row in rows] == [
+            "bridge_accepted", "api_completed", "terminal_selected", "jivo_send_attempted", "jivo_response", "terminal_delivery",
+        ]
+        response, terminal = rows[-2:]
+        assert response["outcome"] == "post_exception"
+        assert response["error_class"] == "jivo_exception"
+        assert response["jivo_status"] is None
+        assert terminal["outcome"] == "failed"
+        assert terminal["error_class"] == "jivo_exception"
+        dumped = json.dumps(rows, ensure_ascii=False)
+        for forbidden in (raw_trace, "private response", "provider-token", "private Jivo transport failure"):
+            assert forbidden not in dumped
+
+        strict = subprocess.run(
+            ["python3", str(TRACE_ANALYZER), str(tmp_path / "delivery.jsonl"), "--strict", "--json"],
+            text=True, capture_output=True, check=False,
+        )
+        assert strict.returncode == 0, strict.stderr
+        summary = json.loads(strict.stdout)["summary"]
+        assert summary["terminal_failures"] == 1
+        assert summary["violations"] == 0
+
+    asyncio.run(scenario())
+
+
+def test_jivo_response_read_exception_is_normalized_before_terminal_failure(tmp_path, monkeypatch) -> None:
+    async def scenario() -> None:
+        class UpstreamResponse:
+            status = 200
+
+            async def read(self) -> bytes:
+                return b'{"event":"BOT_MESSAGE","message":{"text":"private response"}}'
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class JivoResponse(UpstreamResponse):
+            status = 202
+
+            async def read(self) -> bytes:
+                raise RuntimeError("private Jivo response read failure")
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def post(self, url, **_kwargs):
+                return UpstreamResponse() if url.startswith("http://127.0.0.1") else JivoResponse()
+
+        monkeypatch.setenv("JIVO_PROVIDER_ID", "provider")
+        monkeypatch.setattr(mod, "ClientSession", lambda timeout=None: Session())
+        monkeypatch.setattr(mod, "DELIVERY_TRACE_PATH", tmp_path / "delivery.jsonl")
+        body = b'{"event":"CLIENT_MESSAGE","id":"event-secret","site_id":"site-secret","chat_id":"chat-secret","client_id":"client-secret","message":{"text":"private request"}}'
+        trace = mod._request_trace(body)
+        event_key = mod._event_key(trace)
+        mod.LATEST_CHAT_EVENTS[event_key] = "event-secret"
+        mod._append_delivery_trace("raw-trace", "bridge_accepted", "accepted")
+
+        await mod._send_to_jivo_after_bot("provider-token", body, trace, event_key, "event-secret", "raw-trace", request_started=time.monotonic())
+
+        rows = [json.loads(line) for line in (tmp_path / "delivery.jsonl").read_text(encoding="utf-8").splitlines()]
+        assert [row["stage"] for row in rows] == [
+            "bridge_accepted", "api_completed", "terminal_selected", "jivo_send_attempted", "jivo_response", "terminal_delivery",
+        ]
+        response, terminal = rows[-2:]
+        assert response["outcome"] == "post_exception"
+        assert response["error_class"] == "jivo_exception"
+        assert response["jivo_status"] is None
+        assert terminal["outcome"] == "failed"
+        assert terminal["error_class"] == "jivo_exception"
+        dumped = json.dumps(rows, ensure_ascii=False)
+        for forbidden in ("raw-trace", "private request", "private response", "event-secret", "site-secret", "chat-secret", "client-secret", "provider-token", "private Jivo response read failure"):
+            assert forbidden not in dumped
+
+        strict = subprocess.run(
+            ["python3", str(TRACE_ANALYZER), str(tmp_path / "delivery.jsonl"), "--strict", "--json"],
+            text=True, capture_output=True, check=False,
+        )
+        assert strict.returncode == 0, strict.stderr
+        assert json.loads(strict.stdout)["summary"]["violations"] == 0
+
+    asyncio.run(scenario())
+
+
 def test_delivery_projection_write_failure_is_nonfatal(tmp_path, monkeypatch) -> None:
     async def scenario() -> None:
         class Response:

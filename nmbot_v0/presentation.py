@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Mapping
 
-from nmbot_v2.contracts import LotExample, OptionCard
+from .contracts import LotExample, OptionCard
 
 def _format_money(value: int | float) -> str:
     if value >= 1_000_000:
@@ -382,111 +382,6 @@ def _selected_object_acknowledgement(card: OptionCard, viewpoint: str) -> str:
     if viewpoint == "financing":
         return f"По {name} разберём оплату предметно, без лишней теории."
     return f"По {name} могу рассказать вот что."
-
-
-def _selected_fact_acknowledgement(card: OptionCard, plan: SemanticPlan, *, fresh_facts: tuple[str, ...] = ()) -> str | None:
-    requested = tuple(plan.requested_facts or plan.facts_needed)
-    if not requested:
-        return None
-    name = _display_name(card.name)
-    present = set(present_fact_names(card))
-    fresh = {str(item).strip().lower() for item in fresh_facts}
-    parts: list[str] = []
-    for fact in dict.fromkeys(requested):
-        if fact == "mortgage_terms":
-            if card.mortgage_terms:
-                parts.append(f"По ипотеке есть ориентир: {card.mortgage_terms}. Точные условия лучше перепроверить по этому ЖК.")
-            else:
-                parts.append("Точных условий по ипотеке сейчас нет — ставку и одобрение лучше уточнить отдельно.")
-        elif fact == "parking_price":
-            if card.parking_price not in (None, "", 0):
-                if "parking_price" in fresh:
-                    parts.append(f"сейчас вижу стоимость машиноместа: {card.parking_price}.")
-                else:
-                    parts.append(f"вижу ориентир по стоимости машиноместа: {card.parking_price}. Его лучше перепроверить.")
-            elif "parking" in present:
-                parts.append("паркинг есть, но стоимость машиноместа сейчас не вижу.")
-            else:
-                parts.append("стоимость машиноместа сейчас не вижу.")
-        elif fact == "parking":
-            parts.append("паркинг есть." if "parking" in present else "наличие паркинга сейчас не вижу подтверждённым.")
-        elif fact == "apartment_inventory":
-            inventory = _format_apartment_inventory(card.apartment_inventory)
-            if inventory:
-                parts.append(f"Актуальное наличие квартир: {inventory}.")
-            else:
-                parts.append("Актуальное наличие квартир пока не подтверждено.")
-        elif fact == "apartment_price":
-            price = _format_card_price(card)
-            parts.append(f"вижу {price}." if price else "цена квартиры пока не подтверждена.")
-        elif fact == "readiness":
-            ready = _format_ready(card.ready)
-            parts.append(f"{ready}." if ready else "срок готовности пока не подтверждён.")
-        elif fact == "location":
-            parts.append(f"Локация — {card.location}." if card.location else "Локация пока не подтверждена.")
-        elif fact == "metro":
-            parts.append(f"Метро — {card.metro}." if card.metro else "Информация о метро пока не подтверждена.")
-        elif fact == "finishing":
-            finishing = _format_finishing(card.finishing)
-            parts.append(f"Отделка — {finishing}." if finishing else "Информация об отделке пока не подтверждена.")
-        elif fact == "schools":
-            schools = [item for item in card.infrastructure if re.search(r"школ|school", item, re.I)]
-            parts.append("Рядом указаны: " + ", ".join(schools) + "." if schools else "Информация о школах пока не подтверждена.")
-    if not parts:
-        return None
-    answer = f"По {name}: " + "; ".join(part.rstrip(".") for part in parts) + "."
-    scenario_context = _selected_scenario_context(_scenario_needs_from_facets(plan.facets), card, requested)
-    return f"{answer} {scenario_context}" if scenario_context else answer
-
-
-def _named_object_fact_summary(card: OptionCard, plan: SemanticPlan, state: ConversationState) -> tuple[str | None, str | None]:
-    """Собрать все запрошенные факты по явно названному ЖК, не обрываясь на первом."""
-
-    requested = tuple(plan.requested_facts or plan.facts_needed)
-    if not requested:
-        return None, None
-
-    name = _display_name(card.name)
-    effective = build_effective_request(state, plan)
-    budget = effective.params.get("max_price")
-    price = card.price_min if isinstance(card.price_min, (int, float)) else card.price if isinstance(card.price, (int, float)) else None
-    parts: list[str] = []
-
-    if "apartment_price" in requested:
-        if price is not None and isinstance(budget, (int, float)):
-            if price > budget:
-                parts.append(
-                    f"Если {_format_money(budget)} рублей — весь бюджет, {name} не укладывается: "
-                    f"квартиры начинаются от {_format_money(price)} рублей."
-                )
-            else:
-                parts.append(
-                    f"По стартовой цене {name} укладывается в {_format_money(budget)} рублей: "
-                    f"квартиры начинаются от {_format_money(price)} рублей."
-                )
-        elif price is not None:
-            parts.append(f"В {name} квартиры начинаются от {_format_money(price)} рублей.")
-        else:
-            parts.append(f"По {name} цену квартиры сейчас не вижу, поэтому наугад её не назову.")
-
-    if "mortgage_terms" in requested:
-        if card.mortgage_terms:
-            parts.append(f"По ипотеке есть ориентир: {card.mortgage_terms}. Точные условия лучше перепроверить по этому ЖК.")
-        else:
-            parts.append("Точных условий семейной ипотеки в данных сейчас нет — ставку и одобрение нужно уточнять отдельно.")
-
-    if not parts:
-        fallback = _selected_fact_acknowledgement(card, plan)
-        return fallback, None
-
-    query = str(plan.query_text or "").casefold()
-    ambiguous_money = (
-        "mortgage_terms" in requested
-        and isinstance(budget, (int, float))
-        and bool(re.search(r"на руках|накоп|сбереж|денег.{0,20}(?:есть|мало)|\bвсего\s+\d", query))
-    )
-    question = f"{_format_money(budget)} рублей — это весь бюджет или первоначальный взнос?" if ambiguous_money else None
-    return " ".join(parts), question
 
 
 def _human_fact_name(fact: str) -> str:

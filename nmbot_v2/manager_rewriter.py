@@ -80,9 +80,6 @@ def manager_rewriter_request_payload(
         "system_prompt": prompt if prompt is not None else load_prompt(),
         "parameters": {"temperature": 0.35, "max_tokens": 1800},
     }
-    api_key = os.getenv("OPENROUTER_API_KEY") or ""
-    if api_key:
-        request["external_api_key"] = api_key
     return request
 
 

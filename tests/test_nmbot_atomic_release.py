@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeRemote:
-    def __init__(self, *, fail: str | None = None, migrated: bool = True, remote_root: str = "/remote", previous: str = "old", release_exists: bool = False, pythonpath: bool = False, execstart_pythonpath: bool = False, systemd_identity_override: str | None = None, systemd_state_override: str | None = None, rollback_fail: bool = False, cleanup_fail: bool = False, env_files: str | None = None, exec_start_pre: str = "", exec_extra_args: str = "", bootstrap_current_symlink: bool = False, bootstrap_current_state: str = "absent", inactive_fail: bool = False) -> None:
+    def __init__(self, *, fail: str | None = None, migrated: bool = True, remote_root: str = "/remote", previous: str = "old", release_exists: bool = False, pythonpath: bool = False, execstart_pythonpath: bool = False, systemd_identity_override: str | None = None, systemd_state_override: str | None = None, rollback_fail: bool = False, cleanup_fail: bool = False, cleanup_stdout: str = "", cleanup_stderr: str = "cleanup-boom", env_files: str | None = None, exec_start_pre: str = "", exec_extra_args: str = "", bootstrap_current_symlink: bool = False, bootstrap_current_state: str = "absent", inactive_fail: bool = False) -> None:
         self.fail = fail
         self.migrated = migrated
         self.remote_root = remote_root
@@ -34,6 +34,8 @@ class FakeRemote:
         self.systemd_state_override = systemd_state_override
         self.rollback_fail = rollback_fail
         self.cleanup_fail = cleanup_fail
+        self.cleanup_stdout = cleanup_stdout
+        self.cleanup_stderr = cleanup_stderr
         self.env_files = env_files
         self.exec_start_pre = exec_start_pre
         self.exec_extra_args = exec_extra_args
@@ -84,7 +86,7 @@ class FakeRemote:
         if self.rollback_fail and 'shutil.copy2(backup/"api-unit.service", unit)' in command:
             return subprocess.CompletedProcess([], 1, stdout="", stderr="rollback-boom")
         if self.cleanup_fail and command == f"rmdir {self.remote_root}/.release_lock":
-            return subprocess.CompletedProcess([], 1, stdout="", stderr="cleanup-boom")
+            return subprocess.CompletedProcess([], 1, stdout=self.cleanup_stdout, stderr=self.cleanup_stderr)
         if "systemctl" in command and "--user" in command and "is-active" in command:
             if self.inactive_fail:
                 return subprocess.CompletedProcess([], 1, stdout=json.dumps({"ok": False, "error": "api still active"}) + "\n", stderr="")
@@ -333,6 +335,8 @@ class BridgeRemote:
 
     def run(self, command: str, *, input_text: str | None = None):
         self.commands.append(command)
+        if '"schema_version": "nmbot.bridge_release_lock_owner.v1"' in command:
+            return subprocess.CompletedProcess([], 0, stdout=json.dumps({"ok": True, "owner": {"schema_version": rel.BRIDGE_LOCK_OWNER_SCHEMA_VERSION, "release_id": "bridge-rel-001", "operation": "bridge_deploy", "contour": "bridge", "acquired_at_utc": "2026-08-01T00:00:00Z", "pid": 123}}) + "\n", stderr="")
         if self.fail_guard and "bridge baseline hash mismatch" in command:
             return subprocess.CompletedProcess([], 1, stdout=json.dumps({"ok": False, "error": "bridge baseline hash mismatch"}) + "\n", stderr="")
         if self.fail_after and self.fail_after in command:
@@ -1787,12 +1791,16 @@ def test_release_lock_contention_fails_before_upload_and_success_cleans_up(tmp_p
     assert ok.commands.count("mkdir /remote/.release_lock") == 1
     assert ok.commands[-1] == "rmdir /remote/.release_lock"
 
-    cleanup = FakeRemote(cleanup_fail=True)
+    cleanup_secret_stdout = "API_TOKEN=stdout-secret-value"
+    cleanup_secret_stderr = "NMBOT_API_TOKEN=stderr-secret-value"
+    cleanup = FakeRemote(cleanup_fail=True, cleanup_stdout=cleanup_secret_stdout, cleanup_stderr=cleanup_secret_stderr)
     try:
         rel.deploy(release_id="REL-lock", archive=artifact.archive, manifest_path=artifact.manifest, confirm=True, remote=cleanup, remote_root="/remote")
     except rel.ReleaseError as exc:
         text = str(exc)
-        assert "deploy completed but release lock cleanup failed" in text and "cleanup-boom" in text
+        assert "deploy completed but release lock cleanup failed" in text
+        assert rel.RELEASE_LOCK_CLEANUP_FAILURE in text
+        assert cleanup_secret_stdout not in text and cleanup_secret_stderr not in text
     else:  # pragma: no cover
         raise AssertionError("cleanup failure after success must not report deploy=ok")
 
@@ -1801,7 +1809,9 @@ def test_release_lock_contention_fails_before_upload_and_success_cleans_up(tmp_p
         rel.deploy(release_id="REL-lock", archive=artifact.archive, manifest_path=artifact.manifest, confirm=True, remote=failed_and_cleanup, remote_root="/remote")
     except rel.ReleaseError as exc:
         text = str(exc)
-        assert "boom" in text and "release lock cleanup failed" in text and "cleanup-boom" in text
+        assert "boom" in text and "release lock cleanup failed" in text
+        assert rel.RELEASE_LOCK_CLEANUP_FAILURE in text
+        assert cleanup_secret_stdout not in text and cleanup_secret_stderr not in text
     else:  # pragma: no cover
         raise AssertionError("cleanup failure after deploy failure must preserve both errors")
 
@@ -3892,6 +3902,27 @@ def test_bootstrap_apply_conflicting_env_rolls_back_and_keeps_secrets_out(tmp_pa
     assert len(fake.uploads) == 2
 
 
+def test_bootstrap_apply_cleanup_failure_redacts_remote_output_and_surfaces_fixed_code(tmp_path: Path) -> None:
+    artifact = rel.build(release_id="baseline-cleanup", out_dir=tmp_path)
+    manifest = _with_valid_source_provenance(artifact, tmp_path)
+    secret_stdout = "API_TOKEN=bootstrap-cleanup-stdout-secret"
+    secret_stderr = "NMBOT_API_TOKEN=bootstrap-cleanup-stderr-secret"
+    fake = FakeRemote(
+        remote_root=rel.DEFAULT_REMOTE_ROOT,
+        migrated=False,
+        cleanup_fail=True,
+        cleanup_stdout=secret_stdout,
+        cleanup_stderr=secret_stderr,
+    )
+
+    with pytest.raises(rel.ReleaseError) as raised:
+        rel.bootstrap_apply(release_id="baseline-cleanup", archive=artifact.archive, manifest_path=manifest, confirm=True, remote=fake, source_snapshot_manifest_sha256="a" * 64)
+
+    text = str(raised.value)
+    assert rel.RELEASE_LOCK_CLEANUP_FAILURE in text
+    assert secret_stdout not in text and secret_stderr not in text
+
+
 def test_bootstrap_guard_failures_refuse_before_lock_backup_or_upload(tmp_path: Path) -> None:
     artifact = rel.build(release_id="baseline-guard-fail", out_dir=tmp_path)
     manifest = _with_valid_source_provenance(artifact, tmp_path)
@@ -4096,11 +4127,94 @@ def test_bridge_deploy_revalidates_baseline_after_lock_before_upload_or_mutation
     with pytest.raises(rel.ReleaseError, match="baseline hash mismatch"):
         rel.bridge_deploy(release_id="bridge-rel-001", archive=artifact.archive, manifest_path=artifact.manifest, confirm=True, remote=remote, source_snapshot_manifest_sha256=snapshot_sha)
 
-    lock = "mkdir /home/neiro/novostroy-bot/.bridge_release_lock"
+    lock = next(command for command in remote.commands if '"schema_version": "nmbot.bridge_release_lock_owner.v1"' in command)
     assert remote.commands.index(lock) < max(i for i, command in enumerate(remote.commands) if "previous_state" in command)
     assert remote.uploads == []
     assert not any("bridge_backup" in command or ".bridge-current.bridge-rel-001.tmp" in command for command in remote.commands)
-    assert remote.commands[-1] == "rmdir /home/neiro/novostroy-bot/.bridge_release_lock"
+    assert '"owner_file": "owner.json"' in remote.commands[-1]
+
+
+def _run_bridge_lock(command: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, shell=True, text=True, capture_output=True, check=False)
+
+
+def test_bridge_lock_owner_metadata_is_private_and_complete(tmp_path: Path) -> None:
+    command = rel._bridge_lock_acquire_command(str(tmp_path), "bridge-lock-001")
+    acquired = _run_bridge_lock(command)
+    assert acquired.returncode == 0
+    response = json.loads(acquired.stdout)
+    owner = response["owner"]
+    assert set(owner) == {"schema_version", "release_id", "operation", "contour", "acquired_at_utc", "pid"}
+    assert owner["schema_version"] == rel.BRIDGE_LOCK_OWNER_SCHEMA_VERSION
+    assert owner["release_id"] == "bridge-lock-001"
+    assert owner["operation"] == "bridge_deploy" and owner["contour"] == "bridge"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", owner["acquired_at_utc"])
+    metadata = json.loads((tmp_path / ".bridge_release_lock" / rel.BRIDGE_LOCK_OWNER_FILE).read_text(encoding="utf-8"))
+    assert metadata == owner
+    assert "SECRET_TOKEN" not in json.dumps(metadata) and str(tmp_path) not in json.dumps(metadata)
+
+
+def test_bridge_lock_contention_reports_valid_owner_and_malformed_is_unknown(tmp_path: Path) -> None:
+    first = _run_bridge_lock(rel._bridge_lock_acquire_command(str(tmp_path), "bridge-lock-001"))
+    owner = json.loads(first.stdout)["owner"]
+    second = _run_bridge_lock(rel._bridge_lock_acquire_command(str(tmp_path), "bridge-lock-002"))
+    assert second.returncode != 0
+    assert json.loads(second.stdout) == {"ok": False, "owner": owner}
+    lock = tmp_path / ".bridge_release_lock"
+    (lock / rel.BRIDGE_LOCK_OWNER_FILE).write_text('{"token":"must-not-leak"}', encoding="utf-8")
+    malformed = _run_bridge_lock(rel._bridge_lock_acquire_command(str(tmp_path), "bridge-lock-003"))
+    assert malformed.returncode != 0
+    assert json.loads(malformed.stdout) == {"ok": False, "owner": "unknown"}
+    assert lock.is_dir() and (lock / rel.BRIDGE_LOCK_OWNER_FILE).exists()
+
+
+def test_bridge_lock_owner_rejects_non_string_release_id_before_release_id_validation(monkeypatch) -> None:
+    owner = {
+        "schema_version": rel.BRIDGE_LOCK_OWNER_SCHEMA_VERSION,
+        "release_id": None,
+        "operation": "bridge_deploy",
+        "contour": "bridge",
+        "acquired_at_utc": "2026-08-01T00:00:00Z",
+        "pid": 123,
+    }
+
+    def unexpected_release_id(_: str | None = None) -> str:
+        raise AssertionError("non-string owner release_id must not reach _release_id")
+
+    monkeypatch.setattr(rel, "_release_id", unexpected_release_id)
+    with pytest.raises(rel.ReleaseError, match="bridge lock owner metadata invalid"):
+        rel._validate_bridge_lock_owner(owner)
+
+
+@pytest.mark.parametrize("release_id", [None, 123, True, "bad/release-id"])
+def test_bridge_lock_contention_treats_invalid_release_id_as_unknown(tmp_path: Path, release_id: object) -> None:
+    lock = tmp_path / ".bridge_release_lock"
+    lock.mkdir()
+    owner = {
+        "schema_version": rel.BRIDGE_LOCK_OWNER_SCHEMA_VERSION,
+        "release_id": release_id,
+        "operation": "bridge_deploy",
+        "contour": "bridge",
+        "acquired_at_utc": "2026-08-01T00:00:00Z",
+        "pid": 123,
+    }
+    (lock / rel.BRIDGE_LOCK_OWNER_FILE).write_text(json.dumps(owner), encoding="utf-8")
+
+    result = _run_bridge_lock(rel._bridge_lock_acquire_command(str(tmp_path), "bridge-lock-002"))
+    assert result.returncode != 0
+    assert json.loads(result.stdout) == {"ok": False, "owner": "unknown"}
+
+
+def test_bridge_lock_cleanup_requires_exact_owner_and_removes_metadata(tmp_path: Path) -> None:
+    acquired = _run_bridge_lock(rel._bridge_lock_acquire_command(str(tmp_path), "bridge-lock-001"))
+    owner = json.loads(acquired.stdout)["owner"]
+    wrong_owner = dict(owner, pid=owner["pid"] + 1)
+    refused = _run_bridge_lock(rel._bridge_lock_cleanup_command(str(tmp_path), "bridge-lock-001", wrong_owner))
+    assert refused.returncode != 0
+    assert (tmp_path / ".bridge_release_lock" / rel.BRIDGE_LOCK_OWNER_FILE).exists()
+    cleaned = _run_bridge_lock(rel._bridge_lock_cleanup_command(str(tmp_path), "bridge-lock-001", owner))
+    assert cleaned.returncode == 0
+    assert not (tmp_path / ".bridge_release_lock").exists()
 
 
 def test_bridge_deploy_success_order_restarts_bridge_only(tmp_path: Path) -> None:
@@ -4116,6 +4230,28 @@ def test_bridge_deploy_success_order_restarts_bridge_only(tmp_path: Path) -> Non
     assert f"systemctl --user stop {rel.API_SERVICE}" not in joined
     assert f"systemctl --user stop {rel.WORKER_SERVICE}" not in joined
     assert joined.index(".bridge-current.bridge-rel-001.tmp") < joined.index("systemctl --user restart")
+
+
+def test_bridge_deploy_cleanup_failure_redacts_remote_output_and_surfaces_fixed_code(tmp_path: Path) -> None:
+    artifact, snapshot_sha = _build_bridge_artifact(tmp_path)
+    remote = BridgeRemote()
+    original_run = remote.run
+    secret_stdout = "API_TOKEN=bridge-cleanup-stdout-secret"
+    secret_stderr = "NMBOT_API_TOKEN=bridge-cleanup-stderr-secret"
+
+    def run(command: str, *, input_text: str | None = None):
+        if "bridge lock cleanup refused" in command:
+            remote.commands.append(command)
+            return subprocess.CompletedProcess([], 1, stdout=secret_stdout, stderr=secret_stderr)
+        return original_run(command, input_text=input_text)
+
+    remote.run = run  # type: ignore[method-assign]
+    with pytest.raises(rel.ReleaseError) as raised:
+        rel.bridge_deploy(release_id="bridge-rel-001", archive=artifact.archive, manifest_path=artifact.manifest, confirm=True, remote=remote, source_snapshot_manifest_sha256=snapshot_sha)
+
+    text = str(raised.value)
+    assert rel.BRIDGE_LOCK_CLEANUP_FAILURE in text
+    assert secret_stdout not in text and secret_stderr not in text
 
 
 def test_bridge_deploy_rolls_back_after_health_failure(tmp_path: Path) -> None:

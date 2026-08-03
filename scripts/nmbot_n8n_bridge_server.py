@@ -21,6 +21,7 @@ import re
 import sys
 import time
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from aiohttp import ClientSession, web
 
@@ -60,7 +61,7 @@ STRUCTURED_LOG_PATH = Path(_env("NMBOT_BRIDGE_STRUCTURED_LOG", "/home/neiro/novo
 DELIVERY_TRACE_PATH = Path(_env("NMBOT_BRIDGE_DELIVERY_TRACE", "/home/neiro/novostroy-bot/logs/jivo_delivery_trace.jsonl"))
 DELIVERY_TRACE_SCHEMA = "nmbot.jivo.delivery_trace.v1"
 DELIVERY_TRACE_STAGES = frozenset({"bridge_accepted", "api_completed", "api_failed", "terminal_selected", "jivo_send_attempted", "jivo_response", "terminal_delivery"})
-DELIVERY_TRACE_OUTCOMES = frozenset({"accepted", "completed", "failed", "selected", "attempted", "accepted_by_jivo", "rejected_by_jivo", "terminal_send_accepted", "not_sent"})
+DELIVERY_TRACE_OUTCOMES = frozenset({"accepted", "completed", "failed", "selected", "attempted", "accepted_by_jivo", "rejected_by_jivo", "post_exception", "terminal_send_accepted", "not_sent"})
 DELIVERY_TRACE_EVENTS = frozenset({"BOT_MESSAGE", "INVITE_AGENT", "NONE"})
 DELIVERY_TRACE_ERRORS = frozenset({"none", "api_exception", "api_http_error", "hard_timeout", "stale_event", "invalid_terminal", "provider_config", "jivo_http_error", "jivo_exception", "cancelled"})
 DELIVERY_TRACE_MAX_LATENCY_MS = 3_600_000
@@ -121,6 +122,32 @@ def _append_delivery_trace(
     except Exception:
         # Diagnostics are best-effort and must never affect delivery.
         return
+
+
+@asynccontextmanager
+async def _jivo_post_or_exception(session: ClientSession, url: str, payload: bytes):
+    """Yield a response or a fixed error class without exposing exception text."""
+    try:
+        request = session.post(
+            url,
+            data=payload,
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=10,
+        )
+    except Exception:
+        yield None, "jivo_exception"
+        return
+    response_yielded = False
+    try:
+        async with request as response:
+            response_yielded = True
+            yield response, None
+    except Exception:
+        # Only convert failures while opening the outbound request. Exceptions
+        # from the caller's response processing must keep their original flow.
+        if response_yielded:
+            raise
+        yield None, "jivo_exception"
 
 
 def _append_bridge_error_to_journal(
@@ -833,58 +860,75 @@ async def _post_event_to_jivo(
         response_bytes=len(payload or b""),
         outcome="started",
     )
-    async with session.post(
-        url,
-        data=payload,
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-        timeout=10,
-    ) as response:
-        response_body = await response.read()
-        error = None
-        if response.status >= 400:
-            error = _safe_jivo_error(response_body)
-        terminal_delivery = is_terminal_event
-        # A sub-400 response proves Jivo accepted the send, not client render
-        # or delivery. That requires independent Jivo-side evidence.
-        delivery_status = ("status_send_accepted" if delivery_role == "status" else "terminal_send_accepted") if error is None else "jivo_error"
-        jivo_latency_ms = int((time.monotonic() - started) * 1000)
+    response = None
+    post_error = None
+    try:
+        async with _jivo_post_or_exception(session, url, payload) as (response, post_error):
+            response_body = await response.read() if response is not None else b""
+    except Exception:
+        # The request opened, but consuming or closing its response failed. Log
+        # the closed lifecycle record before preserving the original exception
+        # flow for the caller's terminal-failure handler. Do not expose a
+        # partially observed response status or exception details.
         if delivery_role == "final":
             _append_delivery_trace(
                 trace_id,
                 "jivo_response",
-                "accepted_by_jivo" if error is None else "rejected_by_jivo",
+                "post_exception",
                 terminal_event=event_kind if is_terminal_event else "NONE",
-                error_class="none" if error is None else "jivo_http_error",
+                error_class="jivo_exception",
                 api_status=api_status,
-                jivo_status=response.status,
-                jivo_latency_ms=jivo_latency_ms,
+                jivo_status=None,
+                jivo_latency_ms=int((time.monotonic() - started) * 1000),
                 e2e_latency_ms=int((time.monotonic() - request_started) * 1000) if request_started is not None else None,
             )
-        if delivery_role == "final":
-            _record_terminal(
-                "terminal_send_accepted" if error is None and is_terminal_event else "failed",
-                terminal_event=event_kind if is_terminal_event else "NONE",
-                error_class="none" if error is None and is_terminal_event else ("jivo_http_error" if error is not None else "invalid_terminal"),
-                api_status=api_status,
-                jivo_status=response.status,
-                jivo_latency_ms=jivo_latency_ms,
-                e2e_latency_ms=int((time.monotonic() - request_started) * 1000) if request_started is not None else None,
-            )
-        _log_structured(
+        raise
+
+    error = post_error
+    if error is None and response is not None and response.status >= 400:
+        error = _safe_jivo_error(response_body)
+    terminal_delivery = is_terminal_event
+    # A sub-400 response proves Jivo accepted the send, not client render
+    # or delivery. That requires independent Jivo-side evidence.
+    delivery_status = ("status_send_accepted" if delivery_role == "status" else "terminal_send_accepted") if error is None else "jivo_error"
+    jivo_latency_ms = int((time.monotonic() - started) * 1000)
+    if delivery_role == "final":
+        _append_delivery_trace(
             trace_id,
-            "jivo_response_returned",
-            **trace,
-            http_status=response.status,
-            latency_ms=jivo_latency_ms,
-            response_event=event_kind,
-            outcome=delivery_status,
-            delivery_role=delivery_role,
-            delivery_status=delivery_status,
-            client_delivery_status="client_delivery_unconfirmed" if error is None and is_terminal_event else None,
-            terminal=terminal_delivery,
-            error_class=error,
+            "jivo_response",
+            "accepted_by_jivo" if error is None else ("post_exception" if post_error else "rejected_by_jivo"),
+            terminal_event=event_kind if is_terminal_event else "NONE",
+            error_class="none" if error is None else ("jivo_exception" if post_error else "jivo_http_error"),
+            api_status=api_status,
+            jivo_status=response.status if response is not None else None,
+            jivo_latency_ms=jivo_latency_ms,
+            e2e_latency_ms=int((time.monotonic() - request_started) * 1000) if request_started is not None else None,
         )
-        return response.status, error
+    if delivery_role == "final":
+        _record_terminal(
+            "terminal_send_accepted" if error is None and is_terminal_event else "failed",
+            terminal_event=event_kind if is_terminal_event else "NONE",
+            error_class="none" if error is None and is_terminal_event else ("jivo_exception" if post_error else ("jivo_http_error" if error is not None else "invalid_terminal")),
+            api_status=api_status,
+            jivo_status=response.status if response is not None else None,
+            jivo_latency_ms=jivo_latency_ms,
+            e2e_latency_ms=int((time.monotonic() - request_started) * 1000) if request_started is not None else None,
+        )
+    _log_structured(
+        trace_id,
+        "jivo_response_returned",
+        **trace,
+        http_status=response.status if response is not None else None,
+        latency_ms=jivo_latency_ms,
+        response_event=event_kind,
+        outcome="jivo_post_exception" if post_error else delivery_status,
+        delivery_role=delivery_role,
+        delivery_status="jivo_post_exception" if post_error else delivery_status,
+        client_delivery_status="client_delivery_unconfirmed" if error is None and is_terminal_event else None,
+        terminal=terminal_delivery,
+        error_class=error,
+    )
+    return response.status if response is not None else None, error
 
 
 def _safe_jivo_error(body: bytes) -> str:

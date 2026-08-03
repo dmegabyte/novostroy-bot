@@ -1,0 +1,34 @@
+{
+  "brief": {
+    "client_request": "Покажите варианты рядом с метро",
+    "answer_goal": "present_search_results",
+    "cards": [],
+    "mandatory_cta": "Что показать подробнее?"
+  },
+  "gateway_success": {
+    "result_marker": "nmbot.v3.structured_writer.gateway.result.v1",
+    "output": {
+      "intro": "Подобрала варианты.",
+      "cards": [],
+      "recommendation": "",
+      "missing_note": "",
+      "final_question": "Что показать подробнее?"
+    }
+  },
+  "gateway_missing_marker": {"output": {}},
+  "gateway_mismatched_marker": {"result_marker": "nmbot.v3.structured_writer.gateway.result.v0", "output": {}},
+  "malformed": {"result_marker": "nmbot.v3.structured_writer.gateway.result.v1", "output": {"intro": "Без финального вопроса"}},
+  "bare_output": {
+    "intro": "Подобрала варианты.",
+    "cards": [],
+    "recommendation": "",
+    "missing_note": "",
+    "final_question": "Что показать подробнее?"
+  },
+  "pii": {"result_marker": "nmbot.v3.structured_writer.gateway.result.v1", "output": {
+    "intro": "Позвоните +7 999 123-45-67", "cards": [], "recommendation": "", "missing_note": "", "final_question": "Что показать подробнее?"
+  }},
+  "credential": {"result_marker": "nmbot.v3.structured_writer.gateway.result.v1", "output": {
+    "intro": "token=private-value", "cards": [], "recommendation": "", "missing_note": "", "final_question": "Что показать подробнее?"
+  }}
+}

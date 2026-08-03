@@ -1,0 +1,18 @@
+[Unit]
+Description=NMBot isolated V3 runtime shell
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/neiro/novostroy-bot-v3/current
+EnvironmentFile=/home/neiro/novostroy-bot-v3/.env
+Environment=PYTHONPATH=/home/neiro/novostroy-bot-v3/current
+ExecStartPre=/bin/mkdir -p /home/neiro/novostroy-bot-v3/data /home/neiro/novostroy-bot-v3/logs
+ExecStart=/usr/bin/python3 /home/neiro/novostroy-bot-v3/current/scripts/nmbot_v3_service.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

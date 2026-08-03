@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nmbot_v2.card_normalizer import normalize_card
@@ -140,7 +142,8 @@ def test_live_fact_reply_accept_decline_and_invalid_never_implicit_accept() -> N
     assert decline.action == TurnAction.DECLINE_OPERATOR
     assert decline.state.get("pending_followup") is None
     assert invalid.action == TurnAction.CLARIFY_SELECTED_LIVE_FACT
-    assert missing.action == TurnAction.FREEFORM
+    assert missing.action == TurnAction.CLARIFY_SELECTED_LIVE_FACT
+    assert missing.state["pending_followup"] == SELECTED_LIVE_FACT_CONSENT_FOLLOWUP
     assert invalid.state.get("contact_consent") is False
     assert missing.state.get("contact_consent") is False
 
@@ -170,6 +173,26 @@ def test_financing_replaces_generic_selected_intro_and_uses_registry() -> None:
 
     legacy_state = ConversationState(pending_followup="financing_consent")
     assert derive_transition(SemanticPlan(operation="freeform", followup_outcome="accept"), legacy_state).action == TurnAction.ACCEPT_OPERATOR
+
+
+@pytest.mark.parametrize("pending", ("financing_consent", "selected_live_fact_consent"))
+def test_stale_consent_pending_does_not_hijack_new_stable_operation_or_recipe(pending: str) -> None:
+    state = ConversationState(
+        pending_followup=pending,
+        visible_options=(OptionCard(name="Лучи"),),
+    )
+
+    search = derive_transition(SemanticPlan(operation="search"), state)
+    current = derive_transition(SemanticPlan(operation="current_options"), state)
+    turn = TurnProcessor(
+        planner=Planner(SemanticPlan(operation="current_options")),
+    ).process(ctx("покажи текущие варианты"), state)
+
+    assert search.action == TurnAction.SEARCH
+    assert current.action == TurnAction.ANSWER_FROM_CURRENT_OPTIONS
+    assert turn.action == TurnAction.ANSWER_FROM_CURRENT_OPTIONS
+    assert "Проверить условия по этому ЖК?" not in turn.response_text
+    assert "Передать оператору запрос?" not in turn.response_text
 
 
 def test_selected_compound_finishing_metro_and_mortgage_covers_every_requested_fact() -> None:

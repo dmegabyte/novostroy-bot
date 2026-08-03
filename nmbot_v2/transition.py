@@ -6,7 +6,7 @@ from typing import Any
 
 from .contracts import ExecutableTurn, IntentGoal, IntentPlanV3, SemanticPlan, Stage, TurnAction
 from .fact_context import ALLOWED_FACTS
-from .scenario_recipes import transition_for_reply
+from .scenario_recipes import pending_reply_owns_turn, transition_for_reply
 from .semantic_planner import validate_intent_plan_v3
 from .state import ConversationState
 
@@ -82,7 +82,18 @@ _SAFE_TRANSITION_ERROR_CODES = {
 def derive_transition_v3(plan: IntentPlanV3, state: ConversationState) -> TransitionDecision:
     goal = plan.goal
 
-    pending_transition = transition_for_reply(state.pending_followup, plan.followup_outcome)
+    # A stale pending prompt must not hijack a newly classified stable goal.
+    # Resolve it only for an explicit reply outcome or a pending-owned goal.
+    resolves_pending_reply = plan.followup_outcome is not None or goal in {
+        IntentGoal.OPERATOR,
+        IntentGoal.CLARIFY,
+        IntentGoal.RESUME_PENDING,
+    }
+    pending_transition = (
+        transition_for_reply(state.pending_followup, plan.followup_outcome)
+        if resolves_pending_reply
+        else None
+    )
     if pending_transition:
         if pending_transition.requires_pending_action and state.pending_action is None:
             fallback = pending_transition.missing_pending_action_transition
@@ -293,7 +304,11 @@ def derive_transition(plan: SemanticPlan, state: ConversationState) -> Transitio
         return TransitionDecision(Stage.OFF_TOPIC, TurnAction.ANSWER_OFF_TOPIC)
     if op == "reset":
         return TransitionDecision(Stage.RESET, TurnAction.RESET)
-    pending_transition = transition_for_reply(state.pending_followup, plan.followup_outcome)
+    pending_transition = (
+        transition_for_reply(state.pending_followup, plan.followup_outcome)
+        if pending_reply_owns_turn(plan, state.pending_followup)
+        else None
+    )
     if pending_transition:
         if pending_transition.requires_pending_action and state.pending_action is None:
             fallback = pending_transition.missing_pending_action_transition

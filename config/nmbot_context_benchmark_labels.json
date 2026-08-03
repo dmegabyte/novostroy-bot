@@ -1,0 +1,32 @@
+{
+  "schema": "nmbot.context_benchmark_labels.v2",
+  "labeling": "independent_before_scoring",
+  "frozen_before_scoring": true,
+  "not_for_tuning": true,
+  "cases": [
+    {"id":"q001","expected_owner_path":"nmbot_v0/runtime.py","expected_paths":["nmbot_v0/runtime.py","scripts/nmbot_runtime_adapter.py","tests/test_nmbot_v0_runtime.py"]},
+    {"id":"q002","expected_owner_path":"nmbot_v1/runtime.py","expected_paths":["nmbot_v1/runtime.py","docs/NMBOT_RUNTIME_VERSIONS.md"]},
+    {"id":"q003","expected_owner_path":"nmbot_v2/runtime.py","expected_paths":["nmbot_v2/runtime.py","config/nmbot_stage_map.json","tests/test_nmbot_v2_search_contract_runtime.py"]},
+    {"id":"q004","expected_owner_path":"scripts/nmbot_runtime_adapter.py","expected_paths":["scripts/nmbot_runtime_adapter.py","nmbot_v2/contracts.py","nmbot_v2/semantic_planner.py","nmbot_v2/transition.py","tests/test_nmbot_runtime_adapter.py","tests/test_intent_plan_v3_transition.py"]},
+    {"id":"q005","expected_owner_path":"scripts/nmbot_api_server.py","expected_paths":["scripts/nmbot_api_server.py","nmbot_runtime_contract/selector.py"]},
+    {"id":"q006","expected_owner_path":"scripts/nmbot_api_server.py","expected_paths":["scripts/nmbot_api_server.py","scripts/nmbot_runtime_adapter.py"]},
+    {"id":"q007","expected_owner_path":"scripts/nmbot_diag.sh","expected_paths":["scripts/nmbot_diag.sh","docs/JIVO_DIAGNOSTICS.md","scripts/nmbot_api_server.py"]},
+    {"id":"q008","expected_owner_path":"scripts/nmbot_runtime_adapter.py","expected_paths":["scripts/nmbot_runtime_adapter.py","docs/NMBOT_RUNTIME_REGISTRY.md"]},
+    {"id":"q009","expected_owner_path":"scripts/nmbot_n8n_bridge_server.py","expected_paths":["scripts/nmbot_n8n_bridge_server.py","scripts/nmbot_api_server.py","config/nmbot_stage_map.json"]},
+    {"id":"q010","expected_owner_path":"docs/JIVO_BOT_API_INTEGRATION_PLAN.md","expected_paths":["docs/JIVO_BOT_API_INTEGRATION_PLAN.md","docs/NMBOT_EXTERNAL_CONTRACTS.md"]},
+    {"id":"q011","expected_owner_path":"scripts/nmbot_n8n_bridge_server.py","expected_paths":["scripts/nmbot_n8n_bridge_server.py","docs/JIVO_DIAGNOSTICS.md","scripts/nmbot_jivo_trace_analyze.py"]},
+    {"id":"q012","expected_owner_path":"scripts/nmbot_n8n_bridge_server.py","expected_paths":["scripts/nmbot_n8n_bridge_server.py","tests/test_nmbot_n8n_bridge_transport_timeout.py"]},
+    {"id":"q013","expected_owner_path":"docs/JIVO_DIAGNOSTICS.md","expected_paths":["docs/JIVO_DIAGNOSTICS.md","config/nmbot_diagnostic_tools.json","scripts/nmbot_diag.sh"]},
+    {"id":"q014","expected_owner_path":"scripts/nmbot.py","expected_paths":["scripts/nmbot.py","docs/JIVO_DIAGNOSTICS.md"]},
+    {"id":"q015","expected_owner_path":"docs/NMBOT_RUNBOOK.md","expected_paths":["docs/NMBOT_RUNBOOK.md","docs/JIVO_DIAGNOSTICS.md"]},
+    {"id":"q016","expected_owner_path":"docs/JIVO_DIAGNOSTICS.md","expected_paths":["docs/JIVO_DIAGNOSTICS.md","scripts/nmbot_dialogue_report.py","scripts/nmbot_jivo_dialogue_diagnose.py"]},
+    {"id":"q017","expected_owner_path":"docs/NMBOT_RELEASE_IDENTITY.md","expected_paths":["docs/NMBOT_RELEASE_IDENTITY.md","scripts/nmbot_release_identity.py","tests/test_nmbot_release_identity.py"]},
+    {"id":"q018","expected_owner_path":"docs/NMBOT_ATOMIC_RELEASES.md","expected_paths":["docs/NMBOT_ATOMIC_RELEASES.md","scripts/nmbot_atomic_release.py","docs/NMBOT_RUNBOOK.md"]},
+    {"id":"q019","expected_owner_path":"docs/NMBOT_ATOMIC_RELEASES.md","expected_paths":["docs/NMBOT_ATOMIC_RELEASES.md","scripts/nmbot_atomic_release.py"]},
+    {"id":"q020","expected_owner_path":"docs/NMBOT_RUNTIME_VERSIONS.md","expected_paths":["docs/NMBOT_RUNTIME_VERSIONS.md","docs/NMBOT_RUNTIME_REGISTRY.md","docs/JIVO_DIAGNOSTICS.md"]},
+    {"id":"q021","expect_abstain":true,"expected_paths":[]},
+    {"id":"q022","expect_abstain":true,"expected_paths":[]},
+    {"id":"q023","expect_abstain":true,"expected_paths":[]},
+    {"id":"q024","expect_abstain":true,"expected_paths":[]}
+  ]
+}

@@ -147,17 +147,26 @@ First command (**local read-only**):
 python scripts/nmbot_release_preflight.py
 ```
 
-Expected evidence: local file hashes, manifest scope plan for `docs/contracts`, local/fixture/VPS/direct-API/Jivo evidence buckets, and overall `incomplete`. This command is pre-release local evidence only, not post-deploy proof. It does not import or run `scripts/nmbot_release.py`; by default it does not run tests. Use `python scripts/nmbot_release_preflight.py --run-checks` only when you explicitly want the local `scripts/nmbot_check.py` scopes to run.
+Expected evidence: local file hashes, manifest scope plan for `docs/contracts`, local/fixture/VPS/direct-API/Jivo evidence buckets, and overall `incomplete`. This command is pre-release local evidence only, not post-deploy proof. It does not import or run the atomic release owner; by default it does not run tests. Use `python scripts/nmbot_release_preflight.py --run-checks` only when you explicitly want the local `scripts/nmbot_check.py` scopes to run.
 
-Before an approved deploy, assign an immutable release identifier and inspect its
-local manifest with `python3 scripts/nmbot_release_identity.py show`. The actual
-deploy command requires `--release-id ID`; this records the ID with every Jivo
-journal turn after deployment. `release_id` is source attribution, not Jivo
-smoke or production-health proof.
+Before an approved deploy, take a canonical VPS source snapshot with
+`python3 scripts/nmbot_atomic_release.py snapshot-vps-source`, then use
+`compare-snapshot` for exact source-hash comparison. Assign an immutable release
+identifier and inspect its local manifest with `python3
+scripts/nmbot_release_identity.py show`. The guarded atomic deploy workflow
+requires `--release-id ID`; this records the ID with every Jivo journal turn
+after deployment. `release_id` is source attribution, not Jivo smoke or
+production-health proof.
 
-Existing `scripts/nmbot_release.py status` uses SSH and `deploy` mutates remote state, so neither is part of local preflight. Post-deploy read-only verify needs separately authorized VPS/Jivo/direct-API route evidence. If Jivo smoke is missing, the release state is `incomplete`, never green. Backup, deploy, restart and live Jivo smoke require explicit release owner stop/go.
+`python3 scripts/nmbot.py release status` delegates to atomic read-only `recon`
+and uses SSH, so it is not part of local preflight. Recon verifies systemd,
+canonical paths, environment names, identity and health; it does not replace
+the snapshot-plus-compare source-hash proof. Post-deploy read-only verification
+needs separately authorized VPS/Jivo/direct-API route evidence. If Jivo smoke is
+missing, the release state is `incomplete`, never green. Guarded deploy, restart
+and live Jivo smoke require explicit release owner stop/go.
 
-Reference: `docs/NMBOT_OPERATIONS_MAP.md`; `scripts/nmbot_release.py`; `scripts/nmbot_release_preflight.py`; `scripts/nmbot.py preflight`.
+Reference: `docs/NMBOT_OPERATIONS_MAP.md`; `scripts/nmbot_atomic_release.py`; `scripts/nmbot_release_preflight.py`; `scripts/nmbot.py preflight`.
 
 ## 5. Rollback
 
@@ -390,4 +399,4 @@ instructions describe the legacy Telegram contour. They may be used only for an
 explicitly requested rollback/debug task and never as proof that Jivo production
 works. Current Jivo work must not restart those services.
 
-Source references: `docs/NMBOT_PROJECT_SIMPLIFICATION_PLAN.md:165-188,478-509,529-543,558-571`; `docs/NMBOT_OPERATIONS_MAP.md:3,23-27`; `docs/NMBOT_RUNTIME_REGISTRY.md`; `docs/BOT_ARCHITECTURE.md`; `scripts/nmbot_diag.sh:88-118`; `scripts/nmbot_release.py:175-180`; `scripts/nmbot_release_preflight.py`; `scripts/nmbot_project_audit.py`; `scripts/nmbot.py`.
+Source references: `docs/NMBOT_PROJECT_SIMPLIFICATION_PLAN.md:165-188,478-509,529-543,558-571`; `docs/NMBOT_OPERATIONS_MAP.md:3,23-27`; `docs/NMBOT_RUNTIME_REGISTRY.md`; `docs/BOT_ARCHITECTURE.md`; `scripts/nmbot_diag.sh:88-118`; `scripts/nmbot_atomic_release.py`; `scripts/nmbot_release_preflight.py`; `scripts/nmbot_project_audit.py`; `scripts/nmbot.py`.

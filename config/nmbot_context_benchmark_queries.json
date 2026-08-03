@@ -1,0 +1,32 @@
+{
+  "schema": "nmbot.context_benchmark_queries.v2",
+  "generation": "independent_before_labels",
+  "frozen_before_scoring": true,
+  "not_for_tuning": true,
+  "cases": [
+    {"id":"q001","query":"Кто владеет runtime V0 и какой локальный gate запускать после изменения его prompt-логики?"},
+    {"id":"q002","query":"Где проходит граница ответственности V1 и почему её нельзя считать частью V2/V3 composer?"},
+    {"id":"q003","query":"Какой owner отвечает за V2 runtime и чем подтвердить изменение semantic plan на стадии поиска?"},
+    {"id":"q004","query":"Кто владеет V3 public runtime и какие targeted suites нужны при изменении IntentPlanV3?"},
+    {"id":"q005","query":"Как `runtime_version_override` взаимодействует с active runtime store в selector?"},
+    {"id":"q006","query":"Почему `_normalize_runtime_version()` возвращает V2 для пустого или неподдерживаемого значения?"},
+    {"id":"q007","query":"Нужно быстро понять, какая версия бота сейчас выбрана и каким маркером это нормально проверить."},
+    {"id":"q008","query":"На какой стадии V3 использует V2 engine и где появляется декорация `runtime=v3`, `engine=v2`?"},
+    {"id":"q009","query":"Как устроен маршрут Jivo `CLIENT_MESSAGE` от webhook через bridge до private API?"},
+    {"id":"q010","query":"Чем отличается terminal `BOT_MESSAGE` от `INVITE_AGENT` в контракте Jivo Bot API?"},
+    {"id":"q011","query":"Бридж вроде поднят, но клиент не получил ответ. Как проверить всю цепочку, а не только systemd?"},
+    {"id":"q012","query":"Что проверить при ошибке `X-NMBOT-Bridge-Token` между n8n workflow и API?"},
+    {"id":"q013","query":"Какой канонический read-only маршрут диагностики использовать: `nmbot diag`, `diagnose --trace` или старые health-скрипты?"},
+    {"id":"q014","query":"Как по task id диагностировать один сбой gateway или Overmind без широкого production-аудита?"},
+    {"id":"q015","query":"Где искать первый error event и как проверить свежесть журнала после неудачного Jivo request?"},
+    {"id":"q016","query":"Мне нужно собрать timeline одного диалога из bridge log, dialogue journal и planner trace. Какой диагностический маршрут выбрать?"},
+    {"id":"q017","query":"Как проверить release identity в read-only режиме и не вызвать `create --write`?"},
+    {"id":"q018","query":"Что должен показать atomic release recon перед решением о deploy или rollback?"},
+    {"id":"q019","query":"Как сравнить snapshot VPS source с локальным immutable artifact перед релизом?"},
+    {"id":"q020","query":"После переключения selector на V3 какие runtime markers и terminal outcomes нужны для release verification?"},
+    {"id":"q021","query":"Как настроить partition pruning для большой таблицы событий в PostgreSQL?"},
+    {"id":"q022","query":"Почему Kubernetes pod остаётся в CrashLoopBackOff после успешной сборки Docker image?"},
+    {"id":"q023","query":"Как в React устранить лишние перерисовки большой виртуализированной таблицы?"},
+    {"id":"q024","query":"Как настроить CORS middleware для нескольких доменов в Django?"}
+  ]
+}

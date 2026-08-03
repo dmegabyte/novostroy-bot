@@ -119,8 +119,8 @@ def test_delivery_v1_jivo_rejection_is_delivery_failure_not_upstream_failure():
         {"__line__": 2, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123463", "stage": "api_completed", "outcome": "completed"},
         {"__line__": 3, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123463", "stage": "terminal_selected", "outcome": "selected"},
         {"__line__": 4, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123463", "stage": "jivo_send_attempted", "outcome": "attempted"},
-        {"__line__": 5, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123463", "stage": "jivo_response", "outcome": "rejected_by_jivo", "jivo_status": 403},
-        {"__line__": 6, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123463", "stage": "terminal_delivery", "outcome": "failed"},
+        {"__line__": 5, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123463", "stage": "jivo_response", "outcome": "rejected_by_jivo", "error_class": "jivo_http_error", "jivo_status": 403},
+        {"__line__": 6, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": "trace_abcdef123463", "stage": "terminal_delivery", "outcome": "failed", "error_class": "jivo_http_error", "jivo_status": 403},
     ])
     trace = result["traces"][0]
     assert trace["stage"] == "transport_auth_or_http_failure"

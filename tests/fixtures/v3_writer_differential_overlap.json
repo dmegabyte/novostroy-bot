@@ -1,0 +1,29 @@
+{
+  "brief": {
+    "client_request": "Покажите варианты рядом с метро",
+    "answer_goal": "present_search_results",
+    "cards": [
+      {"name": "ЖК Первый", "confirmed_facts": {"metro": "Рядом с метро"}},
+      {"name": "ЖК Второй", "confirmed_facts": {"price": "от 12 млн ₽"}}
+    ],
+    "mandatory_cta": "Какой ЖК показать подробнее?"
+  },
+  "valid_output": {
+    "intro": "Нашла два варианта для сравнения.",
+    "cards": [
+      {"name": "ЖК Первый", "text": "Можно начать с маршрута до метро."},
+      {"name": "ЖК Второй", "text": "Здесь подтверждён стартовый бюджет."}
+    ],
+    "recommendation": "",
+    "missing_note": "",
+    "final_question": "Какой ЖК показать подробнее?"
+  },
+  "invalid_output": {
+    "intro": "Нашла варианты.",
+    "cards": [],
+    "recommendation": "",
+    "missing_note": "",
+    "final_question": "Что ещё показать?"
+  },
+  "fallback": "Не могу надёжно подтвердить информацию, поэтому не буду гадать.\n\nУточните, пожалуйста, что для вас важнее всего?"
+}

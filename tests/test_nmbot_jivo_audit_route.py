@@ -75,6 +75,31 @@ def test_audit_strict_requires_delivery_trace_before_ssh(tmp_path) -> None:
     assert not ssh_log.exists()
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("--delivery-trace", "--remote-log", "/tmp/other.jsonl"),
+        ("--remote-log", "/tmp/other.jsonl", "--strict", "--delivery-trace"),
+    ],
+)
+def test_delivery_trace_rejects_remote_log_override_before_ssh(tmp_path, args: tuple[str, ...]) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    ssh_log = tmp_path / "ssh.log"
+    (fake_bin / "ssh").write_text("#!/usr/bin/env bash\nprintf 'called\\n' >> \"$SSH_LOG\"\n", encoding="utf-8")
+    (fake_bin / "ssh").chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(SCRIPT), *args], cwd=ROOT,
+        env={**os.environ, "PATH": f"{fake_bin}:{os.environ['PATH']}", "SSH_LOG": str(ssh_log)},
+        text=True, capture_output=True, check=False,
+    )
+
+    assert result.returncode == 2
+    assert "--delivery-trace cannot be combined with --remote-log" in result.stderr
+    assert not ssh_log.exists()
+
+
 def test_audit_rejects_unsafe_remote_log_path() -> None:
     result = subprocess.run(
         ["bash", str(SCRIPT), "--remote-log", "/tmp/a'; echo injected"],

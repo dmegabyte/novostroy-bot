@@ -34,6 +34,9 @@ DELIVERY_V1_SELECTED_FAILURE_PREFIXES = (
     ("bridge_accepted", "api_completed", "terminal_selected", "terminal_delivery"),
     ("bridge_accepted", "api_failed", "terminal_selected", "terminal_delivery"),
 )
+DELIVERY_V1_TERMINAL_EVENTS = frozenset({"BOT_MESSAGE", "INVITE_AGENT"})
+DELIVERY_V1_API_FAILURE_ERRORS = frozenset({"api_exception", "hard_timeout"})
+DELIVERY_V1_PRE_SEND_FAILURE_ERRORS = frozenset({"stale_event", "provider_config", "invalid_terminal"})
 TRACE_REF_RE = re.compile(r"trace_[0-9a-f]{12}")
 NONTERMINAL_STATUS_MARKERS = ("status_sent", "fallback_status_sent", "status_update")
 UPSTREAM_MARKERS = ("upstream_response", "nmbot_response", "local_response", "api_response", "llm_response", "gateway_response")
@@ -169,6 +172,68 @@ def client_delivery_confirmed(row: dict[str, Any]) -> bool:
     )
 
 
+def _status_in(row: dict[str, Any], field: str, lower: int, upper: int) -> bool:
+    """Validate an observed HTTP status in the given inclusive range.
+
+    Historical projections may omit optional evidence, so absence is not a
+    contradiction. A supplied status, however, is never silently ignored.
+    """
+    value = row.get(field)
+    if value is None:
+        return True
+    return isinstance(value, int) and not isinstance(value, bool) and lower <= value <= upper
+
+
+def _optional_fields_agree(left: dict[str, Any], right: dict[str, Any], field: str) -> bool:
+    """Compare producer fields only when both records contain evidence."""
+    return field not in left or field not in right or left[field] == right[field]
+
+
+def delivery_v1_event_contract_error(event: dict[str, Any]) -> str | None:
+    """Return an error when one closed delivery-v1 record contradicts its stage.
+
+    This deliberately validates the producer's projection fields, rather than
+    inferring success from a stage name.  In particular, terminal acceptance
+    needs the matching Jivo acceptance response and a successful HTTP status.
+    """
+    stage = stage_of(event)
+    outcome = str(event.get("outcome") or "").lower()
+    error_class = str(event.get("error_class") or "none").lower()
+    terminal_event = str(event.get("terminal_event") or "NONE")
+    terminal_event_valid = terminal_event in DELIVERY_V1_TERMINAL_EVENTS
+    terminal_event_missing = "terminal_event" not in event
+    api_status = event.get("api_status")
+    jivo_status = event.get("jivo_status")
+
+    if stage == "bridge_accepted":
+        valid = outcome == "accepted" and error_class == "none" and terminal_event == "NONE"
+    elif stage == "api_completed":
+        valid = terminal_event == "NONE" and jivo_status is None and (
+            (outcome == "completed" and error_class == "none" and _status_in(event, "api_status", 200, 399))
+            or (outcome == "failed" and error_class == "api_http_error" and _status_in(event, "api_status", 400, 599))
+        )
+    elif stage == "api_failed":
+        valid = outcome == "failed" and error_class in {"none", *DELIVERY_V1_API_FAILURE_ERRORS} and terminal_event == "NONE" and api_status is None and jivo_status is None
+    elif stage in {"terminal_selected", "jivo_send_attempted"}:
+        expected_outcome = "selected" if stage == "terminal_selected" else "attempted"
+        valid = outcome == expected_outcome and error_class == "none" and (terminal_event_valid or terminal_event_missing) and jivo_status is None
+    elif stage == "jivo_response":
+        valid = (terminal_event_valid or terminal_event_missing) and (
+            (outcome == "accepted_by_jivo" and error_class == "none" and _status_in(event, "jivo_status", 200, 399))
+            or (outcome == "rejected_by_jivo" and error_class == "jivo_http_error" and _status_in(event, "jivo_status", 400, 599))
+            or (outcome == "post_exception" and error_class == "jivo_exception" and jivo_status is None)
+        )
+    elif stage == "terminal_delivery":
+        valid = (
+            (outcome == "terminal_send_accepted" and error_class == "none" and (terminal_event_valid or terminal_event_missing) and _status_in(event, "jivo_status", 200, 399))
+            or (outcome == "not_sent" and error_class in {"cancelled", *DELIVERY_V1_API_FAILURE_ERRORS, "stale_event"} and jivo_status is None)
+            or (outcome == "failed" and error_class in {"jivo_http_error", "jivo_exception", "provider_config", "invalid_terminal"})
+        )
+    else:
+        valid = False
+    return None if valid else "invalid_delivery_event_contract"
+
+
 def delivery_v1_lifecycle(events: list[dict[str, Any]]) -> tuple[bool, str | None]:
     """Validate a delivery-v1 terminal lifecycle without inferring success.
 
@@ -176,7 +241,10 @@ def delivery_v1_lifecycle(events: list[dict[str, Any]]) -> tuple[bool, str | Non
     has occurred in order.  Shorter paths are deliberately limited to recorded
     cancellation and failures where no terminal send was possible.
     """
-    lifecycle = [stage_of(event) for event in events if event.get("schema") == DELIVERY_TRACE_SCHEMA]
+    delivery_events = [event for event in events if event.get("schema") == DELIVERY_TRACE_SCHEMA]
+    lifecycle = [stage_of(event) for event in delivery_events]
+    if any(delivery_v1_event_contract_error(event) for event in delivery_events):
+        return False, "invalid_delivery_event_contract"
     terminal = next((event for event in reversed(events) if event.get("schema") == DELIVERY_TRACE_SCHEMA and stage_of(event) == "terminal_delivery"), None)
     if terminal is None:
         return False, "missing_terminal"
@@ -188,7 +256,28 @@ def delivery_v1_lifecycle(events: list[dict[str, Any]]) -> tuple[bool, str | Non
         and lifecycle[1] in {"api_completed", "api_failed"}
         and tuple(lifecycle[2:]) == DELIVERY_V1_FULL_LIFECYCLE[2:]
     ):
-        return True, None
+        response = delivery_events[-2]
+        if (
+            outcome == "terminal_send_accepted"
+            and response.get("outcome") == "accepted_by_jivo"
+            and _optional_fields_agree(terminal, response, "jivo_status")
+            and _optional_fields_agree(terminal, response, "terminal_event")
+        ):
+            return True, None
+        if (
+            outcome == "failed"
+            and response.get("outcome") == "rejected_by_jivo"
+            and terminal.get("error_class") == "jivo_http_error"
+            and terminal.get("jivo_status") == response.get("jivo_status")
+        ):
+            return True, None
+        if (
+            outcome == "failed"
+            and response.get("outcome") == "post_exception"
+            and terminal.get("error_class") == "jivo_exception"
+            and terminal.get("jivo_status") is None
+        ):
+            return True, None
     if outcome == "not_sent" and error_class == "cancelled":
         # Cancellation may interrupt any already-started prefix, but cannot
         # skip/reorder it or claim a Jivo response that never arrived.
@@ -196,11 +285,11 @@ def delivery_v1_lifecycle(events: list[dict[str, Any]]) -> tuple[bool, str | Non
             prefix = ("bridge_accepted", api_stage, "terminal_selected", "jivo_send_attempted")
             if tuple(lifecycle) in {(*prefix[:length], "terminal_delivery") for length in range(1, len(prefix) + 1)}:
                 return True, None
-    if tuple(lifecycle) == DELIVERY_V1_API_FAILURE_LIFECYCLE and outcome in {"failed", "not_sent"} and error_class in {"api_exception", "hard_timeout"}:
+    if tuple(lifecycle) == DELIVERY_V1_API_FAILURE_LIFECYCLE and outcome == "not_sent" and error_class in DELIVERY_V1_API_FAILURE_ERRORS:
         return True, None
     if tuple(lifecycle) in DELIVERY_V1_PRE_SEND_FAILURE_LIFECYCLES and outcome == "failed" and error_class == "invalid_terminal":
         return True, None
-    if tuple(lifecycle) in DELIVERY_V1_SELECTED_FAILURE_PREFIXES and outcome in {"failed", "not_sent"} and error_class in {"stale_event", "provider_config", "invalid_terminal"}:
+    if tuple(lifecycle) in DELIVERY_V1_SELECTED_FAILURE_PREFIXES and outcome in {"failed", "not_sent"} and error_class in DELIVERY_V1_PRE_SEND_FAILURE_ERRORS:
         return True, None
     return False, "invalid_delivery_lifecycle"
 

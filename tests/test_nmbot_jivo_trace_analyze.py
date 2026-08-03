@@ -124,10 +124,10 @@ def test_privacy_safe_delivery_projection_is_correlated_and_terminal_only_at_del
     assert result["traces"][ref]["terminal_result"] == "client_delivery_unconfirmed"
 
 
-def test_delivery_v1_async_ack_with_terminal_succeeds_strict_but_alone_is_unfinished(tmp_path: Path):
+def test_delivery_v1_bridge_acceptance_with_terminal_succeeds_strict_but_alone_is_unfinished(tmp_path: Path):
     ref = "trace_abcdef123459"
     completed_rows = [
-        {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "bridge_accepted", "outcome": "accepted_async"},
+        {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "bridge_accepted", "outcome": "accepted"},
         {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "api_completed", "outcome": "completed"},
         {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "terminal_selected", "outcome": "selected"},
         {"schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "jivo_send_attempted", "outcome": "attempted"},
@@ -150,7 +150,7 @@ def test_delivery_v1_async_ack_with_terminal_succeeds_strict_but_alone_is_unfini
     assert completed["summary"]["jivo_accepted"] == 1
     assert completed["summary"]["client_delivery_confirmed"] == 0
     assert completed["traces"][ref]["terminal_result"] == "client_delivery_unconfirmed"
-    assert completed["traces"][ref]["accepted_async_seen"] is True
+    assert completed["traces"][ref]["accepted_async_seen"] is False
 
     pending = mod.analyze_rows([completed_rows[0] | {"__line__": 1}])
     assert pending["summary"]["unfinished"] == 1
@@ -182,6 +182,25 @@ def test_delivery_v1_valid_api_failure_and_cancel_exceptions_are_strict_valid():
     ])
     assert cancelled["summary"]["violations"] == 0
     assert cancelled["summary"]["jivo_accepted"] == 0
+
+
+def test_delivery_v1_jivo_post_exception_is_a_valid_terminal_delivery_failure():
+    ref = "trace_abcdef123462"
+    rows = [
+        {"__line__": 1, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "bridge_accepted", "outcome": "accepted"},
+        {"__line__": 2, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "api_completed", "outcome": "completed"},
+        {"__line__": 3, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "terminal_selected", "outcome": "selected"},
+        {"__line__": 4, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "jivo_send_attempted", "outcome": "attempted"},
+        {"__line__": 5, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "jivo_response", "outcome": "post_exception", "error_class": "jivo_exception", "jivo_status": None},
+        {"__line__": 6, "schema": "nmbot.jivo.delivery_trace.v1", "trace_ref": ref, "stage": "terminal_delivery", "outcome": "failed", "error_class": "jivo_exception"},
+    ]
+
+    result = mod.analyze_rows(rows, strict_delivery_lifecycle=True)
+
+    assert result["summary"]["terminal_failures"] == 1
+    assert result["summary"]["violations"] == 0
+    assert result["traces"][ref]["delivery_lifecycle_valid"] is True
+    assert result["traces"][ref]["terminal_result"] == "terminal_send_failed"
 
 
 def test_delivery_projection_api_failure_fallback_then_terminal_acceptance_is_unconfirmed():
@@ -246,3 +265,60 @@ def test_delivery_v1_invalid_trace_refs_are_never_grouped_or_emitted():
     assert result["summary"]["events"] == 0
     assert result["summary"]["traces"] == 0
     assert raw_trace not in str(result)
+
+
+def test_delivery_v1_closed_outcome_contract_table():
+    """Acceptance and failure must agree with the immediately preceding Jivo result."""
+    ref = "trace_abcdef123470"
+
+    def event(stage: str, outcome: str, **fields: object) -> dict[str, object]:
+        return {
+            "schema": "nmbot.jivo.delivery_trace.v1",
+            "trace_ref": ref,
+            "stage": stage,
+            "outcome": outcome,
+            "terminal_event": "NONE",
+            "error_class": "none",
+            "api_status": None,
+            "jivo_status": None,
+            **fields,
+        }
+
+    common = [
+        event("bridge_accepted", "accepted"),
+        event("api_completed", "completed", api_status=200),
+        event("terminal_selected", "selected", terminal_event="BOT_MESSAGE"),
+        event("jivo_send_attempted", "attempted", terminal_event="BOT_MESSAGE"),
+    ]
+    cases = [
+        (
+            "accepted 2xx",
+            [*common, event("jivo_response", "accepted_by_jivo", terminal_event="BOT_MESSAGE", jivo_status=202), event("terminal_delivery", "terminal_send_accepted", terminal_event="BOT_MESSAGE", jivo_status=202)],
+            True,
+        ),
+        (
+            "rejected 403 ends failed",
+            [*common, event("jivo_response", "rejected_by_jivo", terminal_event="BOT_MESSAGE", error_class="jivo_http_error", jivo_status=403), event("terminal_delivery", "failed", terminal_event="BOT_MESSAGE", error_class="jivo_http_error", jivo_status=403)],
+            True,
+        ),
+        (
+            "rejected 403 cannot claim acceptance",
+            [*common, event("jivo_response", "rejected_by_jivo", terminal_event="BOT_MESSAGE", error_class="jivo_http_error", jivo_status=403), event("terminal_delivery", "terminal_send_accepted", terminal_event="BOT_MESSAGE", jivo_status=403)],
+            False,
+        ),
+        (
+            "rejected outcome cannot carry a 2xx status",
+            [*common, event("jivo_response", "rejected_by_jivo", terminal_event="BOT_MESSAGE", error_class="jivo_http_error", jivo_status=202), event("terminal_delivery", "failed", terminal_event="BOT_MESSAGE", error_class="jivo_http_error", jivo_status=202)],
+            False,
+        ),
+        (
+            "rejection terminal error must match response",
+            [*common, event("jivo_response", "rejected_by_jivo", terminal_event="BOT_MESSAGE", error_class="jivo_http_error", jivo_status=403), event("terminal_delivery", "failed", terminal_event="BOT_MESSAGE", error_class="jivo_exception", jivo_status=403)],
+            False,
+        ),
+    ]
+
+    for _, rows, valid in cases:
+        result = mod.analyze_rows([row | {"__line__": index + 1} for index, row in enumerate(rows)], strict_delivery_lifecycle=True)
+        assert result["traces"][ref]["delivery_lifecycle_valid"] is valid
+        assert result["summary"]["jivo_accepted"] == int(valid and rows[-1]["outcome"] == "terminal_send_accepted")

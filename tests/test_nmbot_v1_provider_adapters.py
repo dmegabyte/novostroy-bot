@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+import nmbot_v1.provider_adapters as provider_adapters
 from nmbot_v1.contracts import V1Error
 from nmbot_v1.one_model_response import validate_one_model_response
 from nmbot_v1.provider_adapters import (
@@ -153,6 +154,39 @@ def test_v1_search_retries_invalid_json_once_without_copying_raw_output() -> Non
     with pytest.raises(V1Error, match="invalid_json"):
         asyncio.run(V1GatewaySearchPort(always_bad).search(V1SearchRequest()))
     assert len(always_bad.calls) == 2
+
+
+def test_v1_search_retry_uses_remaining_deadline_and_stops_when_exhausted(monkeypatch) -> None:
+    clock = [100.0]
+    monkeypatch.setattr(provider_adapters, "monotonic", lambda: clock[0])
+    monkeypatch.setenv("NMBOT_V1_SEARCH_TIMEOUT", "10")
+
+    class AdvancingGateway(SequenceGateway):
+        def __init__(self, responses: list[tuple[str, dict[str, Any]]], advance: float) -> None:
+            super().__init__(responses)
+            self.advance = advance
+
+        async def _run_gateway_request(self, request_data: dict[str, Any], headers: dict[str, Any], timeout: int) -> tuple[str, dict[str, Any]]:
+            response = await super()._run_gateway_request(request_data, headers, timeout)
+            clock[0] += self.advance
+            return response
+
+    valid = json.dumps({"schema_version": 1, "cards": [], "attempts": []})
+    gateway = AdvancingGateway([("{", {}), (valid, {})], advance=4)
+    asyncio.run(V1GatewaySearchPort(gateway).search(V1SearchRequest()))
+    assert [call[2] for call in gateway.calls] == [10, 6]
+
+    clock[0] = 100.0
+    exhausted = AdvancingGateway([("{", {}), (valid, {})], advance=10)
+    with pytest.raises(V1Error, match="upstream_error"):
+        asyncio.run(V1GatewaySearchPort(exhausted).search(V1SearchRequest()))
+    assert len(exhausted.calls) == 1
+
+    clock[0] = 100.0
+    subsecond = AdvancingGateway([("{", {}), (valid, {})], advance=9.5)
+    with pytest.raises(V1Error, match="upstream_error"):
+        asyncio.run(V1GatewaySearchPort(subsecond).search(V1SearchRequest()))
+    assert len(subsecond.calls) == 1
 
 
 def test_v1_provider_adapters_fail_closed_on_safe_fallback_invalid_json_and_unknown_fields() -> None:

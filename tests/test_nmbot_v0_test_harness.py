@@ -13,7 +13,7 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run([sys.executable, str(SCRIPT), *args], cwd=ROOT, text=True, capture_output=True, check=False)
 
 
-def test_v0_harness_successful_flow_is_stateful_and_uses_two_ports() -> None:
+def test_v0_harness_successful_flow_is_stateful_and_scenario_only() -> None:
     proc = _run("--scenario", "successful_flow", "--json")
 
     assert proc.returncode == 0, proc.stderr
@@ -21,7 +21,7 @@ def test_v0_harness_successful_flow_is_stateful_and_uses_two_ports() -> None:
     result = payload["results"][0]
 
     assert result["ok"] is True
-    assert result["calls"] == ["scenario_search", "answer", "scenario_search", "answer"]
+    assert result["calls"] == ["scenario_search", "scenario_search"]
     assert [card["name"] for card in result["turns"][0]["state"]["visible_options"]] == ["ЖК Первый", "ЖК Второй", "ЖК Третий"]
     assert result["turns"][1]["state"]["selected_option_name"] == "ЖК Первый"
     assert "Какой вариант хотите разобрать подробнее?" not in result["turns"][1]["message"]
@@ -40,15 +40,15 @@ def test_v0_harness_missing_fact_requests_operator_phone() -> None:
     assert "Оставите номер телефона, чтобы оператор проверил это и связался с вами?" in turn["message"]
 
 
-def test_v0_harness_unknown_card_is_expected_safe_fallback_with_unchanged_state() -> None:
+def test_v0_harness_unknown_card_keeps_canonical_state_and_card() -> None:
     proc = _run("--scenario", "unknown_card", "--json")
 
     assert proc.returncode == 0, proc.stderr
     payload = json.loads(proc.stdout)
     turn = payload["results"][0]["turns"][0]
 
-    assert turn["ok"] is False
-    assert turn["error_code"] == "invalid_answer_output"
+    assert turn["ok"] is True
+    assert turn["error_code"] is None
     assert [card["name"] for card in turn["state"]["visible_options"]] == ["ЖК Свой"]
 
 

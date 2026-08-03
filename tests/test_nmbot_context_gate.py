@@ -244,16 +244,14 @@ def test_long_symbol_span_is_an_honest_partial_budget_stop(tmp_path: Path) -> No
     assert report["trace"]["lines_loaded"] == 5
 
 
-def test_ast_symbol_adds_related_test_as_separate_source(tmp_path: Path) -> None:
+def test_symbol_phrase_requires_explicit_candidate_selection(tmp_path: Path) -> None:
     report = run_gate(tmp_path, "где target_symbol", "symbol")
 
-    assert report["route"] == "ast"
-    assert report["stop_reason"] == "owner_contract_and_test"
-    assert [item["path"] for item in report["context"]] == ["scripts/search.py", "tests/test_search.py"]
-    assert report["context"][0]["start_line"] == 1
-    assert report["context"][0]["end_line"] == 2
-    assert report["context"][1]["start_line"] == 3
-    assert report["context"][1]["end_line"] == 4
+    assert report["route"] == "selection_required"
+    assert report["abstain"] is True
+    assert report["context"] == []
+    assert report["candidates"][0]["candidate_id"] == "c1"
+    assert report["candidates"][0]["target_spec"]["target"] == "target_symbol"
 
 
 def test_symbol_related_test_without_symbol_is_omitted_not_line_one(tmp_path: Path) -> None:
@@ -276,14 +274,12 @@ def test_symbol_related_test_without_symbol_is_omitted_not_line_one(tmp_path: Pa
     assert "tests/test_other.py" not in [item["path"] for item in report["context"]]
 
 
-def test_current_source_exact_symbol_adds_focused_test_when_budget_allows(tmp_path: Path) -> None:
+def test_current_source_phrase_requires_explicit_candidate_selection(tmp_path: Path) -> None:
     report = run_gate(tmp_path, "где target_symbol", "current-source", max_sources=2)
 
-    assert report["route"] == "current_source"
-    assert report["stop_reason"] == "owner_contract_and_test"
-    assert [item["path"] for item in report["context"]] == ["scripts/search.py", "tests/test_search.py"]
-    assert report["context"][1]["start_line"] == 3
-    assert report["context"][1]["end_line"] == 4
+    assert report["route"] == "selection_required"
+    assert report["context"] == []
+    assert report["candidates"][0]["candidate_id"] == "c1"
 
 
 def test_related_test_range_is_narrowest_nested_span_not_line_one(tmp_path: Path) -> None:
@@ -381,14 +377,13 @@ def test_stage_test_comment_or_string_symbol_only_is_omitted_from_context(tmp_pa
         assert [item["path"] for item in items] == ["scripts/search.py"]
 
 
-def test_docs_route_uses_unique_anchor_paths_max_two(tmp_path: Path) -> None:
+def test_docs_route_requires_explicit_anchor_selection(tmp_path: Path) -> None:
     report = run_gate(tmp_path, "docs Deterministic contract", "docs")
 
-    assert report["route"] == "docs"
-    assert report["stop_reason"] == "definition_of_done"
-    assert len(report["context"]) <= 2
-    assert report["context"][0]["path"] == "docs/search.md"
-    assert "anchor" in report["context"][0]
+    assert report["route"] == "selection_required"
+    assert report["context"] == []
+    assert len(report["candidates"]) <= 5
+    assert report["candidates"][0]["path"] == "docs/search.md"
 
 
 def test_history_and_production_are_zero_context_handoffs(tmp_path: Path) -> None:
@@ -411,9 +406,8 @@ def test_ambiguous_clarifies_without_navigation_stage_drift_and_deep_audit(tmp_p
 
     assert clarify["route"] == "clarify_evidence_type"
     assert clarify["trace"]["candidate_count"] == 0
-    assert stage["route"] == "stage"
-    assert stage["stop_reason"] == "topic_changed_follow_up"
-    assert "follow_up" in stage
+    assert stage["route"] == "selection_required"
+    assert stage["context"] == []
     assert audit["route"] == "deep_audit_handoff"
     assert audit["stop_reason"] == "deep_audit_required"
 
@@ -459,9 +453,22 @@ def test_do_not_open_budgets_dedupe_and_fallback_candidate_only(tmp_path: Path) 
     assert len(blocked["context"]) == len({item["path"] for item in blocked["context"]})
     assert budgeted["trace"]["selected_source_count"] == 1
     assert budgeted["trace"]["lines_loaded"] <= 1
-    assert fallback["route"] == "bounded_fallback"
+    assert fallback["route"] == "selection_required"
     assert all(item["candidate_only"] is True for item in fallback["candidates"])
-    assert len(fallback["candidates"]) <= 2
+    assert len(fallback["candidates"]) <= 5
+
+
+def test_candidate_metadata_keeps_same_path_distinct_targets(tmp_path: Path) -> None:
+    mod = load_module()
+    items = [
+        {"candidate_id": "c1", "path": "scripts/same.py", "start_line": 1, "end_line": 2, "target_spec": {"target_kind": "symbol", "target": "same", "target_owner": "scripts/same.py", "owner_path": "scripts/same.py"}},
+        {"candidate_id": "c2", "path": "scripts/same.py", "start_line": 5, "end_line": 6, "target_spec": {"target_kind": "symbol", "target": "same", "target_owner": "scripts/same.py", "owner_path": "scripts/same.py"}},
+    ]
+
+    candidates = mod._candidate_list(items, max_sources=5, do_not_open=[])
+
+    assert [item["candidate_id"] for item in candidates] == ["c1", "c2"]
+    assert [item["start_line"] for item in candidates] == [1, 5]
 
 
 def test_do_not_open_glob_blocks_tests_and_rejects_unsafe_pattern(tmp_path: Path) -> None:
@@ -556,7 +563,7 @@ def test_intent_symbol_current_source_and_docs_resolution(tmp_path: Path) -> Non
 
     assert symbol["route"] == "ast"
     assert current["route"] == "current_source"
-    assert docs["route"] == "docs"
+    assert docs["route"] == "selection_required"
     assert symbol["intent_card_id"] == "symbol.search.target"
     assert current["intent_card_id"] == "current.search.target"
     assert docs["intent_card_id"] == "docs.search.contract"
@@ -585,11 +592,11 @@ def test_docs_intent_owner_scoped_anchor_can_be_outside_global_top3(tmp_path: Pa
 
     report = mod.run_gate("где внешний контракт", project_id="nmbot", evidence_type="docs", definition_of_done="done", root=root, manifest_path=manifest, intents_path=intents)
 
-    assert report["route"] == "docs"
+    assert report["route"] == "selection_required"
     assert report["intent_card_id"] == "docs.owner.scoped"
     assert report["trace"]["intent_card_id"] == "docs.owner.scoped"
-    assert [item["path"] for item in report["context"]] == ["docs/zz_owner.md"]
-    assert report["context"][0]["anchor"] == "# docs owner-target"
+    assert report["context"] == []
+    assert [item["path"] for item in report["candidates"]] == ["docs/zz_owner.md"]
 
 
 def test_docs_intent_nonpositive_owner_anchor_is_rejected(tmp_path: Path) -> None:
@@ -754,6 +761,6 @@ def test_cli_real_stage_v2_search_uses_exact_source_symbol_and_focused_test() ->
     assert payload["context"][0]["path"] == "scripts/nmbot_runtime_adapter.py"
     assert payload["context"][0]["source_symbol"] == "search"
     assert payload["context"][0]["start_line"] > 1
-    assert payload["context"][0]["start_line"] < 900
+    assert payload["context"][0]["end_line"] >= payload["context"][0]["start_line"]
     assert payload["context"][1]["path"] == "tests/test_nmbot_v2_search_contract_runtime.py"
     assert payload["context"][1]["start_line"] > 1

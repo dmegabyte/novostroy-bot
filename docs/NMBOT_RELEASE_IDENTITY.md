@@ -38,18 +38,18 @@ python3 scripts/nmbot_release_identity.py create \
 Use a new immutable identifier for every deploy. Do not reuse an identifier for
 changed hashes.
 
-## Deploy and rollback boundary
+## Snapshot-first deploy and rollback boundary
 
-The mutating deploy route now requires an identifier:
+Before any approved production change, take the canonical VPS source snapshot
+with `python3 scripts/nmbot_atomic_release.py snapshot-vps-source`, then use
+`compare-snapshot` to prove exact source hashes. `python3 scripts/nmbot.py
+release status` delegates only to the atomic read-only `recon` command: it
+checks systemd, canonical paths, environment names, identity and health, but is
+not a source-hash comparison.
 
-```bash
-python3 scripts/nmbot_release.py deploy \
-  --release-id 2026-07-22.v2-financing-copy.1
-```
-
-It writes the manifest before copying files and includes it in the remote backup
-and deploy set. This command uses SSH, SCP and service restart; it requires an
-explicit release stop/go and is not run by local checks.
+The guarded atomic deploy workflow requires a new immutable `--release-id` and
+an explicit release stop/go. It owns the immutable artifact, deploy and rollback
+evidence; local checks do not run it.
 
 Before a rollback, collect fresh read-only VPS/Jivo evidence, locate the affected
 `release_id` in `nmbot_dialogue_report.py`, compare the manifest hashes with the
@@ -58,5 +58,5 @@ the source bundle traceable; it does not prove a healthy deploy, Jivo delivery,
 or response quality.
 
 Sources: `scripts/nmbot_release_identity.py`; `scripts/dialogue_journal.py`;
-`scripts/nmbot_dialogue_report.py`; `scripts/nmbot_release.py`;
+`scripts/nmbot_dialogue_report.py`; `scripts/nmbot_atomic_release.py`;
 `nmbot_v2/prompt_provenance.py`.

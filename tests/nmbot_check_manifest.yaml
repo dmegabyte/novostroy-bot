@@ -6,7 +6,7 @@
     "secrets": "forbidden",
     "model_calls": "forbidden",
     "side_effects": "none",
-    "notes": "Local read-only fast gate only. No SSH, deploy, release status, full pytest, eval or service restart."
+    "notes": "Local read-only checks only. A component check is the related focused pytest selected by nmbot.py navigate/context-gate; a version check is an explicitly selected owner scope; release expands to docs/contracts/v0/v1/v2/v3/runtime/audit/quality/artifact/isolation. Diagnostics belongs to nmbot.py navigate/context-gate and nmbot_diag.sh, not the runtime suite. No SSH, deploy, release status, full pytest, eval or service restart. Router, artifact and cutover checks never enter daily v0/v1/v2 scopes."
   },
   "scopes": {
     "docs": {
@@ -18,21 +18,21 @@
       ]
     },
     "contracts": {
-      "description": "External contract fixtures: Jivo API, callback outbox/worker and manifest/release static checks.",
+      "description": "External contract fixtures: Jivo API, callback outbox/worker and release identity checks.",
       "commands": [
         {"name": "compile_contract_modules", "argv": ["{python}", "-m", "py_compile", "scripts/nmbot_api_server.py", "scripts/nmbot_crm_outbox.py", "scripts/nmbot_callback_sheet_worker.py"], "evidence": ["contract modules compile"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
-        {"name": "contract_targeted_pytest", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_callback_flow.py", "tests/test_nmbot_callback_worker.py", "tests/test_nmbot_api_jivo_p1.py", "tests/test_nmbot_release_manifest.py", "-q"], "evidence": ["targeted contract tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"}
+        {"name": "contract_targeted_pytest", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_callback_flow.py", "tests/test_nmbot_callback_worker.py", "tests/test_nmbot_api_jivo_p1.py", "tests/test_nmbot_release_identity.py", "-q"], "evidence": ["targeted contract tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"}
       ]
     },
     "v0": {
-      "description": "V0 local deterministic runtime and adapter checks.",
+      "description": "V0 owner scope with deterministic runtime checks. Shared runtime-selector adapter coverage is owned only by runtime.",
       "commands": [
         {"name": "compile_v0_modules", "argv": ["{python}", "-m", "py_compile", "nmbot_v0/runtime.py", "nmbot_v0/presentation.py", "scripts/nmbot_runtime_adapter.py"], "evidence": ["V0 modules compile"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
-        {"name": "v0_targeted_pytest", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_v0_runtime.py", "tests/test_nmbot_runtime_adapter.py", "-q"], "evidence": ["V0 and selector adapter tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"}
+        {"name": "v0_targeted_pytest", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_v0_runtime.py", "tests/test_nmbot_v0_answer_writer.py", "-q"], "evidence": ["V0 runtime and answer-writer component tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"}
       ]
     },
     "v1": {
-      "description": "V1 local isolated runtime and Stage B adapter/API checks.",
+      "description": "V1 owner scope with isolated runtime and Stage B adapter/API checks.",
       "commands": [
         {"name": "compile_v1_modules", "argv": ["{python}", "-m", "py_compile", "nmbot_v1/runtime.py", "nmbot_v1/state.py", "nmbot_v1/ports.py", "nmbot_v1/contracts.py", "nmbot_v1/execution_path.py", "nmbot_v1/provider_adapters.py", "nmbot_v1/prompt_provenance.py", "scripts/nmbot_v1_quality_gate.py", "scripts/nmbot_runtime_adapter.py", "scripts/nmbot_api_server.py", "scripts/nmbot_egress_policy.py", "scripts/dialogue_journal.py", "scripts/nmbot_dialogue_report.py"], "evidence": ["V1 core/provider/provenance modules, quality runner and shared adapter/API/egress/journal/report compile"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
         {"name": "v1_targeted_pytest", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_v1_contracts.py", "tests/test_nmbot_v1_state.py", "tests/test_nmbot_v1_search.py", "tests/test_nmbot_v1_execution_path.py", "tests/test_nmbot_v1_runtime.py", "tests/test_nmbot_v1_adapter.py", "tests/test_nmbot_v1_provider_adapters.py", "tests/test_nmbot_v1_quality.py", "tests/test_nmbot_dialogue_report.py", "-q"], "evidence": ["V1 core, provider ports, Stage B adapter/API/journal/report and Stage C quality fixture tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"},
@@ -40,17 +40,17 @@
       ]
     },
     "v2": {
-      "description": "V2 local runtime/search contract checks.",
+      "description": "V2 owner scope with runtime/search contract checks. Shared runtime-selector adapter coverage is owned only by runtime.",
       "commands": [
         {"name": "compile_v2_modules", "argv": ["{python}", "-m", "py_compile", "nmbot_v2/runtime.py", "nmbot_v2/search_contract.py", "scripts/nmbot_runtime_adapter.py"], "evidence": ["V2 modules compile"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
-        {"name": "v2_targeted_pytest", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_v2_runtime.py", "tests/test_nmbot_runtime_adapter.py", "-q"], "evidence": ["V2 and selector adapter tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"}
+        {"name": "v2_targeted_pytest", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_v2_runtime.py", "tests/test_nmbot_v2_replay.py", "-q"], "evidence": ["V2 runtime and replay component tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"}
       ]
     },
     "runtime": {
-      "description": "Local static runtime selector/API/bridge checks; production selection requires live evidence outside this command.",
+      "description": "Runtime owner scope and sole owner of shared runtime-selector adapter checks. Production selection requires live evidence outside this command.",
       "commands": [
         {"name": "compile_runtime_entrypoints", "argv": ["{python}", "-m", "py_compile", "scripts/nmbot_api_server.py", "scripts/nmbot_n8n_bridge_server.py", "scripts/nmbot_runtime_adapter.py"], "evidence": ["runtime entrypoints compile"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
-        {"name": "runtime_static_tests", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_runtime_adapter.py", "tests/test_nmbot_diag_script_static.py", "tests/test_nmbot_release_manifest.py", "-q"], "evidence": ["selector, diagnostic and release manifest static tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"},
+        {"name": "runtime_static_tests", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_runtime_adapter.py", "tests/test_nmbot_diag_script_static.py", "-q"], "evidence": ["selector and diagnostic static tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"},
         {"name": "architecture_preflight", "argv": ["{python}", "scripts/nmbot_architecture_preflight.py", "--repo", ".", "--json"], "evidence": ["static architecture preflight runs locally"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"}
       ]
     },
@@ -67,6 +67,27 @@
         {"name": "compile_quality_modules", "argv": ["{python}", "-m", "py_compile", "nmbot_v2/quality.py", "scripts/nmbot_v2_quality_gate.py"], "evidence": ["quality evaluator and fixture runner compile"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
         {"name": "quality_contract_tests", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_v2_quality.py", "-q"], "evidence": ["quality heuristics, fixed scenario coverage and first-failure behavior pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"},
         {"name": "quality_fixture_replay", "argv": ["{python}", "scripts/nmbot_v2_quality_gate.py", "--all"], "evidence": ["all 15 fixed scenarios pass deterministic offline answer-quality gate"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "none"}
+      ]
+    },
+    "v3": {
+      "description": "Canonical current private V3 owner suite with an explicit local-only test list.",
+      "commands": [
+        {"name": "compile_v3_owners", "argv": ["{python}", "-m", "py_compile", "nmbot_v3/__init__.py", "nmbot_v3/composition.py", "nmbot_v3/contracts.py", "nmbot_v3/evidence_contract.py", "nmbot_v3/evidence_provider.py", "nmbot_v3/factory.py", "nmbot_v3/gateway_transport.py", "nmbot_v3/orchestration.py", "nmbot_v3/planner_provider.py", "nmbot_v3/ports.py", "nmbot_v3/presentation.py", "nmbot_v3/provider_invocation.py", "nmbot_v3/renderer.py", "nmbot_v3/runtime.py", "nmbot_v3/semantic_planner.py", "nmbot_v3/service.py", "nmbot_v3/state.py", "nmbot_v3/transition.py", "nmbot_v3/writer_adapter.py", "scripts/nmbot_v3_host.py", "scripts/nmbot_v3_service.py"], "evidence": ["V3 owners compile"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
+        {"name": "v3_canonical_pytest", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_v3_composition.py", "tests/test_nmbot_v3_evidence_contract.py", "tests/test_nmbot_v3_evidence_parity.py", "tests/test_nmbot_v3_evidence_provider.py", "tests/test_nmbot_v3_factory.py", "tests/test_nmbot_v3_financing_scenario_parity.py", "tests/test_nmbot_v3_gateway_transport.py", "tests/test_nmbot_v3_host.py", "tests/test_nmbot_v3_orchestration.py", "tests/test_nmbot_v3_planner_core.py", "tests/test_nmbot_v3_planner_parity.py", "tests/test_nmbot_v3_planner_provider.py", "tests/test_nmbot_v3_presentation.py", "tests/test_nmbot_v3_provider_invocation.py", "tests/test_nmbot_v3_provider_ports.py", "tests/test_nmbot_v3_renderer.py", "tests/test_nmbot_v3_renderer_overlap_diff.py", "tests/test_nmbot_v3_service.py", "tests/test_nmbot_v3_writer_adapter.py", "tests/test_nmbot_v3_writer_gateway_contract.py", "-q"], "evidence": ["canonical private V3 tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"}
+      ]
+    },
+    "artifact": {
+      "description": "Local immutable worker-artifact owner check; it is not a daily version scope.",
+      "commands": [
+        {"name": "compile_worker_artifact_owner", "argv": ["{python}", "-m", "py_compile", "scripts/nmbot_worker_atomic_artifact.py"], "evidence": ["artifact owner compiles"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
+        {"name": "worker_artifact_pytest", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_worker_atomic_artifact.py", "-q"], "evidence": ["local immutable artifact tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"}
+      ]
+    },
+    "isolation": {
+      "description": "Local selector/router/client/wave3/phase1 isolation checks; no API or Jivo production action.",
+      "commands": [
+        {"name": "compile_isolation_owners", "argv": ["{python}", "-m", "py_compile", "nmbot_runtime_contract/__init__.py", "nmbot_runtime_contract/selector.py", "scripts/nmbot_router_client.py", "scripts/nmbot_version_router.py"], "evidence": ["selector and router owners compile"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
+        {"name": "isolation_local_pytest", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_runtime_selector.py", "tests/test_nmbot_router_client.py", "tests/test_nmbot_wave3_acceptance.py", "tests/test_nmbot_version_isolation_phase1.py", "-q"], "evidence": ["local selector/router/client/wave3/phase1 isolation tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"}
       ]
     }
   }

@@ -40,7 +40,7 @@ NAMESPACE_ALIASES = {
     ("planner", "find"): [sys.executable, "scripts/find_planner_trace.py"],
     ("runtime", "compare"): [sys.executable, "scripts/nmbot_v2_version_compare.py"],
     ("release", "identity"): [sys.executable, "scripts/nmbot_release_identity.py"],
-    ("release", "status"): [sys.executable, "scripts/nmbot_release.py", "status"],
+    ("release", "status"): [sys.executable, "scripts/nmbot_atomic_release.py", "recon"],
     ("architecture", None): [sys.executable, "scripts/nmbot_architecture_preflight.py"],
 }
 
@@ -1156,6 +1156,45 @@ def _build_diagnose_argv(args: list[str]) -> tuple[str | None, list[str] | None,
     return selector_kind, child_argv, None, selected_latest
 
 
+def _build_evidence_chain_argv(args: list[str]) -> tuple[list[str] | None, str | None]:
+    """Validate the deliberately narrow trace-only evidence-chain route."""
+    trace: str | None = None
+    date: str | None = None
+    logs_dir: str | None = None
+    idx = 0
+    incompatible = {"--latest", "--task", "--recent", "--summary", "--plan", "--timeline"}
+    while idx < len(args):
+        item = args[idx]
+        if item in {"--evidence-chain", "--human", "--json"}:
+            idx += 1
+            continue
+        if item in incompatible:
+            return None, "--evidence-chain is incompatible with selectors, --recent, --summary, --plan, and --timeline"
+        if item in {"--trace", "--date", "--logs-dir"}:
+            if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
+                return None, f"missing value for {item}"
+            value = args[idx + 1]
+            if item == "--trace":
+                if trace is not None:
+                    return None, "--evidence-chain requires exactly one --trace"
+                trace = value
+            elif item == "--date":
+                date = value
+            else:
+                logs_dir = value
+            idx += 2
+            continue
+        return None, f"unsupported diagnose option: {item}"
+    if not trace:
+        return None, "--evidence-chain requires explicit --trace"
+    child = [sys.executable, "scripts/nmbot_gateway_task_diag.py", "--evidence-chain", "--trace-ref", trace, "--json"]
+    if date:
+        child.extend(["--date", date])
+    if logs_dir:
+        child.extend(["--logs-dir", logs_dir])
+    return child, None
+
+
 def _run_diagnose(args: list[str]) -> int:
     include_plan = "--plan" in args
     output_format, output_error = _diagnose_output_format(args)
@@ -1163,6 +1202,23 @@ def _run_diagnose(args: list[str]) -> int:
         print(f"ERROR: {output_error}", file=sys.stderr)
         return 2
     assert output_format is not None
+    if "--evidence-chain" in args:
+        child_argv, error = _build_evidence_chain_argv(args)
+        if error:
+            print(f"ERROR: {error}", file=sys.stderr)
+            return 2
+        assert child_argv is not None
+        completed = subprocess.run(child_argv, cwd=ROOT, check=False, capture_output=True, text=True)
+        parsed = _parse_json_object(completed.stdout or "")
+        if parsed is None and completed.returncode != 0:
+            parsed = _parse_json_object(completed.stderr or "")
+        if not isinstance(parsed, dict) or parsed.get("schema_version") != "nmbot.evidence_chain.v1":
+            print(json.dumps({"schema_version": "nmbot.evidence_chain.v1", "status": "diagnostic_failed", "error_code": "child_json_parse_error"}, ensure_ascii=False), file=sys.stdout)
+            return completed.returncode if completed.returncode else 3
+        # Evidence-chain child output is already allowlisted. Do not pass it
+        # through the compact trace normalizer, which would discard evidence.
+        print(json.dumps(parsed, ensure_ascii=False, sort_keys=True))
+        return completed.returncode
     if "--summary" in args:
         window, summary_date, summary_logs_dir, summary_error = _extract_summary_request(args)
         if summary_error:
@@ -1362,7 +1418,7 @@ def main(argv: list[str] | None = None) -> int:
         print("recipes pair RECIPE_A RECIPE_B prints a local-only deterministic Markdown/JSON overlap card.")
         print("recipes explain RECIPE_A RECIPE_B prints a local-only deterministic review card from the pair report.")
         print("diag delegates to bash scripts/nmbot_diag.sh only when explicitly invoked; user args may select VPS/network mode.")
-        print("diagnose [--trace TRACE_ID|--task TASK_ID|--latest|--recent N|--summary 1h] [--timeline] [--plan] [--json|--human] runs safe diagnostics; --recent/--summary are local JSONL aggregation, and omitted selector means --latest.")
+        print("diagnose [--trace TRACE_ID --evidence-chain|--trace TRACE_ID|--task TASK_ID|--latest|--recent N|--summary 1h] [--timeline] [--plan] [--json|--human] runs safe diagnostics; evidence-chain is bounded read-only trace correlation, and omitted selector otherwise means --latest.")
         print("tools [--json|--human] reads local config/nmbot_diagnostic_tools.json and marks legacy diagnostic tools without executing them.")
         print("trace/dialogue/planner/runtime/release/architecture expose allowlisted direct-argv diagnostic aliases only; release identity is restricted to read/show.")
         return 0 if args and args[0] in {"-h", "--help"} else 2

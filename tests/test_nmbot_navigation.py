@@ -79,12 +79,14 @@ def test_exact_stage_lookup_returns_bounded_active_paths(tmp_path: Path) -> None
     assert report["route"] == "stage"
     assert report["fallback"] is False
     assert report["abstain"] is False
-    assert [item["path"] for item in report["results"]] == ["scripts/search.py", "docs/search.md", "tests/test_search.py"]
+    assert [item["path"] for item in report["results"]] == ["scripts/search.py", "docs/search.md", "tests/test_search.py", "prompts/search.txt"]
     assert all(item["stage_id"] == "v2.search" for item in report["results"])
     assert report["results"][0]["source_symbol"] == "target_symbol"
     assert report["results"][0]["start_line"] == 1
     assert report["results"][0]["end_line"] == 2
-    assert len(report["results"]) <= 3
+    assert len(report["results"]) <= 5
+    assert report["selection_required"] is False
+    assert report["selected_target_spec"] == report["results"][0]["target_spec"]
 
 
 def test_exact_stage_source_doc_test_share_canonical_target_spec(tmp_path: Path) -> None:
@@ -99,8 +101,20 @@ def test_exact_stage_source_doc_test_share_canonical_target_spec(tmp_path: Path)
         "target_owner": "runtime",
         "owner_path": "scripts/search.py",
     }
-    assert [item["stage_field"] for item in report["results"]] == ["source", "doc", "test"]
-    assert [item["target_spec"] for item in report["results"]] == [expected, expected, expected]
+    assert [item["stage_field"] for item in report["results"]] == ["source", "doc", "test", "prompt"]
+    assert [item["target_spec"] for item in report["results"]] == [expected, expected, expected, expected]
+
+
+def test_stage_token_inside_prose_requires_explicit_selection(tmp_path: Path) -> None:
+    mod = load_module()
+    root, manifest = make_root(tmp_path)
+
+    report = mod.navigate("проверь v2.search и объясни результат", root=root, manifest_path=manifest)
+
+    assert report["route"] == "stage"
+    assert report["selection_required"] is True
+    assert all(item["candidate_only"] is True for item in report["results"])
+    assert "selected_target_spec" not in report
 
 
 def test_path_id_lookup_uses_stage_map_and_stays_bounded(tmp_path: Path) -> None:
@@ -111,7 +125,7 @@ def test_path_id_lookup_uses_stage_map_and_stays_bounded(tmp_path: Path) -> None
 
     assert report["route"] == "stage"
     assert report["reason"] == "exact path_id: v2.turn.v1"
-    assert len({item["path"] for item in report["results"]}) == len(report["results"]) <= 3
+    assert len({item["path"] for item in report["results"]}) == len(report["results"]) <= 5
 
 
 def test_ast_symbol_returns_exact_line_span_and_one_related_test(tmp_path: Path) -> None:
@@ -132,7 +146,12 @@ def test_ast_symbol_returns_exact_line_span_and_one_related_test(tmp_path: Path)
         "target": "target_symbol",
         "target_owner": "scripts/search.py",
         "owner_path": "scripts/search.py",
+        "start_line": 1,
+        "end_line": 2,
     }
+    assert item["candidate_only"] is True
+    assert report["selection_required"] is True
+    assert "selected_target_spec" not in report
 
 
 def test_exact_diagnostic_code_lookup_returns_candidate_symbol_target(tmp_path: Path) -> None:
@@ -156,7 +175,11 @@ def test_exact_diagnostic_code_lookup_returns_candidate_symbol_target(tmp_path: 
         "target": "assess_quality",
         "target_owner": "nmbot_v2/quality.py",
         "owner_path": "nmbot_v2/quality.py",
+        "start_line": 3,
+        "end_line": 5,
     }
+    assert report["selection_required"] is True
+    assert "selected_target_spec" not in report
 
 
 def test_diagnostic_code_source_is_prioritized_over_test_literal(tmp_path: Path) -> None:
@@ -168,6 +191,84 @@ def test_diagnostic_code_source_is_prioritized_over_test_literal(tmp_path: Path)
     assert [item["source_role"] for item in report["results"][:2]] == ["source", "test"]
     assert report["results"][0]["path"] == "nmbot_v2/quality.py"
     assert report["results"][1]["path"] == "tests/test_nmbot_v2_quality.py"
+
+
+def test_ambiguous_exact_symbols_require_explicit_selection(tmp_path: Path) -> None:
+    mod = load_module()
+    root, manifest = make_root(tmp_path)
+    (root / "nmbot_test_agent.py").write_text("def target_symbol():\n    return 'other'\n", encoding="utf-8")
+
+    report = mod.navigate("target_symbol", root=root, manifest_path=manifest)
+
+    assert report["route"] == "ast"
+    assert len(report["results"]) == 2
+    assert report["selection_required"] is True
+    assert "selected_target_spec" not in report
+
+
+def test_duplicate_symbol_definitions_in_one_file_require_selection(tmp_path: Path) -> None:
+    mod = load_module()
+    root, manifest = make_root(tmp_path)
+    duplicate = root / "scripts" / "duplicates.py"
+    duplicate.write_text("def duplicate_symbol():\n    return 1\n\ndef duplicate_symbol():\n    return 2\n", encoding="utf-8")
+    data = json.loads((root / manifest).read_text(encoding="utf-8"))
+    data["sources"].append({"path": "scripts/duplicates.py", "module": "duplicates", "type": "python", "owner": "duplicates", "status": "active"})
+    (root / manifest).write_text(json.dumps(data), encoding="utf-8")
+
+    report = mod.navigate("duplicate_symbol", root=root, manifest_path=manifest)
+
+    assert report["route"] == "ast"
+    assert report["selection_required"] is True
+    assert [item["candidate_id"] for item in report["results"]] == ["c1", "c2"]
+    assert [item["start_line"] for item in report["results"]] == [1, 4]
+    assert "selected_target_spec" not in report
+
+    selected = mod.select_candidate(report, "c2")
+    gate = load_context_gate_module()
+    strict = gate.run_gate(
+        "selected duplicate symbol",
+        project_id="nmbot",
+        evidence_type="symbol",
+        definition_of_done="selected symbol body",
+        root=root,
+        manifest_path=manifest,
+        target_kind=selected["target_kind"],
+        target=selected["target"],
+        target_owner=selected["target_owner"],
+        target_start_line=selected["start_line"],
+        target_end_line=selected["end_line"],
+    )
+    assert strict["route"] == "ast"
+    assert strict["abstain"] is False
+    assert strict["context"][0]["start_line"] == 4
+    assert strict["context"][0]["end_line"] == 5
+
+
+def test_candidate_ids_are_stable_and_explicit_c2_returns_c2_target(tmp_path: Path) -> None:
+    mod = load_module()
+    root, manifest = make_root(tmp_path)
+
+    first = mod.navigate("quality_failed_check", root=root, manifest_path=manifest)
+    second = mod.navigate("quality_failed_check", root=root, manifest_path=manifest)
+
+    assert [item["candidate_id"] for item in first["results"]] == ["c1", "c2"]
+    assert [item["candidate_id"] for item in second["results"]] == ["c1", "c2"]
+    assert mod.select_candidate(first, "c2") == first["results"][1]["target_spec"]
+
+
+def test_select_candidate_fails_closed_for_unknown_abstained_and_invalid_targets(tmp_path: Path) -> None:
+    mod = load_module()
+    root, manifest = make_root(tmp_path)
+    report = mod.navigate("quality_failed_check", root=root, manifest_path=manifest)
+
+    with pytest.raises(mod.NavigationError, match="unknown candidate_id"):
+        mod.select_candidate(report, "c9")
+    with pytest.raises(mod.NavigationError, match="abstained report"):
+        mod.select_candidate(mod.navigate("какая сегодня погода", root=root, manifest_path=manifest), "c1")
+
+    report["results"][0]["target_spec"] = {"target": "missing fields"}
+    with pytest.raises(mod.NavigationError, match="no valid target_spec"):
+        mod.select_candidate(report, "c1")
 
 
 def test_diagnostic_code_emitter_is_prioritized_over_references(tmp_path: Path) -> None:
@@ -245,7 +346,55 @@ def test_diagnostic_code_registry_drift_fails_closed(tmp_path: Path) -> None:
         mod.validate_registry(records, root=root, active_paths=registry["active_paths"])
 
 
-def test_diagnostic_code_results_are_capped_at_three_and_sorted(tmp_path: Path) -> None:
+def test_repeated_diagnostic_records_build_one_function_code_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = load_module()
+    root, manifest = make_root(tmp_path)
+    registry = mod.build_registry(root=root, manifest_path=manifest)
+    diagnostic = next(item for item in registry["records"] if item.get("kind") == "diagnostic_code" and item.get("code") == "quality_failed_check")
+    calls = 0
+    original = mod._diagnostic_codes_by_symbol
+
+    def counted(tree: ast.AST) -> dict[tuple[str, int, int], set[str]]:
+        nonlocal calls
+        calls += 1
+        return original(tree)
+
+    monkeypatch.setattr(mod, "_diagnostic_codes_by_symbol", counted)
+    mod.validate_registry([diagnostic] * 5, root=root, active_paths=registry["active_paths"])
+
+    assert calls == 1
+
+
+def test_build_registry_reuses_source_text_and_ast_across_record_builders(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    mod = load_module()
+    root, manifest = make_root(tmp_path)
+    source_path = root / "scripts/search.py"
+    reads = 0
+    parses = 0
+    original_read_text = Path.read_text
+    original_parse = mod.ast.parse
+
+    def counted_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        nonlocal reads
+        if path == source_path:
+            reads += 1
+        return original_read_text(path, *args, **kwargs)
+
+    def counted_parse(source: str, filename: str = "<unknown>", *args: object, **kwargs: object) -> ast.AST:
+        nonlocal parses
+        if filename == "scripts/search.py":
+            parses += 1
+        return original_parse(source, filename, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counted_read_text)
+    monkeypatch.setattr(mod.ast, "parse", counted_parse)
+    mod.build_registry(root=root, manifest_path=manifest)
+
+    assert reads == 1
+    assert parses == 1
+
+
+def test_diagnostic_code_results_are_capped_at_five_and_sorted(tmp_path: Path) -> None:
     mod = load_module()
     root, manifest = make_root(tmp_path)
     (root / "nmbot_v2/quality.py").write_text(
@@ -257,6 +406,12 @@ def test_diagnostic_code_results_are_capped_at_three_and_sorted(tmp_path: Path) 
         "def b_narrow():\n"
         "    return 'shared_error_code'\n\n"
         "def c_narrow():\n"
+        "    return 'shared_error_code'\n\n"
+        "def d_narrow():\n"
+        "    return 'shared_error_code'\n\n"
+        "def e_narrow():\n"
+        "    return 'shared_error_code'\n\n"
+        "def f_narrow():\n"
         "    return 'shared_error_code'\n",
         encoding="utf-8",
     )
@@ -264,9 +419,10 @@ def test_diagnostic_code_results_are_capped_at_three_and_sorted(tmp_path: Path) 
     report = mod.navigate("shared_error_code", root=root, manifest_path=manifest)
 
     assert report["route"] == "diagnostic"
-    assert len(report["results"]) == 3
-    assert [item["symbol"] for item in report["results"]] == ["a_narrow", "b_narrow", "c_narrow"]
+    assert len(report["results"]) == 5
+    assert [item["symbol"] for item in report["results"]] == ["a_narrow", "b_narrow", "c_narrow", "d_narrow", "e_narrow"]
     assert all(item["candidate_only"] is True for item in report["results"])
+    assert report["selection_required"] is True
 
 
 def test_docs_anchor_output_uses_existing_heading_or_context_pack_anchor(tmp_path: Path) -> None:
@@ -286,18 +442,23 @@ def test_docs_anchor_output_uses_existing_heading_or_context_pack_anchor(tmp_pat
         "target_owner": "docs/search.md",
         "owner_path": "docs/search.md",
     }
+    assert first["candidate_only"] is True
+    assert report["selection_required"] is True
+    assert "selected_target_spec" not in report
 
 
 def test_owner_scoped_doc_anchor_resolves_anchor_omitted_from_global_top3(tmp_path: Path) -> None:
     mod = load_module()
     root, manifest = make_root(tmp_path)
-    for rel in ("docs/a.md", "docs/b.md", "docs/c.md", "docs/zz_owner.md"):
+    for rel in ("docs/a.md", "docs/b.md", "docs/c.md", "docs/d.md", "docs/e.md", "docs/zz_owner.md"):
         (root / rel).write_text("# docs owner-target\n", encoding="utf-8")
     data = json.loads((root / manifest).read_text(encoding="utf-8"))
     data["sources"].extend([
         {"path": "docs/a.md", "module": "crowded", "type": "doc", "owner": "docs", "status": "active"},
         {"path": "docs/b.md", "module": "crowded", "type": "doc", "owner": "docs", "status": "active"},
         {"path": "docs/c.md", "module": "crowded", "type": "doc", "owner": "docs", "status": "active"},
+        {"path": "docs/d.md", "module": "crowded", "type": "doc", "owner": "docs", "status": "active"},
+        {"path": "docs/e.md", "module": "crowded", "type": "doc", "owner": "docs", "status": "active"},
         {"path": "docs/zz_owner.md", "module": "owner", "type": "doc", "owner": "docs", "status": "active"},
     ])
     (root / manifest).write_text(json.dumps(data), encoding="utf-8")
@@ -308,6 +469,7 @@ def test_owner_scoped_doc_anchor_resolves_anchor_omitted_from_global_top3(tmp_pa
     assert global_report["route"] == "docs"
     assert "docs/zz_owner.md" not in [item["path"] for item in global_report["results"]]
     assert scoped_report["route"] == "docs"
+    assert scoped_report["selection_required"] is True
     assert scoped_report["fallback"] is False
     assert [item["path"] for item in scoped_report["results"]] == ["docs/zz_owner.md"]
     assert scoped_report["results"][0]["anchor"] == "# docs owner-target"
@@ -334,9 +496,10 @@ def test_mixed_fallback_is_bounded_and_candidate_only(tmp_path: Path) -> None:
     assert report["route"] == "mixed"
     assert report["fallback"] is True
     assert report["next_action"] == "select_then_grep_read"
-    assert 1 <= len(report["results"]) <= 3
+    assert 1 <= len(report["results"]) <= 5
     assert all(item["candidate_only"] is True for item in report["results"])
-    assert all("candidate_id" not in item for item in report["results"])
+    assert [item["candidate_id"] for item in report["results"]] == [f"c{index}" for index in range(1, len(report["results"]) + 1)]
+    assert report["selection_required"] is True
 
 
 def test_mixed_jivo_stage_test_result_carries_canonical_stage_target_spec() -> None:
@@ -526,6 +689,14 @@ def test_cli_json_and_validate_only_smoke() -> None:
     payload = json.loads(result.stdout)
     assert payload["route"] == "ast"
     assert payload["results"][0]["path"] == "scripts/nmbot_response_path.py"
+
+    explicit = subprocess.run([sys.executable, "scripts/nmbot_navigation.py", "resolve_response_path", "--select", "c1", "--json"], cwd=ROOT, text=True, capture_output=True, check=False)
+    assert explicit.returncode == 0
+    explicit_payload = json.loads(explicit.stdout)
+    assert explicit_payload["selection_required"] is False
+    assert explicit_payload["selection_mode"] == "explicit_candidate"
+    assert explicit_payload["selected_candidate_id"] == "c1"
+    assert explicit_payload["selected_target_spec"] == explicit_payload["results"][0]["target_spec"]
 
     validate = subprocess.run([sys.executable, "scripts/nmbot_navigation.py", "--validate-only", "--json"], cwd=ROOT, text=True, capture_output=True, check=False)
     assert validate.returncode == 0

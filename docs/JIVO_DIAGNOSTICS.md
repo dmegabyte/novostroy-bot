@@ -30,6 +30,7 @@ bash scripts/nmbot_diag.sh --vps --json
 ```bash
 python3 scripts/nmbot.py diagnose
 python3 scripts/nmbot.py diagnose --trace TRACE_ID
+python3 scripts/nmbot.py diagnose --trace TRACE_ID --evidence-chain
 python3 scripts/nmbot.py diagnose --task TASK_ID
 python3 scripts/nmbot.py diagnose --latest
 python3 scripts/nmbot.py diagnose --latest --date YYYY-MM-DD --logs-dir PATH
@@ -84,8 +85,28 @@ correlation-флага (`trace_present`, `task_present`) и safety-флаги. E
 exceptions, tokens или raw child output. Если evidence не хватает, поля остаются
 `null`/`UNKNOWN`, wrapper не угадывает.
 
-`diagnose --trace` читает только локальные файлы `logs/n8n_bridge_structured.jsonl`
-и `logs/dialogue_journal.jsonl` через существующий Jivo dialogue diagnoser.
+Обычный `diagnose --trace` читает только локальные файлы
+`logs/n8n_bridge_structured.jsonl` и `logs/dialogue_journal.jsonl` через
+существующий Jivo dialogue diagnoser.
+
+`diagnose --trace TRACE_ID --evidence-chain` — отдельный bounded read-only
+маршрут со схемой `nmbot.evidence_chain.v1`. Он находит точный ход в
+`dialogue_journal.jsonl`, берёт primary gateway task из безопасного runtime
+summary, читает его status/result и проверяет не более шести следующих task ID
+как кандидатов shortlist/pair enrichment. Child принимается только при
+совпадении одной карточки с primary по ID/имени и допустимому времени. Отчёт
+показывает primary/accepted child tasks, добавленные и нормализованные поля,
+поддержку публичных claims, candidate conflicts, первую точку расхождения и
+предполагаемый owner. Корреляция child по соседним ID — эвристика, а не
+authoritative lineage; такие находки нельзя автоматически называть багами.
+
+Evidence-chain может выполнять read-only запросы к Overmind и требует ровно
+один явный `--trace`. Он несовместим с `--task`, `--latest`, `--recent`,
+`--summary`, `--plan` и `--timeline`. Raw gateway response, URL/link-поля,
+prompt, payload, контакты, tokens и произвольный hidden text в отчёт не
+попадают. Команда локализует evidence chain, но сама не доказывает активный
+process cwd/release, planner semantics, Jivo delivery или production health.
+
 `diagnose --task` вызывает read-only Overmind status/result diagnoser и печатает
 нормализованный bounded JSON. Это не доказательство production-health: без свежей
 VPS/Jivo-проверки вывод показывает только локальные/diagnoser evidence. Wrapper не
@@ -291,11 +312,15 @@ bash scripts/nmbot_jivo_audit.sh --delivery-trace
 python3 scripts/nmbot_bridge_smoke.py --delivery-trace
 ```
 
-Локальный анализ файла:
+Строгая проверка полной lifecycle-цепочки допустима только для
+`jivo_delivery_trace.jsonl`:
 
 ```bash
-python3 scripts/nmbot_jivo_trace_analyze.py /path/to/n8n_bridge_structured.jsonl --strict
+python3 scripts/nmbot_jivo_trace_analyze.py /path/to/jivo_delivery_trace.jsonl --strict
 ```
+
+`n8n_bridge_structured.jsonl` — legacy технический журнал: анализируйте его
+только без `--strict`, он не доказывает полный terminal lifecycle.
 
 Статическая проверка архитектурных контрактов:
 
@@ -663,8 +688,12 @@ read-only инструмент:
 
 ```bash
 python3 scripts/nmbot_jivo_dialogue_diagnose.py \
-  /path/to/n8n_bridge_structured.jsonl --trace <trace_id> --strict
+  /path/to/jivo_delivery_trace.jsonl --trace <trace_ref> --strict
 ```
+
+Для legacy `n8n_bridge_structured.jsonl` используйте тот же инструмент только
+без `--strict`: этот журнал полезен для технического контекста, но не доказывает
+полную delivery lifecycle.
 
 Для агрегированной runtime-сводки только по `dialogue_journal.jsonl`, без bridge log:
 

@@ -58,6 +58,10 @@ BRIDGE_SNAPSHOT_SCHEMA_VERSION = "nmbot.bridge_source_snapshot.v1"
 BRIDGE_WORKTREE_PROVENANCE_SCHEMA = "nmbot.bridge_snapshot_worktree_provenance.v1"
 BRIDGE_CURRENT = "bridge-current"
 BRIDGE_RELEASES = "bridge-releases"
+BRIDGE_LOCK_OWNER_FILE = "owner.json"
+BRIDGE_LOCK_OWNER_SCHEMA_VERSION = "nmbot.bridge_release_lock_owner.v1"
+BRIDGE_LOCK_CLEANUP_FAILURE = "bridge_release_lock_cleanup_failed"
+RELEASE_LOCK_CLEANUP_FAILURE = "release_lock_cleanup_failed"
 BRIDGE_UNIT_PATH = "/home/neiro/.config/systemd/user/novostroy-bot-n8n-bridge.service"
 BRIDGE_ENTRYPOINT = "scripts/nmbot_n8n_bridge_server.py"
 BRIDGE_INLINE_ENVIRONMENT = "PYTHONUNBUFFERED=1"
@@ -66,6 +70,12 @@ BRIDGE_ALLOWED_FILES = (
     "scripts/dialogue_journal.py",
     "scripts/nmbot_egress_policy.py",
 )
+LOCAL_DIAGNOSTIC_OVERLAY_FILES = frozenset({
+    "scripts/nmbot_bridge_smoke.py",
+    "scripts/nmbot_jivo_audit.sh",
+    "scripts/nmbot_jivo_dialogue_diagnose.py",
+    "scripts/nmbot_jivo_trace_analyze.py",
+})
 BRIDGE_IMPORT_MODULES = ("scripts.nmbot_n8n_bridge_server",)
 BRIDGE_SOURCE_SCOPES = ("bridge_canonical", "api_current", "bridge_current")
 IDENTITY_IN_RELEASE = "release_identity/nmbot_release_identity.json"
@@ -2107,6 +2117,44 @@ def _allowed_prepared_worktree_dir(worktree_dir: Path) -> Path:
     return path
 
 
+def apply_local_diagnostic_overlay(*, worktree_dir: Path, scope: str) -> dict[str, Any]:
+    """Copy the closed diagnostic allowlist into an isolated snapshot worktree.
+
+    This is intentionally a local preparation action, not an artifact member:
+    the deployment helper itself remains excluded from release contents.  The
+    caller must choose the API or bridge scope explicitly so a bridge release
+    cannot accidentally acquire API diagnostics.
+    """
+    if scope not in {"api", "bridge"}:
+        raise ReleaseError("local diagnostic overlay scope must be api or bridge")
+    work = _allowed_prepared_worktree_dir(worktree_dir)
+    source_dir = work / "source"
+    if not source_dir.is_dir() or source_dir.is_symlink():
+        raise ReleaseError("prepared worktree source directory invalid")
+    allowed = LOCAL_DIAGNOSTIC_OVERLAY_FILES if scope == "api" else {BRIDGE_ENTRYPOINT}
+    copied: list[str] = []
+    for rel in sorted(allowed):
+        origin = ROOT / rel
+        target = source_dir / rel
+        if not origin.is_file() or origin.is_symlink():
+            raise ReleaseError(f"local diagnostic overlay source invalid: {rel}")
+        if target.exists() and target.is_symlink():
+            raise ReleaseError(f"local diagnostic overlay target is symlinked: {rel}")
+        _reject_secret_like(origin, rel)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o755 if rel.endswith(".py") else 0o644)
+        try:
+            with origin.open("rb") as src:
+                while chunk := src.read(1024 * 1024):
+                    os.write(fd, chunk)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.chmod(target, 0o755 if rel.endswith(".py") else 0o644)
+        copied.append(rel)
+    return {"overlay": "ok", "scope": scope, "worktree_dir": str(work), "files": copied}
+
+
 def _worktree_source_rows(source_dir: Path, *, include_dialogue_exporter: bool = False, test_api_overlay_paths: set[str] | frozenset[str] = frozenset()) -> list[dict[str, Any]]:
     files = iter_snapshot_files(source_dir, include_dialogue_exporter=include_dialogue_exporter, test_api_overlay_paths=test_api_overlay_paths)
     rows = _file_records_with_metadata(files, source_dir)
@@ -3942,6 +3990,149 @@ def _bridge_remote_paths(remote_root: str, release_id: str) -> dict[str, str]:
     return {"root": root, "rid": rid, "staging": f"{root}/.bridge_release_staging/{rid}", "release_dir": f"{root}/{BRIDGE_RELEASES}/{rid}", "lock_dir": f"{root}/.bridge_release_lock", "backup_dir": f"{root}/backups/bridge-{rid}", "current": f"{root}/{BRIDGE_CURRENT}"}
 
 
+def _bridge_lock_acquire_command(remote_root: str, release_id: str) -> str:
+    """Atomically acquire the bridge lock and publish non-secret ownership data."""
+    paths = _bridge_remote_paths(remote_root, release_id)
+    payload = json.dumps({
+        "root": paths["root"],
+        "lock_name": PurePosixPath(paths["lock_dir"]).name,
+        "owner_file": BRIDGE_LOCK_OWNER_FILE,
+        "release_id": paths["rid"],
+        "operation": "bridge_deploy",
+        "contour": "bridge",
+        "schema_version": BRIDGE_LOCK_OWNER_SCHEMA_VERSION,
+    }, sort_keys=True)
+    code = r'''
+import datetime, json, os, stat, sys
+cfg=json.loads(sys.argv[1]); root=cfg["root"]; name=cfg["lock_name"]; owner_name=cfg["owner_file"]
+def unknown(): return {"owner": "unknown"}
+def valid_owner(raw):
+    keys={"schema_version","release_id","operation","contour","acquired_at_utc","pid"}
+    if not isinstance(raw,dict) or set(raw)!=keys: return None
+    if raw.get("schema_version") != cfg["schema_version"]: return None
+    if not all(isinstance(raw.get(k),str) and raw[k] for k in ("release_id","operation","contour","acquired_at_utc")): return None
+    if not isinstance(raw.get("pid"),int) or isinstance(raw.get("pid"),bool) or raw["pid"] < 1: return None
+    import re
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,79}",raw["release_id"]): return None
+    if raw["operation"] != "bridge_deploy" or raw["contour"] != "bridge": return None
+    if not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",raw["acquired_at_utc"]): return None
+    return raw
+def read_owner(lock_fd):
+    try:
+        fd=os.open(owner_name, os.O_RDONLY|os.O_NOFOLLOW, dir_fd=lock_fd)
+        try:
+            st=os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_size > 512: return unknown()
+            body=os.read(fd,513)
+        finally: os.close(fd)
+        if len(body)>512: return unknown()
+        owner=valid_owner(json.loads(body.decode("utf-8")))
+        return {"owner": owner} if owner else unknown()
+    except Exception: return unknown()
+parent_fd=os.open(root, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+try:
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+    except FileExistsError:
+        try:
+            lock_fd=os.open(name, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW, dir_fd=parent_fd)
+        except OSError:
+            print(json.dumps({"ok":False, **unknown()},sort_keys=True)); sys.exit(2)
+        try: result=read_owner(lock_fd)
+        finally: os.close(lock_fd)
+        print(json.dumps({"ok":False, **result},sort_keys=True)); sys.exit(2)
+    lock_fd=os.open(name, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        owner={"schema_version":cfg["schema_version"],"release_id":cfg["release_id"],"operation":cfg["operation"],"contour":cfg["contour"],"acquired_at_utc":datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).strftime("%Y-%m-%dT%H:%M:%SZ"),"pid":os.getpid()}
+        fd=os.open(owner_name, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600, dir_fd=lock_fd)
+        try:
+            data=json.dumps(owner,sort_keys=True,separators=(",",":")).encode("utf-8")
+            os.write(fd,data); os.fsync(fd)
+        finally: os.close(fd)
+        os.fsync(lock_fd); os.fsync(parent_fd)
+    except Exception:
+        try: os.unlink(owner_name,dir_fd=lock_fd)
+        except OSError: pass
+        try: os.rmdir(name,dir_fd=parent_fd)
+        except OSError: pass
+        raise
+    finally: os.close(lock_fd)
+finally: os.close(parent_fd)
+print(json.dumps({"ok":True,"owner":owner},sort_keys=True))
+'''
+    return "python3 -c " + shlex.quote(code) + " " + shlex.quote(payload)
+
+
+def _validate_bridge_lock_owner(owner: Any) -> dict[str, Any]:
+    keys = {"schema_version", "release_id", "operation", "contour", "acquired_at_utc", "pid"}
+    if not isinstance(owner, dict) or set(owner) != keys:
+        raise ReleaseError("bridge lock owner metadata invalid")
+    if owner.get("schema_version") != BRIDGE_LOCK_OWNER_SCHEMA_VERSION:
+        raise ReleaseError("bridge lock owner metadata invalid")
+    release_id = owner.get("release_id")
+    # Do not pass absent or non-string owner metadata to _release_id(): its
+    # optional argument generates a timestamp, which would turn malformed lock
+    # ownership data into a synthetic, apparently valid release id.
+    if not _exact_type(release_id, str):
+        raise ReleaseError("bridge lock owner metadata invalid")
+    try:
+        _release_id(release_id)
+    except ReleaseError as exc:
+        raise ReleaseError("bridge lock owner metadata invalid") from exc
+    if owner.get("operation") != "bridge_deploy" or owner.get("contour") != "bridge":
+        raise ReleaseError("bridge lock owner metadata invalid")
+    if not isinstance(owner.get("acquired_at_utc"), str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", owner["acquired_at_utc"]):
+        raise ReleaseError("bridge lock owner metadata invalid")
+    if not _exact_type(owner.get("pid"), int) or owner["pid"] < 1:
+        raise ReleaseError("bridge lock owner metadata invalid")
+    return dict(owner)
+
+
+def _bridge_lock_cleanup_command(remote_root: str, release_id: str, owner: dict[str, Any]) -> str:
+    paths = _bridge_remote_paths(remote_root, release_id)
+    expected = _validate_bridge_lock_owner(owner)
+    payload = json.dumps({"root": paths["root"], "lock_name": PurePosixPath(paths["lock_dir"]).name, "owner_file": BRIDGE_LOCK_OWNER_FILE, "owner": expected}, sort_keys=True)
+    code = r'''
+import json, os, stat, sys
+cfg=json.loads(sys.argv[1]); parent_fd=os.open(cfg["root"],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+try:
+    lock_fd=os.open(cfg["lock_name"],os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent_fd)
+    try:
+        fd=os.open(cfg["owner_file"],os.O_RDONLY|os.O_NOFOLLOW,dir_fd=lock_fd)
+        try:
+            st=os.fstat(fd); body=os.read(fd,513)
+        finally: os.close(fd)
+        if not stat.S_ISREG(st.st_mode) or len(body)>512 or json.loads(body.decode("utf-8")) != cfg["owner"]: raise RuntimeError("owner mismatch")
+        os.unlink(cfg["owner_file"],dir_fd=lock_fd); os.fsync(lock_fd)
+    finally: os.close(lock_fd)
+    os.rmdir(cfg["lock_name"],dir_fd=parent_fd); os.fsync(parent_fd)
+except Exception:
+    print(json.dumps({"ok":False,"error":"bridge lock cleanup refused"},sort_keys=True)); sys.exit(2)
+finally: os.close(parent_fd)
+print(json.dumps({"ok":True},sort_keys=True))
+'''
+    return "python3 -c " + shlex.quote(code) + " " + shlex.quote(payload)
+
+
+def _acquire_bridge_lock(remote: Remote, remote_root: str, release_id: str) -> dict[str, Any]:
+    """Return our owner record, or report only validated metadata on contention."""
+    proc = remote.run(_bridge_lock_acquire_command(remote_root, release_id))
+    try:
+        response = json.loads((proc.stdout or "").strip().splitlines()[-1])
+    except Exception:
+        response = {}
+    if proc.returncode == 0 and response.get("ok") is True:
+        return _validate_bridge_lock_owner(response.get("owner"))
+    owner = response.get("owner")
+    if owner == "unknown":
+        raise ReleaseError("bridge release lock is held; owner=unknown")
+    try:
+        safe_owner = _validate_bridge_lock_owner(owner)
+    except ReleaseError:
+        raise ReleaseError("bridge release lock is held; owner=unknown") from None
+    raise ReleaseError("bridge release lock is held; owner=" + json.dumps(safe_owner, sort_keys=True, separators=(",", ":")))
+
+
 def _validate_bridge_guard_state(state: Any) -> dict[str, Any]:
     allowed = {"ok", "unit_path", "previous_state", "previous_target", "previous_working_directory", "previous_exec_argv", "previous_environment_file", "previous_inline_environment", "previous_fragment_path"}
     if not isinstance(state, dict) or set(state) != allowed or state.get("ok") is not True:
@@ -4252,6 +4443,7 @@ def bridge_deploy(*, release_id: str, archive: Path, manifest_path: Path, confir
     paths = _bridge_remote_paths(remote_root, rid)
     mutation_started = False
     lock_acquired = False
+    lock_owner: dict[str, Any] | None = None
     deployment_error: Exception | None = None
     cleanup_error: str | None = None
     unit_path = BRIDGE_UNIT_PATH
@@ -4261,7 +4453,7 @@ def bridge_deploy(*, release_id: str, archive: Path, manifest_path: Path, confir
         # for the release lock.
         state = _remote_json(remote, _bridge_remote_guard_command(remote_root, manifest, source_snapshot_manifest_sha256))
         unit_path = str(state.get("unit_path") or BRIDGE_UNIT_PATH)
-        _remote_ok(remote.run("mkdir " + shlex.quote(paths["lock_dir"])))
+        lock_owner = _acquire_bridge_lock(remote, remote_root, rid)
         lock_acquired = True
         # Re-read every source/baseline guard under the lock.  In particular,
         # never use the pre-lock snapshot to choose files that will be backed
@@ -4292,9 +4484,14 @@ def bridge_deploy(*, release_id: str, archive: Path, manifest_path: Path, confir
                 deployment_error = ReleaseError(f"bridge-deploy failed: {exc}; rollback failed: {rollback_exc}")
     finally:
         if lock_acquired:
-            cleanup_proc = remote.run("rmdir " + shlex.quote(paths["lock_dir"]))
+            # Only the transaction that created this exact metadata record may
+            # remove it; otherwise leave the lock untouched and fail closed.
+            assert lock_owner is not None
+            cleanup_proc = remote.run(_bridge_lock_cleanup_command(remote_root, rid, lock_owner))
             if cleanup_proc.returncode != 0:
-                cleanup_error = (cleanup_proc.stdout + cleanup_proc.stderr)[-2000:] or "bridge release lock cleanup failed"
+                # Remote cleanup output can contain paths, arguments, or secrets.
+                # Preserve only a fixed local error code for this failure.
+                cleanup_error = BRIDGE_LOCK_CLEANUP_FAILURE
     if deployment_error:
         if cleanup_error:
             raise ReleaseError(f"{deployment_error}; bridge release lock cleanup failed: {cleanup_error}") from deployment_error
@@ -4497,7 +4694,8 @@ def deploy(*, release_id: str, archive: Path, manifest_path: Path, confirm: bool
         if lock_acquired:
             cleanup_proc = remote.run("rmdir " + shlex.quote(lock_dir))
             if cleanup_proc.returncode != 0:
-                cleanup_error = (cleanup_proc.stdout + cleanup_proc.stderr)[-2000:] or "release lock cleanup failed"
+                # Never surface remote cleanup output in a local exception.
+                cleanup_error = RELEASE_LOCK_CLEANUP_FAILURE
     if deployment_error:
         if cleanup_error:
             raise ReleaseError(f"{deployment_error}; release lock cleanup failed: {cleanup_error}") from deployment_error
@@ -4568,7 +4766,8 @@ def bootstrap_apply(*, release_id: str, archive: Path, manifest_path: Path, conf
         if lock_acquired:
             cleanup_proc = remote.run("rmdir " + shlex.quote(paths["lock_dir"]))
             if cleanup_proc.returncode != 0:
-                cleanup_error = (cleanup_proc.stdout + cleanup_proc.stderr)[-2000:] or "release lock cleanup failed"
+                # Never surface remote cleanup output in a local exception.
+                cleanup_error = RELEASE_LOCK_CLEANUP_FAILURE
     if bootstrap_error:
         if cleanup_error:
             raise ReleaseError(f"{bootstrap_error}; release lock cleanup failed: {cleanup_error}") from bootstrap_error
@@ -4635,6 +4834,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     bwork = sub.add_parser("prepare-bridge-worktree")
     bwork.add_argument("--snapshot-dir", type=Path, required=True)
     bwork.add_argument("--out-dir", type=Path, required=True)
+    overlay = sub.add_parser("apply-local-diagnostic-overlay")
+    overlay.add_argument("--worktree-dir", type=Path, required=True)
+    overlay.add_argument("--scope", choices=("api", "bridge"), required=True)
     bbuild = sub.add_parser("build-bridge-from-worktree")
     bbuild.add_argument("--worktree-dir", type=Path, required=True)
     bbuild.add_argument("--release-id", required=True)
@@ -4726,6 +4928,8 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(snapshot_vps_bridge_source(remote=remote, out_dir=args.out_dir, keep_tar=not args.discard_tar), ensure_ascii=False, sort_keys=True))
         elif command == "prepare-bridge-worktree":
             print(json.dumps(prepare_bridge_worktree(snapshot_dir=args.snapshot_dir, out_dir=args.out_dir), ensure_ascii=False, sort_keys=True))
+        elif command == "apply-local-diagnostic-overlay":
+            print(json.dumps(apply_local_diagnostic_overlay(worktree_dir=args.worktree_dir, scope=args.scope), ensure_ascii=False, sort_keys=True))
         elif command == "build-bridge-from-worktree":
             artifact = build_bridge_from_worktree(worktree_dir=args.worktree_dir, release_id=args.release_id, out_dir=args.out_dir)
             provenance = artifact.manifest_data["source_provenance"]

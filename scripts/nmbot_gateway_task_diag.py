@@ -32,6 +32,25 @@ SAFE_EVENT_FIELDS = ("error_type", "stage", "ts", "timestamp", "task_status", "s
 SAFE_TEXT_MAX = 4000
 SAFE_QUERY_MAX = 240
 DEFAULT_LIMIT = 50
+EVIDENCE_CHAIN_SCHEMA = "nmbot.evidence_chain.v1"
+EVIDENCE_CHILD_PROBE_LIMIT = 6
+EVIDENCE_CHILD_TOLERANCE_SECONDS = 5
+EVIDENCE_CONTACT_ANSWER_KINDS = {
+    "operator_offer",
+    "collect_contact_name",
+    "collect_contact_phone",
+    "callback_queued",
+    "operator_declined",
+}
+EVIDENCE_CARD_FIELDS = (
+    "id", "name", "alias", "title", "price", "price_min", "price_from", "min_price",
+    "delivered", "readiness", "ready", "finishing", "area", "min_area", "max_area", "metro", "school",
+    "kindergarten", "park", "park_near", "water", "water_near", "yard_without_cars", "district", "location", "type_object",
+)
+EVIDENCE_NORMALIZED_FIELDS = (
+    "name", "entity_id", "location", "price", "price_min", "finishing", "area", "ready",
+    "metro", "developer", "property_class", "infrastructure",
+)
 PLANNER_SEMANTIC_ALLOWLIST = {
     "user_goal",
     "selected_reference",
@@ -86,6 +105,7 @@ _PHONE_RE = re.compile(r"(?<!\w)(?:\+?7|8)[\s().-]*\d(?:[\s().-]*\d){9,10}(?!\w)
 _EMAIL_RE = re.compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w.-])", re.I)
 _CONTACT_VALUE_RE = re.compile(r"(?i)\b(?:telegram|телеграм|tg|whatsapp|ватсап|wa)\s*[:=]?\s*@?[A-Z0-9_.-]{3,32}\b")
 _NAME_VALUE_RE = re.compile(r"(?i)\b(?:имя|name)\s*[:=]\s*[^,;\n]{1,80}")
+_URL_RE = re.compile(r"(?i)\b(?:https?://|www\.)[^\s<>()]+")
 SENSITIVE_KEY_PARTS = (
     "error",
     "auth",
@@ -202,6 +222,7 @@ def _safe_text(value: Any, *, limit: int = SAFE_TEXT_MAX) -> str:
     text = _EMAIL_RE.sub("[email redacted]", text)
     text = _CONTACT_VALUE_RE.sub("[contact redacted]", text)
     text = _NAME_VALUE_RE.sub("[name redacted]", text)
+    text = _URL_RE.sub("[link redacted]", text)
     return text[:limit]
 
 
@@ -672,6 +693,307 @@ def run_diagnostic(
     return build_diagnosis(task_id, status_payload, result_payload, events=events)
 
 
+def _turn_trace_ref(row: Mapping[str, Any]) -> str | None:
+    meta = row.get("meta") if isinstance(row.get("meta"), Mapping) else {}
+    value = row.get("trace_ref") or meta.get("trace_ref")
+    return str(value).strip() if isinstance(value, str) and value.strip() else None
+
+
+def _bounded_card(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Project only known search-card fields; links and arbitrary result text never cross."""
+    return {key: _sanitize_json_value(raw[key]) for key in EVIDENCE_CARD_FIELDS if key in raw}
+
+
+def _card_key(card: Mapping[str, Any]) -> tuple[str, str] | None:
+    for key in ("id", "name", "alias", "title"):
+        value = card.get(key)
+        if isinstance(value, (str, int)) and str(value).strip():
+            return key, str(value).strip().casefold()
+    return None
+
+
+def _card_tokens(card: Mapping[str, Any]) -> set[str]:
+    return {str(card[key]).strip().casefold() for key in ("id", "name", "alias", "title") if isinstance(card.get(key), (str, int)) and str(card[key]).strip()}
+
+
+def _card_identity_value(card: Mapping[str, Any], field: str) -> str | None:
+    value = card.get(field)
+    if isinstance(value, (str, int)) and str(value).strip():
+        return str(value).strip().casefold()
+    return None
+
+
+def _card_name_tokens(card: Mapping[str, Any]) -> set[str]:
+    return {
+        value
+        for field in ("name", "alias", "title")
+        if (value := _card_identity_value(card, field)) is not None
+    }
+
+
+def _matching_primary_index(candidate: Mapping[str, Any], primary_cards: list[Mapping[str, Any]]) -> int | None:
+    """Return one unambiguous owner; explicit IDs never fall back to a name."""
+    candidate_id = _card_identity_value(candidate, "id")
+    candidate_names = _card_name_tokens(candidate)
+    if candidate_id is not None:
+        id_matches = [
+            index
+            for index, primary in enumerate(primary_cards)
+            if _card_identity_value(primary, "id") == candidate_id
+        ]
+        if len(id_matches) != 1:
+            return None
+        primary_names = _card_name_tokens(primary_cards[id_matches[0]])
+        if candidate_names and primary_names and not (candidate_names & primary_names):
+            return None
+        return id_matches[0]
+    if not candidate_names:
+        return None
+    name_matches = [
+        index
+        for index, primary in enumerate(primary_cards)
+        if candidate_names & _card_name_tokens(primary)
+    ]
+    return name_matches[0] if len(name_matches) == 1 else None
+
+
+def _extract_cards(value: Any, *, depth: int = 0) -> list[dict[str, Any]]:
+    """Find bounded card dictionaries in known result containers, never exposing the container."""
+    if depth > 4:
+        return []
+    if isinstance(value, list):
+        cards: list[dict[str, Any]] = []
+        for item in value[:20]:
+            if isinstance(item, Mapping) and _card_key(item):
+                cards.append(dict(item))
+            elif isinstance(item, (Mapping, list)):
+                cards.extend(_extract_cards(item, depth=depth + 1))
+        return cards[:20]
+    if not isinstance(value, Mapping):
+        return []
+    for key in ("facts", "cards", "options", "results", "data", "items", "near"):
+        nested = value.get(key)
+        if isinstance(nested, list):
+            cards = _extract_cards(nested, depth=depth + 1)
+            if cards:
+                return cards
+        if isinstance(nested, Mapping):
+            cards = _extract_cards(nested, depth=depth + 1)
+            if cards:
+                return cards
+    return []
+
+
+def _result_cards(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    result = payload.get("result")
+    if isinstance(result, Mapping):
+        response = result.get("response")
+        if isinstance(response, str) and response.strip():
+            try:
+                decoded = json.loads(response)
+            except (json.JSONDecodeError, TypeError):
+                decoded = None
+            if isinstance(decoded, (Mapping, list)):
+                cards = _extract_cards(decoded)
+                if cards:
+                    return cards
+    return _extract_cards(result)
+
+
+def _normalized_card(raw: Mapping[str, Any]) -> dict[str, Any] | None:
+    try:
+        from nmbot_v2.card_normalizer import normalize_card
+        value = normalize_card(raw)
+        data = value.to_dict() if hasattr(value, "to_dict") else dict(value.__dict__)
+        return dict(data)
+    except Exception:  # optional evidence enrichment must not make diagnosis fail
+        return None
+
+
+def _bounded_normalized_card(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    return {key: _sanitize_json_value(value[key]) for key in EVIDENCE_NORMALIZED_FIELDS if key in value}
+
+
+def _claims_from_public_text(text: str) -> dict[str, bool]:
+    lowered = text.casefold()
+    patterns = {
+        "price": r"(?:цен[аы]|стоимост|₽|руб)", "delivered": r"(?:сдан|готов(?:ность|ый|а)?)",
+        "finishing": r"отделк", "area": r"(?:площад|м²|кв\.?\s*м)", "metro": r"\bметро\b",
+        "school": r"школ", "kindergarten": r"(?:детск\w* сад|садик)", "park": r"парк",
+        "water": r"(?:вод(?:а|ы|о[её]м)|река|озер|набережн)", "yard_without_cars": r"двор без машин",
+    }
+    return {name: bool(re.search(pattern, lowered)) for name, pattern in patterns.items()}
+
+
+def _claim_segments(text: str, cards: list[Mapping[str, Any]]) -> dict[str, str]:
+    """Bound each card to its last named section in a multi-card response."""
+    lowered = text.casefold()
+    positions: list[tuple[int, str]] = []
+    for card in cards:
+        key = _card_key(card)
+        names = [str(card[field]).strip().casefold() for field in ("name", "alias", "title") if isinstance(card.get(field), str) and str(card[field]).strip()]
+        found = max((lowered.rfind(name) for name in names), default=-1)
+        if key and found >= 0:
+            positions.append((found, key[1]))
+    positions.sort()
+    segments: dict[str, str] = {}
+    for index, (start, token) in enumerate(positions):
+        end = positions[index + 1][0] if index + 1 < len(positions) else len(text)
+        segments[token] = text[start:end]
+    return segments
+
+
+def _claims_for_card(text: str, raw: Mapping[str, Any], *, card_count: int, segments: Mapping[str, str]) -> dict[str, bool]:
+    """Avoid attributing another option's claims to the current card."""
+    if card_count <= 1:
+        segment = text
+    else:
+        key = _card_key(raw)
+        segment = segments.get(key[1], "") if key else ""
+    claim_text = segment
+    for field in ("name", "alias", "title"):
+        value = raw.get(field)
+        if isinstance(value, str) and value.strip():
+            claim_text = re.sub(re.escape(value), "", claim_text, count=1, flags=re.I)
+    claims = _claims_from_public_text(claim_text) if claim_text else {}
+    location = raw.get("location")
+    if isinstance(location, str) and location.strip():
+        words = re.findall(r"[0-9a-zа-яё]+", location.casefold())
+        stems = [word[:6] if len(word) > 6 else word for word in words if len(word) >= 4]
+        claims["location"] = bool(stems) and all(stem in segment.casefold() for stem in stems)
+    return claims
+
+
+def _evidence_has(card: Mapping[str, Any], normalized: Mapping[str, Any] | None, field: str) -> bool:
+    aliases = {
+        "delivered": ("delivered", "readiness", "ready"),
+        "price": ("price", "price_min", "price_from", "min_price"),
+        "area": ("area", "min_area", "max_area"),
+        "park": ("park", "park_near"),
+        "water": ("water", "water_near"),
+    }
+    keys = aliases.get(field, (field,))
+    return any(card.get(key) not in (None, "", [], {}) for key in keys) or bool(normalized and any(normalized.get(key) not in (None, "", [], {}) for key in keys))
+
+
+def _attempt_task_ids(summary: Mapping[str, Any]) -> list[str]:
+    details = summary.get("gateway_attempt_details")
+    if not isinstance(details, list):
+        return []
+    out: list[str] = []
+    for item in details[:5]:
+        if isinstance(item, Mapping) and isinstance(item.get("gateway_task_id"), (str, int)):
+            task_id = str(item["gateway_task_id"]).strip()
+            if task_id and task_id not in out:
+                out.append(task_id)
+    return out
+
+
+def _task_timestamp(payload: Mapping[str, Any]) -> datetime | None:
+    return _parse_ts(payload.get("completed_at") or payload.get("updated_at") or payload.get("created_at"))
+
+
+def build_evidence_chain_report(
+    trace_ref: str, *, date: str, logs_dir: Path, config: GatewayConfig,
+    urlopen: Callable[..., Any] = urllib.request.urlopen,
+) -> dict[str, Any]:
+    """Build a bounded, read-only per-turn evidence chain for one exact trace."""
+    rows = [row for row in load_jsonl(_dialogue_path(logs_dir)) if _turn_trace_ref(row) == trace_ref]
+    users = [row for row in rows if row.get("role") == "user"]
+    bots = [row for row in rows if row.get("role") == "bot"]
+    bot = bots[-1] if bots else None
+    answer_kind = str((bot or {}).get("answer_kind") or "")[:80] or None
+    public_text = (
+        "[contact redacted]"
+        if answer_kind in EVIDENCE_CONTACT_ANSWER_KINDS
+        else _safe_text(bot.get("text"), limit=1200) if bot else ""
+    )
+    summary = bot.get("runtime_summary") if isinstance(bot, Mapping) and isinstance(bot.get("runtime_summary"), Mapping) else {}
+    task_ids = _attempt_task_ids(summary)
+    primary: list[dict[str, Any]] = []
+    primary_cards: list[dict[str, Any]] = []
+    for task_id in task_ids[:5]:
+        try:
+            status, result = fetch_task_json(config, task_id, "status", urlopen=urlopen), fetch_task_json(config, task_id, "result", urlopen=urlopen)
+            diagnosis = build_diagnosis(task_id, status, result)
+            cards = _result_cards(result)
+            primary_cards.extend(cards)
+            primary.append({"task_id": task_id, "status": diagnosis["status"], "result_present": diagnosis["result_present"], "card_count": len(cards)})
+        except DiagnosticError as exc:
+            primary.append({"task_id": task_id, "status": "unavailable", "error_code": exc.code})
+    accepted: list[dict[str, Any]] = []
+    candidate_errors: list[str] = []
+    bot_ts = _parse_ts(bot.get("ts")) if bot else None
+    user_ts = _parse_ts(users[-1].get("ts")) if users else None
+    numeric_ids = [int(value) for value in task_ids if value.isdecimal()]
+    if numeric_ids and primary_cards and user_ts and bot_ts:
+        start = max(numeric_ids)
+        for candidate_id in range(start + 1, start + 1 + EVIDENCE_CHILD_PROBE_LIMIT):
+            try:
+                result = fetch_task_json(config, str(candidate_id), "result", urlopen=urlopen)
+            except DiagnosticError as exc:
+                candidate_errors.append(exc.code)
+                continue
+            cards = _result_cards(result)
+            completed = _task_timestamp(result)
+            if len(cards) != 1 or completed is None:
+                continue
+            primary_index = _matching_primary_index(cards[0], primary_cards)
+            if primary_index is None:
+                continue
+            if not (user_ts <= completed <= bot_ts + timedelta(seconds=EVIDENCE_CHILD_TOLERANCE_SECONDS)):
+                continue
+            accepted.append({"task_id": str(candidate_id), "correlation_method": "single_card_primary_key_and_timestamp", "confidence": "high", "primary_index": primary_index, "card": cards[0]})
+    child_by_index = {item["primary_index"]: item["card"] for item in accepted}
+    claim_segments = _claim_segments(public_text, primary_cards)
+    cards_report: list[dict[str, Any]] = []
+    conflicts: list[dict[str, Any]] = []
+    for primary_index, raw in enumerate(primary_cards[:20]):
+        child = child_by_index.get(primary_index)
+        merged = {**raw, **(child or {})}
+        normalized = _normalized_card(merged)
+        raw_safe, child_safe = _bounded_card(raw), _bounded_card(child or {})
+        added = {key: value for key, value in child_safe.items() if key not in raw_safe or raw_safe[key] != value}
+        claims = _claims_for_card(public_text, raw, card_count=len(primary_cards), segments=claim_segments)
+        card_claims = {field: value for field, value in claims.items() if value}
+        card_id = str(raw_safe.get("id") or raw_safe.get("name") or raw_safe.get("title") or "card")[:128]
+        for field in card_claims:
+            if not _evidence_has(merged, normalized, field):
+                conflicts.append({"category": "unsupported_public_claim", "card": card_id, "field": field, "candidate": True})
+        for field in ("price", "delivered", "finishing", "location"):
+            if _evidence_has(merged, normalized, field) and not claims.get(field):
+                conflicts.append({"category": "available_but_hidden", "card": card_id, "field": field, "candidate": True})
+        if normalized:
+            for field in ("finishing", "delivered", "area", "metro"):
+                if _evidence_has(raw, None, field) and not _evidence_has({}, normalized, field):
+                    conflicts.append({"category": "dropped_by_normalizer", "card": card_id, "field": field, "candidate": True})
+        cards_report.append({"card_ref": card_id, "raw_fields": raw_safe, "fields_added_by_child": added, "normalized_fields": _bounded_normalized_card(normalized), "public_claim_fields": card_claims})
+    broad_expected = int(summary.get("call_counts", {}).get("gateway_attempts", 0) or 0) > 1 or str(summary.get("stage") or "") == "main_search"
+    if broad_expected and primary_cards and not accepted:
+        conflicts.append({"category": "missing_lineage", "candidate": True, "detail": "expected enrichment could not be proven from bounded child probes"})
+    first = conflicts[0] if conflicts else None
+    owner = ("card_normalizer" if first and first["category"] == "dropped_by_normalizer" else "search_enrichment" if first and first["category"] == "missing_lineage" else "scenario_recipes/response" if first else "runtime/journal observability" if not task_ids else "MCP/search")
+    return {
+        "schema_version": EVIDENCE_CHAIN_SCHEMA, "trace_ref": trace_ref, "trace_present": bool(rows),
+        "release_id": str((bot or {}).get("release_id") or "")[:128] or None,
+        "turn_timestamps": {"user": _iso_or_none(users[-1].get("ts")) if users else None, "bot": _iso_or_none(bot.get("ts")) if bot else None},
+        "answer_kind": answer_kind,
+        "action": str(summary.get("action") or "")[:80] or None, "stage": str(summary.get("stage") or "")[:80] or None,
+        "public_response": public_text, "primary_tasks": primary, "accepted_child_tasks": [{k: v for k, v in item.items() if k not in {"card", "primary_index"}} for item in accepted],
+        "cards": cards_report, "candidate_conflicts": conflicts[:40], "first_divergence": {"candidate": first, "owner": owner} if first else None,
+        "lineage_coverage": {"primary_task_ids": len(task_ids), "primary_cards": len(primary_cards), "accepted_children": len(accepted), "child_probe_limit": EVIDENCE_CHILD_PROBE_LIMIT, "candidate_probe_error_count": len(candidate_errors)},
+        "durations": {"gateway_attempts": summary.get("call_counts", {}).get("gateway_attempts"), "timing_ms": _sanitize_json_value(summary.get("timing_ms", {}))},
+        "safe_next_check": {"owner": owner, "action": "inspect bounded evidence or add journal child task ids; no replay or write"},
+        "note": "Read-only bounded evidence chain. Raw gateway responses, URLs, contacts, prompts and payloads are excluded.",
+    }
+
+
+def run_evidence_chain(trace_ref: str, *, date: str, repo: Path = REPO, logs_dir: Path | None = None, env: Mapping[str, str] | None = None, urlopen: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
+    return build_evidence_chain_report(trace_ref, date=date, logs_dir=logs_dir or (repo / "logs"), config=load_config(env=env, repo=repo), urlopen=urlopen)
+
+
 def _today_utc() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
@@ -686,6 +1008,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--date", default=_today_utc(), help="UTC log date for bot_error_events correlation, YYYY-MM-DD")
     parser.add_argument("--json", action="store_true", help="Print bounded JSON diagnosis. Human mode is also JSON for copy/paste safety.")
     parser.add_argument("--scenario", action="store_true", help="Print safe scenario timeline report instead of task-only diagnosis")
+    parser.add_argument("--evidence-chain", action="store_true", help="Build bounded read-only evidence chain for --trace-ref")
+    parser.add_argument("--trace-ref", help="Exact dialogue_journal trace_ref for --evidence-chain")
     parser.add_argument("--session-ref", help="Exact sha256 session/conversation ref, or raw local ref to hash before matching")
     parser.add_argument("--query", help="Bounded substring filter over already-redacted journal/trace text")
     parser.add_argument("--from", dest="from_ts", help="UTC ISO timestamp lower bound")
@@ -699,6 +1023,14 @@ def main(argv: list[str] | None = None) -> int:
         repo = Path(args.repo).expanduser().resolve()
         logs_dir = Path(args.logs_dir).expanduser().resolve() if args.logs_dir else None
         effective_logs_dir = logs_dir or (repo / "logs")
+        if args.evidence_chain:
+            if not args.trace_ref:
+                raise DiagnosticError("evidence_chain_requires_trace_ref")
+            if args.task_id or args.scenario or args.session_ref or args.query or args.from_ts or args.to_ts:
+                raise DiagnosticError("evidence_chain_incompatible_options")
+            result = run_evidence_chain(args.trace_ref, date=args.date, repo=repo, logs_dir=effective_logs_dir)
+            _print_human(result)
+            return 0
         scenario_mode = bool(args.scenario or args.session_ref or args.query or args.from_ts or args.to_ts or not args.task_id)
         if scenario_mode:
             from_ts = _parse_ts(args.from_ts) if args.from_ts else None
@@ -727,7 +1059,7 @@ def main(argv: list[str] | None = None) -> int:
     except DiagnosticError as exc:
         safe_error = {"status": "diagnostic_failed", "error_code": exc.code, "note": "No secret values are included."}
         print(json.dumps(safe_error, ensure_ascii=False, indent=2, sort_keys=True), file=sys.stderr)
-        return 2 if exc.code == "missing_gateway_token" else 3
+        return 2 if exc.code == "missing_gateway_token" or exc.code.startswith("evidence_chain_") else 3
     _print_human(result)
     return 0
 

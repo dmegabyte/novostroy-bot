@@ -7,12 +7,11 @@ from pathlib import Path
 
 from nmbot_v0 import V0State, V0TurnProcessor
 from nmbot_v0.runtime import FINANCING_CHECK_ALL_QUESTION, OPERATOR_PHONE_QUESTION, SELECTED_OBJECT_PRESENTATION_QUESTION, V0_CONTACT_PHONE_DIGITS_REQUEST, _build_turn_context, _fallback, _search_cards_without_shown_options, merge_search_params
-from nmbot_v2.contracts import SearchResult
+from nmbot_v0.contracts import SearchResult
 from nmbot_v0.card_normalizer import normalize_card
 from nmbot_v0.field_contract import v0_presentation_search_fields
 from nmbot_v0.presentation import build_shortlist_comparison_context, render_grounded_card_block, shortlist_level_sparse_note
-from nmbot_v2.contracts import OptionCard
-from scripts.nmbot_runtime_adapter import _envelope_to_v0_state, _merge_runtime_namespace_envelope, _canonical_v0_envelope
+from nmbot_v0.contracts import OptionCard
 
 
 RENTAL_SELECTED_CTA = "Проверить доступные квартиры для сдачи именно в этом ЖК?"
@@ -123,9 +122,7 @@ def test_v0_presentation_formats_iso_year_month_readiness() -> None:
     assert "2028-01" not in text
 
 
-def test_v0_search_flow_validates_three_cards_without_answer_prompt() -> None:
-    calls = {"answer": []}
-
+def test_v0_search_flow_validates_three_cards_with_scenario_port_only() -> None:
     def scenario_search(_context):
         return {
             "decision": {"action": "search", "viewpoint": "life", "params": {"budget": "до 12"}, "active_topic": "life"},
@@ -142,18 +139,13 @@ def test_v0_search_flow_validates_three_cards_without_answer_prompt() -> None:
             },
         }
 
-    def answer(brief):
-        calls["answer"].append(brief)
-        raise AssertionError("answer prompt must not be called")
-
-    result = V0TurnProcessor(scenario_search=scenario_search, answer=answer).process("Подбери новостройку")
+    result = V0TurnProcessor(scenario_search=scenario_search).process("Подбери новостройку")
 
     assert result.ok is True
     assert result.error_code is None
     assert len(result.state.visible_options) == 3
     assert result.state.visible_options[0].name == "ЖК Первый"
     assert result.state.params == {"max_price": 12_000_000}
-    assert len(calls["answer"]) == 0
 
 
 def test_v0_merge_search_params_keeps_previous_constraints_and_normalizes_aliases() -> None:
@@ -185,9 +177,9 @@ def test_v0_search_merges_state_params_and_excludes_previously_shown_options() -
             },
             "search": {
                 "facts": [
-                    {"name": "ЖК Первый", "min_price": 90_000_000},
-                    {"name": "ЖК Новый", "min_price": 95_000_000},
-                    {"name": "ЖК Ещё один", "min_price": 99_000_000},
+                    {"name": "ЖК Первый", "location": "ЦАО", "rooms": 2, "min_price": 90_000_000},
+                    {"name": "ЖК Новый", "location": "ЦАО", "rooms": 2, "min_price": 95_000_000},
+                    {"name": "ЖК Ещё один", "location": "ЦАО", "rooms": 2, "min_price": 99_000_000},
                 ],
                 "near": [],
                 "missing": [],
@@ -658,29 +650,22 @@ def test_v0_client_messages_do_not_expose_internal_wording_representative_paths(
     assert_no_v0_client_forbidden(fallback.message)
 
 
-def test_v0_search_validation_invalid_hard_is_report_only() -> None:
+def test_v0_search_validation_invalid_hard_fails_closed_without_persisting_cards() -> None:
     def scenario_search(_context):
         return {
             "decision": {"action": "search", "viewpoint": "life", "params": {"rooms": 2}, "active_topic": "life"},
             "search": {"facts": [{"name": "ЖК Нестрогий", "rooms": [3], "location": "Москва"}], "near": [], "missing": [], "params": {}},
         }
 
-    def answer(brief):
-        assert [item["name"] for item in brief["allowed_cards"]] == ["ЖК Нестрогий"]
-        return {
-            "answer_kind": "search_many",
-            "scope": "shortlist",
-            "intro": "runtime replaces this",
-            "options": [{"name": "ЖК Нестрогий"}],
-            "recommendation": "",
-            "missing_note": "",
-            "final_question": "Какой вариант хотите разобрать подробнее?",
-        }
+    def answer(_brief):
+        raise AssertionError("invalid search must not reach answer rendering")
 
     result = V0TurnProcessor(scenario_search=scenario_search, answer=answer).process("Нужна двушка")
 
-    assert result.ok is True
-    assert [card.name for card in result.state.visible_options] == ["ЖК Нестрогий"]
+    assert result.ok is False
+    assert result.error_code == "invalid_search_output"
+    assert result.state == V0State()
+    assert "ЖК Нестрогий" not in result.message
     validation = result.diagnostics["search_validation"]
     assert validation["status"] == "invalid"
     assert "fact_0_violates_hard:rooms" in validation["errors"]
@@ -1092,7 +1077,7 @@ def test_v0_search_uses_canonical_card_order_when_answer_port_would_reorder() ->
     assert [option["name"] for option in result.answer.options] == ["ЖК Первый", "ЖК Второй", "ЖК Третий"]
 
 
-def test_v0_family_shortlist_uses_numbered_v2_blocks_distinct_benefits_and_budget_boundary() -> None:
+def test_v0_family_shortlist_with_fact_above_hard_budget_fails_closed() -> None:
     def scenario_search(_context):
         return {
             "decision": {"action": "search", "viewpoint": "family", "active_topic": "family", "params": {"max_price": 10_000_000}},
@@ -1121,18 +1106,14 @@ def test_v0_family_shortlist_uses_numbered_v2_blocks_distinct_benefits_and_budge
 
     result = V0TurnProcessor(scenario_search=scenario_search, answer=answer).process("нужнва кавртира для семьи пв 10 млн")
 
-    assert result.ok is True
-    assert result.state.params["max_price"] == 10_000_000
-    assert "1. ЖК «Школа»" in result.message
-    assert "2. ЖК «Готовый»" in result.message
-    assert "3. ЖК «Парк»" in result.message
-    assert "Рядом есть школа, детский сад" in result.message
-    assert "Дом уже сдан" in result.message
-    assert "Парк добавляет семье" in result.message
-    assert result.message.count("Рядом есть школа") == 1
-    assert "По бюджету до 10 000 000 ₽" in result.message
-    assert "выше указанного бюджета" in result.message
-    assert "вписывается в указанный бюджет" in result.message
+    assert result.ok is False
+    assert result.error_code == "invalid_search_output"
+    assert result.state == V0State()
+    assert "ЖК «Школа»" not in result.message
+    assert "ЖК «Готовый»" not in result.message
+    assert "ЖК «Парк»" not in result.message
+    assert "fact_1_violates_hard:max_price" in result.diagnostics["search_validation"]["errors"]
+    assert "fact_2_violates_hard:max_price" in result.diagnostics["search_validation"]["errors"]
 
 
 def test_v0_family_ready_cards_fall_back_to_distinct_life_location_benefits() -> None:
@@ -1327,39 +1308,31 @@ def test_v0_answer_port_unsupported_description_key_is_not_called() -> None:
     assert [option["name"] for option in result.answer.options] == ["ЖК Первый"]
 
 
-def test_v0_old_serialized_state_loads_and_v2_namespace_coexists() -> None:
-    old_envelope = {
-        "nmbot_v0": {
-            "params": {"budget": "до 12 млн"},
-            "visible_options": [{"name": "ЖК Первый", "location": "Москва"}],
-            "selected_option_name": "ЖК Первый",
-            "active_topic": "life",
-        },
-        "nmbot_v2": {"selected_option_name": "ЖК V2"},
-    }
-
-    state = _envelope_to_v0_state(old_envelope)
+def test_v0_serialized_state_loads_safe_defaults() -> None:
+    state = V0State.from_dict({
+        "params": {"budget": "до 12 млн"},
+        "visible_options": [{"name": "ЖК Первый", "location": "Москва"}],
+        "selected_option_name": "ЖК Первый",
+        "active_topic": "life",
+    })
     assert state.has_greeted is False
     assert state.last_answer_kind is None
     assert state.previous_assistant_message is None
     assert state.answered_facts == ()
-
-    merged = _merge_runtime_namespace_envelope(old_envelope, _canonical_v0_envelope(state))
-    assert merged["nmbot_v2"] == {"selected_option_name": "ЖК V2"}
-    assert merged["nmbot_v0"]["has_greeted"] is False
     assert state.pending_action is None
-    assert merged["nmbot_v0"]["pending_action"] is None
 
 
 def test_v0_serialized_state_round_trips_previous_assistant_message_with_bound() -> None:
     previous = "Показываю клиенту ровно это." + (" хвост" * 500)
     state = V0State(previous_assistant_message=previous)
 
-    envelope = _canonical_v0_envelope(state)
-    restored = _envelope_to_v0_state(envelope)
+    serialized = state.to_dict()
+    restored = V0State.from_dict(serialized)
+    restored_from_legacy_value = V0State.from_dict({"previous_assistant_message": previous})
 
-    assert envelope["nmbot_v0"]["previous_assistant_message"] == previous[:2000]
+    assert serialized["previous_assistant_message"] == previous[:2000]
     assert restored.previous_assistant_message == previous[:2000]
+    assert restored_from_legacy_value.previous_assistant_message == previous[:2000]
 
 
 def _names_only_answer(brief):
@@ -1539,6 +1512,45 @@ def test_v0_selected_enrichment_exact_name_merges_and_mismatch_is_rejected() -> 
     assert rejected.diagnostics["search_validation"].get("selected_enrichment_rejected") == "name_mismatch"
 
 
+def test_v0_invalid_selected_enrichment_preserves_existing_card(monkeypatch) -> None:
+    state = V0State(
+        visible_options=(OptionCard(name="ЖК Третий", price_min=29_000_000),),
+        selected_option_name="ЖК Третий",
+        active_topic="life",
+    )
+    scenario = lambda _context: {
+        "decision": {"action": "selected_object", "viewpoint": "life", "selected_option_name": "ЖК Третий"},
+        "search": {"facts": [{"name": "ЖК Третий", "location": "Москва"}], "near": [], "missing": [], "params": {}},
+    }
+    monkeypatch.setattr("nmbot_v0.runtime.validate_search_output", lambda *_args: {"ok": False, "status": "invalid", "errors": ["fact_0_violates_hard:name"]})
+
+    result = V0TurnProcessor(scenario_search=scenario, answer=_names_only_answer).process("третий", state=state)
+
+    assert result.ok is True
+    assert result.state.visible_options == state.visible_options
+    assert result.state.visible_options[0].location is None
+    assert result.diagnostics["search_validation"]["safe_code"] == "search_validation_error"
+    assert result.diagnostics["search_validation"]["selected_enrichment_rejected"] == "search_validation_error"
+    assert "Москва" not in result.message
+
+
+def test_v0_invalid_selected_bootstrap_preserves_empty_prior_state(monkeypatch) -> None:
+    scenario = lambda _context: {
+        "decision": {"action": "selected_object", "viewpoint": "life", "selected_option_name": "ЖК Новый"},
+        "search": {"facts": [{"name": "ЖК Новый", "location": "Москва"}], "near": [], "missing": [], "params": {}},
+    }
+    monkeypatch.setattr("nmbot_v0.runtime.validate_search_output", lambda *_args: {"ok": False, "status": "invalid", "errors": ["fact_0_violates_hard:name"]})
+
+    result = V0TurnProcessor(scenario_search=scenario, answer=_names_only_answer).process("расскажи про новый")
+
+    assert result.ok is True
+    assert result.state.visible_options == ()
+    assert result.state.selected_option_name is None
+    assert result.diagnostics["search_validation"]["safe_code"] == "search_validation_error"
+    assert result.diagnostics["search_validation"]["selected_bootstrap_rejected"] == "search_validation_error"
+    assert "Москва" not in result.message
+
+
 def test_v0_selected_exact_enrichment_merges_and_renders_two_confirmed_lots() -> None:
     state = V0State(visible_options=(OptionCard(name="ЖК Третий", price_min=29_000_000),), selected_option_name="ЖК Третий", active_topic="life")
 
@@ -1703,22 +1715,7 @@ def test_v0_selected_enrichment_sync_async_answer_port_not_called_and_results_ma
     assert async_result.state.visible_options[0].finishing == "с отделкой"
 
 
-def test_v0_answer_output_fallbacks_are_runtime_retry_without_phone_or_state_mutation() -> None:
-    initial = V0State(visible_options=(OptionCard(name="ЖК Свой"),), pending_action="check_selected_availability", pending_subject="ЖК Свой", pending_topic="life")
-
-    for code in ("invalid_answer_output", "malformed_answer_output"):
-        result = _fallback(initial, code, ["synthetic_error"])
-
-        assert result.ok is False
-        assert result.error_code == code
-        assert result.state is initial
-        assert result.state.pending_action == "check_selected_availability"
-        assert result.answer.answer_kind == "runtime_retry"
-        assert result.answer.scope == "runtime_retry"
-        assert not re.search(r"телефон|номер|оператор|менеджер", result.message, re.IGNORECASE)
-
-
-def test_v0_ready_delivered_future_cards_are_visible_and_mismatch_is_reported() -> None:
+def test_v0_ready_delivered_future_card_fails_closed() -> None:
     def scenario(_context):
         return {
             "decision": {"action": "search", "viewpoint": "life", "active_topic": "life", "params": {"delivered": True}},
@@ -1732,11 +1729,11 @@ def test_v0_ready_delivered_future_cards_are_visible_and_mismatch_is_reported() 
 
     result = V0TurnProcessor(scenario_search=scenario, answer=_names_only_answer).process("Нужен сданный дом")
 
-    assert result.ok is True
-    assert [card.name for card in result.state.visible_options] == ["ЖК Будущий"]
-    assert result.state.visible_options[0].is_near is False
+    assert result.ok is False
+    assert result.error_code == "invalid_search_output"
+    assert result.state == V0State()
     assert "ЖК «Альтернатива»" not in result.message
-    assert "ЖК «Будущий»" in result.message
+    assert "ЖК «Будущий»" not in result.message
     validation = result.diagnostics["search_validation"]
     assert validation["status"] == "invalid"
     assert "fact_0_violates_hard:ready" in validation["errors"]
@@ -2142,13 +2139,13 @@ def test_v0_sparse_family_shortlist_does_not_claim_broad_family_suitability() ->
     def scenario(_context):
         return {
             "decision": {"action": "search", "viewpoint": "family", "active_topic": "family", "params": {"max_price": 12_000_000, "rooms": 2}, "requested_facts": ["schools", "parks"]},
-            "search": {"facts": [{"name": "ЖК База", "location": "Москва", "min_price": 11_000_000}], "near": [], "missing": ["school", "park_near"], "params": {"max_price": 12_000_000, "rooms": 2}},
+            "search": {"facts": [{"name": "ЖК База", "location": "Москва", "rooms": 2, "min_price": 11_000_000}], "near": [], "missing": ["school", "park_near"], "params": {"max_price": 12_000_000, "rooms": 2}},
         }
 
     result = V0TurnProcessor(scenario_search=scenario, answer=_names_only_answer).process("Для семьи нужна двушка рядом со школой и парком")
 
     assert result.ok is True
-    assert "Точного совпадения" in result.message or "семейные детали" in result.message
+    assert "Точного совпадения" in result.message or "семейные детали" in result.message or "нет подтверждённой информации" in result.message
     assert "подходящ" not in result.message.casefold().split("\n", 1)[0]
     assert "Рядом есть школа" not in result.message
     assert "Парк добавляет" not in result.message

@@ -411,9 +411,6 @@ def build_request_data(request: V2SearchRequest, *, prompt: str, model: str = SE
         "parameters": {"temperature": 0.1, "max_tokens": int(os.getenv("NMBOT_SEARCH_MAX_TOKENS", "5000"))},
         "mcp_servers": [MCP_ALIAS],
     }
-    api_key = os.getenv("OPENROUTER_API_KEY") or ""
-    if api_key:
-        data["external_api_key"] = api_key
     return data
 
 

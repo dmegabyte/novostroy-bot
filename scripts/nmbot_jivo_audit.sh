@@ -12,13 +12,15 @@ MAX_REMOTE_BYTES=$((1024 * 1024))
 LAST="$MAX_LAST"
 STRICT=0
 DELIVERY_TRACE=0
+REMOTE_LOG_OVERRIDDEN=0
 
 usage() {
   cat <<'USAGE'
 Usage: bash scripts/nmbot_jivo_audit.sh [--last N] [--strict] [--delivery-trace] [--host HOST] [--port PORT] [--user USER] [--remote-log PATH]
 
-Read-only: checks SSH, streams the remote structured JSONL log (or the privacy-safe delivery trace with --delivery-trace) to a local temp file,
+Read-only: checks SSH, streams the remote structured JSONL log (or the privacy-safe canonical delivery trace with --delivery-trace) to a local temp file,
 then runs scripts/nmbot_jivo_trace_analyze.py. Secrets and payload text are not printed.
+--delivery-trace cannot be combined with --remote-log.
 USAGE
 }
 
@@ -30,7 +32,7 @@ while [[ $# -gt 0 ]]; do
     --host) [[ $# -ge 2 ]] || { echo "--host requires value" >&2; exit 2; }; HOST="$2"; shift 2 ;;
     --port) [[ $# -ge 2 ]] || { echo "--port requires value" >&2; exit 2; }; PORT="$2"; shift 2 ;;
     --user) [[ $# -ge 2 ]] || { echo "--user requires value" >&2; exit 2; }; USER_NAME="$2"; shift 2 ;;
-    --remote-log) REMOTE_LOG="${2:?--remote-log requires path}"; shift 2 ;;
+    --remote-log) REMOTE_LOG="${2:?--remote-log requires path}"; REMOTE_LOG_OVERRIDDEN=1; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -43,6 +45,11 @@ fi
 
 if [[ "$STRICT" -eq 1 && "$DELIVERY_TRACE" -ne 1 ]]; then
   echo "--strict requires --delivery-trace; legacy structured logs cannot prove the full Jivo delivery lifecycle" >&2
+  exit 2
+fi
+
+if [[ "$DELIVERY_TRACE" -eq 1 && "$REMOTE_LOG_OVERRIDDEN" -eq 1 ]]; then
+  echo "--delivery-trace cannot be combined with --remote-log; it always uses the canonical delivery trace" >&2
   exit 2
 fi
 

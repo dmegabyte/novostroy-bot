@@ -506,9 +506,9 @@ class V0GatewayClient:
                     "decision": {"action": "search", "viewpoint": "life", "params": {"rooms": 2}, "active_topic": "life"},
                     "search": {
                         "facts": [
-                            {"name": "ЖК Первый", "location": "Москва", "min_price": 10000000},
-                            {"name": "ЖК Второй", "location": "Москва", "min_price": 11000000},
-                            {"name": "ЖК Третий", "location": "Москва", "min_price": 12000000},
+                            {"name": "ЖК Первый", "location": "Москва", "rooms": 2, "min_price": 10000000},
+                            {"name": "ЖК Второй", "location": "Москва", "rooms": 2, "min_price": 11000000},
+                            {"name": "ЖК Третий", "location": "Москва", "rooms": 2, "min_price": 12000000},
                         ],
                         "near": [],
                         "missing": [],
@@ -1484,8 +1484,8 @@ def test_v0_success_trace_exposes_only_field_names_not_values() -> None:
 
         assert result["ok"] is True
         trace = result["meta"]["trace"]["field_trace"]["cards"][0]
-        assert set(trace["raw_fields"]) == {"name", "location", "min_price"}
-        assert set(trace["normalized_fields"]) == {"name", "location", "price_min"}
+        assert set(trace["raw_fields"]) == {"name", "location", "rooms", "min_price"}
+        assert set(trace["normalized_fields"]) == {"name", "location", "rooms", "room_formats", "price_min"}
         assert result["meta"]["trace"]["runtime_summary"]["field_trace"] == result["meta"]["trace"]["field_trace"]
         dumped = json.dumps(result["meta"]["trace"], ensure_ascii=False)
         for forbidden in ["ЖК Первый", "Москва", "10000000", "нужнва"]:

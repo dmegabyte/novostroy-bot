@@ -106,6 +106,32 @@ def test_pending_followup_does_not_rewrite_recommend_current() -> None:
     assert decision.action is TurnAction.ANSWER_FROM_CURRENT_OPTIONS
 
 
+def test_pending_financing_consent_keeps_operator_goal_in_clarification_loop() -> None:
+    decision = derive_transition_v3(
+        _plan(IntentGoal.OPERATOR),
+        _state("ЖК Лучи", pending_followup="financing_consent"),
+    )
+
+    assert decision.stage is Stage.FINANCING_CLARIFICATION
+    assert decision.action is TurnAction.CLARIFY_FINANCING
+
+
+@pytest.mark.parametrize("pending", ("financing_consent", "selected_live_fact_consent"))
+@pytest.mark.parametrize("goal", (IntentGoal.OPERATOR, IntentGoal.CLARIFY, IntentGoal.RESUME_PENDING))
+def test_pending_owned_goals_without_outcome_stay_in_consent_loop(pending, goal) -> None:
+    decision = derive_transition_v3(
+        _plan(goal),
+        _state("ЖК Лучи", pending_followup=pending),
+    )
+
+    expected = (
+        (Stage.FINANCING_CLARIFICATION, TurnAction.CLARIFY_FINANCING)
+        if pending == "financing_consent"
+        else (Stage.SELECTED_LIVE_FACT_CLARIFICATION, TurnAction.CLARIFY_SELECTED_LIVE_FACT)
+    )
+    assert (decision.stage, decision.action) == expected
+
+
 @pytest.mark.parametrize("goal", [IntentGoal.RECOMMEND_CURRENT, IntentGoal.REFINE_SEARCH])
 def test_visible_options_and_active_topic_do_not_reroute_stable_goals(goal) -> None:
     state = ConversationState(

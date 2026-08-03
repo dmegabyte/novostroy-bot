@@ -20,7 +20,8 @@ from nmbot_v2.contracts import ExecutableTurn, ExecutionResult, IntentGoal, Inte
 from nmbot_v2.conversation import build_native_conversation_answer
 from nmbot_v2.execution_path import sanitize_execution_path
 from nmbot_v2.fact_context import ALLOWED_FACTS, ALLOWED_SUBJECTS, SUBJECT_FACT_MAP, answered_facts, present_fact_names, split_requested_facts
-from nmbot_v2.runtime import TurnProcessor
+from nmbot_v2.composition import build_turn_processor
+from nmbot_v2.ports import V2RuntimePorts
 from nmbot_v2.manager_rewriter import manager_rewriter_request_payload as build_manager_rewriter_payload, parse_manager_rewriter_text
 from nmbot_v2.pair_comparison import execute_pair_comparison
 from nmbot_v2.response_composer import compose_response_writer_formatter_async, formatter_request_payload as build_response_formatter_payload, v3_answer_writer_prompt_identity, v3_answer_writer_request_payload as build_v3_answer_writer_payload, writer_request_payload as build_response_writer_payload
@@ -1354,22 +1355,24 @@ async def _run_v2_authoritative(
     search = _OvermindSearchAdapter(app, user_text=text)
     composer = _ResponseComposerAdapter(app, runtime_version=runtime_version) if composer_mode in {"shadow", "publish"} else None
     manager_rewriter = _ManagerRewriterAdapter(app, runtime_version=runtime_version) if manager_rewriter_mode in {"shadow", "publish"} else None
-    processor = TurnProcessor(
-        planner=planner,
-        search_service=search,
-        conversation=_ConversationAdapter(app, context=context),
-        operator=_OperatorAdapter(),
-        trace=_TraceAdapter(
-            app,
-            user_id=user_id,
-            channel=channel,
+    processor = build_turn_processor(
+        V2RuntimePorts(
             planner=planner,
-            user_text=text,
+            search_service=search,
+            conversation=_ConversationAdapter(app, context=context),
+            operator=_OperatorAdapter(),
+            trace=_TraceAdapter(
+                app,
+                user_id=user_id,
+                channel=channel,
+                planner=planner,
+                user_text=text,
+            ),
+            journal=_JournalAdapter(app, user_id=user_id, channel=channel),
+            response_composer=composer,
+            manager_rewriter=manager_rewriter,
         ),
-        journal=_JournalAdapter(app, user_id=user_id, channel=channel),
-        response_composer=composer,
         response_composer_mode=composer_mode,
-        manager_rewriter=manager_rewriter,
         manager_rewriter_mode=manager_rewriter_mode,
     )
     result = await processor.process_async(context, v2_state)

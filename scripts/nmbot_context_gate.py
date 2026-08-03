@@ -35,7 +35,7 @@ ROUTES = {
     "stage", "ast", "current_source", "docs", "canonical_notebook_handoff",
     "fresh_authorized_production_handoff", "clarify_evidence_type",
     "deep_audit_handoff", "fail_closed_cross_project", "approved_one_hop_dependency",
-    "bounded_fallback",
+    "bounded_fallback", "selection_required",
 }
 STOP_REASONS = {
     "definition_of_done", "two_primary_sources_agree", "owner_contract_and_test",
@@ -272,14 +272,21 @@ def _select_context(items: Iterable[dict[str, Any]], *, root: Path, max_sources:
 
 def _candidate_list(items: Iterable[dict[str, Any]], *, max_sources: int, do_not_open: Iterable[str]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen: set[tuple[Any, ...]] = set()
     for item in items:
         path = _norm_path(str(item["path"]))
-        if _is_blocked(path, do_not_open) or path in seen:
-            continue
-        seen.add(path)
         start = int(item.get("start_line") or 1)
         end = int(item.get("end_line") or start)
+        identity = (
+            item.get("candidate_id"),
+            path,
+            start,
+            end,
+            json.dumps(item.get("target_spec"), ensure_ascii=False, sort_keys=True) if isinstance(item.get("target_spec"), dict) else "",
+        )
+        if _is_blocked(path, do_not_open) or identity in seen:
+            continue
+        seen.add(identity)
         out.append({
             "id": _source_id({**item, "path": path}, start, end),
             "path": path,
@@ -287,6 +294,10 @@ def _candidate_list(items: Iterable[dict[str, Any]], *, max_sources: int, do_not
             "end_line": end,
             "candidate_only": True,
         })
+        if isinstance(item.get("candidate_id"), str):
+            out[-1]["candidate_id"] = item["candidate_id"]
+        if isinstance(item.get("target_spec"), dict):
+            out[-1]["target_spec"] = dict(item["target_spec"])
         if len(out) >= max_sources:
             break
     return out
@@ -587,7 +598,7 @@ def _strict_stage_report(target: str, *, navigation: Any, project_id: str, defin
     return _base_report(project_id, "stage", stop, abstain=not context, context=context, definition_of_done=definition_of_done, budget_status=budget)
 
 
-def _strict_symbol_report(target: str, owner_path: str | None, *, navigation: Any, project_id: str, definition_of_done: str, do_not: Iterable[str], root: Path, manifest_path: Path, max_sources: int, max_lines: int, max_chars: int) -> dict[str, Any]:
+def _strict_symbol_report(target: str, owner_path: str | None, target_start_line: int | None, target_end_line: int | None, *, navigation: Any, project_id: str, definition_of_done: str, do_not: Iterable[str], root: Path, manifest_path: Path, max_sources: int, max_lines: int, max_chars: int) -> dict[str, Any]:
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", target):
         raise GateError("strict symbol target must be a Python identifier")
     registry = navigation.build_registry(root=root, manifest_path=manifest_path)
@@ -597,6 +608,10 @@ def _strict_symbol_report(target: str, owner_path: str | None, *, navigation: An
         if owner not in registry["active_paths"]:
             return _empty_strict_report(project_id, "ast", definition_of_done, denial="strict_symbol_owner_not_active")
         matches = [r for r in matches if _norm_path(str(r.get("path"))) == owner]
+    if target_start_line is not None or target_end_line is not None:
+        if target_start_line is None or target_end_line is None or target_start_line < 1 or target_end_line < target_start_line:
+            raise GateError("strict symbol target range must be a valid start/end pair")
+        matches = [r for r in matches if int(r.get("start_line") or 0) == target_start_line and int(r.get("end_line") or 0) == target_end_line]
     if not matches:
         return _empty_strict_report(project_id, "ast", definition_of_done, denial="strict_symbol_target_not_found")
     if len(matches) > 1:
@@ -632,7 +647,7 @@ def _strict_docs_report(target: str, owner_path: str | None, *, navigation: Any,
     return _base_report(project_id, "docs", stop, abstain=not context, context=context, definition_of_done=definition_of_done, budget_status=budget)
 
 
-def _strict_target_report(*, target_kind: str, target: str, target_owner: str | None, project_id: str, evidence_type: str, definition_of_done: str, do_not: Iterable[str], root: Path, manifest_path: Path, max_sources: int, max_lines: int, max_chars: int) -> dict[str, Any]:
+def _strict_target_report(*, target_kind: str, target: str, target_owner: str | None, target_start_line: int | None, target_end_line: int | None, project_id: str, evidence_type: str, definition_of_done: str, do_not: Iterable[str], root: Path, manifest_path: Path, max_sources: int, max_lines: int, max_chars: int) -> dict[str, Any]:
     if target_kind not in STRICT_TARGET_KINDS:
         raise GateError("strict target_kind must be stage, symbol or docs")
     if evidence_type != target_kind:
@@ -643,11 +658,11 @@ def _strict_target_report(*, target_kind: str, target: str, target_owner: str | 
     if target_kind == "stage":
         return _strict_stage_report(target.strip(), navigation=navigation, project_id=project_id, definition_of_done=definition_of_done, do_not=do_not, root=root, manifest_path=manifest_path, max_sources=max_sources, max_lines=max_lines, max_chars=max_chars)
     if target_kind == "symbol":
-        return _strict_symbol_report(target.strip(), target_owner, navigation=navigation, project_id=project_id, definition_of_done=definition_of_done, do_not=do_not, root=root, manifest_path=manifest_path, max_sources=max_sources, max_lines=max_lines, max_chars=max_chars)
+        return _strict_symbol_report(target.strip(), target_owner, target_start_line, target_end_line, navigation=navigation, project_id=project_id, definition_of_done=definition_of_done, do_not=do_not, root=root, manifest_path=manifest_path, max_sources=max_sources, max_lines=max_lines, max_chars=max_chars)
     return _strict_docs_report(target.strip(), target_owner, navigation=navigation, project_id=project_id, definition_of_done=definition_of_done, do_not=do_not, root=root, manifest_path=manifest_path, max_sources=max_sources, max_lines=max_lines, max_chars=max_chars)
 
 
-def run_gate(question: str, *, project_id: str, evidence_type: str, definition_of_done: str, do_not_open: Iterable[str] = (), max_sources: int = 2, max_lines: int = 80, max_chars: int = 8000, dependency: dict[str, Any] | None = None, root: Path = ROOT, manifest_path: Path = DEFAULT_MANIFEST, intents_path: Path | None = DEFAULT_INTENTS, target_kind: str | None = None, target: str | None = None, target_owner: str | None = None) -> dict[str, Any]:
+def run_gate(question: str, *, project_id: str, evidence_type: str, definition_of_done: str, do_not_open: Iterable[str] = (), max_sources: int = 2, max_lines: int = 80, max_chars: int = 8000, dependency: dict[str, Any] | None = None, root: Path = ROOT, manifest_path: Path = DEFAULT_MANIFEST, intents_path: Path | None = DEFAULT_INTENTS, target_kind: str | None = None, target: str | None = None, target_owner: str | None = None, target_start_line: int | None = None, target_end_line: int | None = None) -> dict[str, Any]:
     if project_id != LOCAL_PROJECT:
         raise GateError("only local project_id nmbot is supported")
     if evidence_type not in EVIDENCE_TYPES:
@@ -667,7 +682,7 @@ def run_gate(question: str, *, project_id: str, evidence_type: str, definition_o
     if target_kind is not None or target is not None or target_owner is not None:
         if target_kind is None or target is None:
             raise GateError("strict mode requires both --target-kind and --target")
-        return _strict_target_report(target_kind=target_kind, target=target, target_owner=target_owner, project_id=project_id, evidence_type=evidence_type, definition_of_done=definition_of_done, do_not=do_not, root=root, manifest_path=manifest_path, max_sources=max_sources, max_lines=max_lines, max_chars=max_chars)
+        return _strict_target_report(target_kind=target_kind, target=target, target_owner=target_owner, target_start_line=target_start_line, target_end_line=target_end_line, project_id=project_id, evidence_type=evidence_type, definition_of_done=definition_of_done, do_not=do_not, root=root, manifest_path=manifest_path, max_sources=max_sources, max_lines=max_lines, max_chars=max_chars)
 
     foreign = _foreign_mentions(question)
     if foreign:
@@ -695,6 +710,20 @@ def run_gate(question: str, *, project_id: str, evidence_type: str, definition_o
 
     nav_route = nav.get("route")
     nav_results = list(nav.get("results") or [])
+
+    if nav.get("selection_required") is not False:
+        return _apply_intent_card(
+            _base_report(
+                project_id,
+                "selection_required",
+                "no_candidate_answers",
+                abstain=True,
+                definition_of_done=definition_of_done,
+                candidates=_candidate_list(nav_results, max_sources=5, do_not_open=do_not),
+                denial="navigation_selection_required — choose candidate_id explicitly, then call strict target mode",
+            ),
+            intent_card,
+        )
 
     if evidence_type == "ambiguous" and nav_route == "stage":
         context, budget = _select_context(_stage_context_items(nav_results, root=root), root=root, max_sources=max_sources, max_lines=max_lines, max_chars=max_chars, do_not_open=do_not)
@@ -801,6 +830,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-kind", choices=sorted(STRICT_TARGET_KINDS), help="strict explicit-target mode; must match --evidence-type")
     parser.add_argument("--target", help="strict exact target: stage_id/path_id, Python identifier, or docs anchor/query")
     parser.add_argument("--target-owner", help="strict owner path for symbol disambiguation or required docs owner")
+    parser.add_argument("--target-start-line", type=int, help="strict selected symbol start line from navigation target_spec")
+    parser.add_argument("--target-end-line", type=int, help="strict selected symbol end line from navigation target_spec")
     parser.add_argument("--approved-dependency-json")
     parser.add_argument("--dependency-scope-id")
     parser.add_argument("--dependency-owner-project")
@@ -832,6 +863,8 @@ def main(argv: list[str] | None = None) -> int:
             target_kind=args.target_kind,
             target=args.target,
             target_owner=args.target_owner,
+            target_start_line=args.target_start_line,
+            target_end_line=args.target_end_line,
         )
     except GateError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

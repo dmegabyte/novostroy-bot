@@ -1,3 +1,5 @@
+"""Legacy V2 IntentPlanV3 regression tests; excluded from local V3 acceptance."""
+
 from __future__ import annotations
 
 import asyncio

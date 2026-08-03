@@ -5,7 +5,7 @@ from dataclasses import replace
 import re
 from typing import Mapping
 
-from .contracts import OptionCard, SemanticPlan, Stage, TurnAction
+from .contracts import ExecutableTurn, OptionCard, SemanticPlan, Stage, TurnAction
 from .fact_context import DYNAMIC_FACTS, split_requested_facts
 from .state import ConversationState
 
@@ -196,13 +196,43 @@ def reply_contract_for_pending(pending: str | None) -> ReplyContractSpec | None:
     return REPLY_CONTRACTS.get(str(pending or ""))
 
 
+_STABLE_PENDING_BYPASS_OPERATIONS = frozenset({
+    "search", "new_search", "refine_search", "expand_more", "lookup_object",
+    "current_options", "answer_current_options", "compare_current", "answer_open_question",
+    "select_option", "selected_object",
+})
+_STABLE_PENDING_BYPASS_GOALS = frozenset({
+    "new_search", "refine_search", "expand_search", "lookup_object",
+    "answer_current", "compare_current", "recommend_current", "answer_open_question",
+    "answer_selected",
+})
+
+
+def pending_reply_owns_turn(plan: SemanticPlan | ExecutableTurn, pending: str | None) -> bool:
+    if not pending:
+        return False
+    if plan.followup_outcome is not None:
+        return True
+    operation = str(getattr(plan, "operation", None) or "").strip()
+    if operation:
+        return operation not in _STABLE_PENDING_BYPASS_OPERATIONS
+    goal = getattr(plan, "goal", None)
+    goal_value = str(getattr(goal, "value", goal) or "").strip()
+    return goal_value not in _STABLE_PENDING_BYPASS_GOALS
+
+
 def transition_for_reply(pending: str | None, outcome: str | None) -> OutcomeTransition | None:
     contract = reply_contract_for_pending(pending)
     if not contract:
         return None
     selected = str(outcome or "").strip()
     if not selected:
-        return None
+        # An unclassified reply to a consent prompt is ambiguous, not a new
+        # freeform request. Keep the user in the documented consent loop
+        # without treating it as an acceptance.
+        if contract.id not in {FINANCING_CONSENT_FOLLOWUP, SELECTED_LIVE_FACT_CONSENT_FOLLOWUP}:
+            return None
+        selected = "unexpected"
     if selected not in contract.allowed_outcomes:
         if "unexpected" not in contract.allowed_outcomes:
             return None
@@ -219,7 +249,7 @@ def resolve_recipe(*, stage: Stage, action: TurnAction | None = None, plan: Sema
 
     if stage == Stage.OFF_TOPIC:
         return _resolved(RECIPES["off_topic"], ())
-    if state.pending_followup and transition_for_reply(state.pending_followup, plan.followup_outcome):
+    if pending_reply_owns_turn(plan, state.pending_followup) and transition_for_reply(state.pending_followup, plan.followup_outcome):
         trans = transition_for_reply(state.pending_followup, plan.followup_outcome)
         return _resolved(RECIPES.get(trans.response_recipe_id, RECIPES["default_clarification"]), cards)
     if stage == Stage.OPERATOR_HANDOFF:

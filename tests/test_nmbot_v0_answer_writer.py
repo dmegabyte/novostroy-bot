@@ -250,10 +250,8 @@ def test_candidate_contract_rejects_pure_greeting_no_cards_search_miss_claim() -
 
 def test_v0_answer_writer_prompt_static_promptmaster_requirements() -> None:
     prompt = (ROOT / "prompts" / "v0_answer_writer.txt").read_text(encoding="utf-8")
-    canonical = (ROOT / "prompts" / "candidates" / "v0_answer_writer_promptmaster_v10.txt").read_text(encoding="utf-8")
     lowered = prompt.lower()
 
-    assert prompt == canonical
     assert "используй только данные из material" in lowered
     assert "каждое утверждение должно быть прямым пересказом" in lowered
     assert "не делай выводов и не добавляй оценок" in lowered

@@ -33,7 +33,7 @@ def write_manifest(tmp_path: Path, payload: dict) -> Path:
 def minimal_manifest(command: list[str] | None = None) -> dict:
     command = command or ["{python}", "-m", "py_compile", "scripts/nmbot_check.py"]
     scopes = {}
-    for scope in ("docs", "contracts", "v0", "v2", "runtime", "audit", "quality"):
+    for scope in ("docs", "contracts", "v0", "v1", "v2", "v3", "runtime", "audit", "quality", "artifact", "isolation"):
         scopes[scope] = {"commands": [{"name": f"{scope}_ok", "argv": command}]}
     return {"version": 1, "scopes": scopes}
 
@@ -87,7 +87,7 @@ def write_docs_fixture(tmp_path: Path, *, readme: str = ROUTES, owner_target: st
 def test_manifest_loads_supported_scopes_and_dry_run_is_offline() -> None:
     mod = load_check_module()
     manifest = mod.load_and_validate_manifest(MANIFEST)
-    assert set(manifest) == {"docs", "contracts", "v0", "v2", "runtime", "audit", "quality"}
+    assert set(manifest) == {"docs", "contracts", "v0", "v1", "v2", "v3", "runtime", "audit", "quality", "artifact", "isolation"}
 
     proc = run_check("docs", "--dry-run")
     assert proc.returncode == 0
@@ -101,12 +101,58 @@ def test_unknown_scope_is_rejected() -> None:
     assert "unknown scope" in proc.stdout
 
 
+def test_release_alias_expands_all_owner_scopes_without_new_runner() -> None:
+    proc = run_check("release", "--dry-run")
+    assert proc.returncode == 0
+    for scope in ("docs", "contracts", "v0", "v1", "v2", "v3", "runtime", "audit", "quality", "artifact", "isolation"):
+        assert f"SKIPPED {scope}:" in proc.stdout
+
+
+def test_runtime_adapter_test_has_one_runtime_owner() -> None:
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    owners = []
+    for scope, spec in manifest["scopes"].items():
+        for command in spec["commands"]:
+            if "tests/test_nmbot_runtime_adapter.py" in command["argv"]:
+                owners.append(scope)
+    assert owners == ["runtime"]
+
+
+def test_v0_and_v2_focused_tests_have_one_version_owner_each() -> None:
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    for test_file, expected_owner in (
+        ("tests/test_nmbot_v0_runtime.py", "v0"),
+        ("tests/test_nmbot_v0_answer_writer.py", "v0"),
+        ("tests/test_nmbot_v2_runtime.py", "v2"),
+        ("tests/test_nmbot_v2_replay.py", "v2"),
+    ):
+        owners = [
+            scope
+            for scope, spec in manifest["scopes"].items()
+            for command in spec["commands"]
+            if test_file in command["argv"]
+        ]
+        assert owners == [expected_owner]
+
+
 def test_successful_tiny_manifest_runs_allowlisted_command(tmp_path: Path) -> None:
     manifest = write_manifest(tmp_path, minimal_manifest())
     proc = run_check("docs", "--manifest", str(manifest), "--json")
     assert proc.returncode == 0
-    assert "PASSED docs:docs_ok" in proc.stdout
-    assert '"status": "passed"' in proc.stdout
+    payload = json.loads(proc.stdout)
+    assert payload["status"] == "passed"
+    assert payload["results"][0]["status"] == "passed"
+    assert "PASSED docs:docs_ok" not in proc.stdout
+
+
+def test_json_dry_run_emits_one_parseable_document_without_progress_noise() -> None:
+    proc = run_check("docs", "--dry-run", "--json")
+    assert proc.returncode == 0
+    payload = json.loads(proc.stdout)
+    assert payload["status"] == "passed"
+    assert payload["results"]
+    assert all(item["status"] == "skipped" for item in payload["results"])
+    assert "SKIPPED " not in proc.stdout
 
 
 def test_malformed_manifest_is_rejected(tmp_path: Path) -> None:

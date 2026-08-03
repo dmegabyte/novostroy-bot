@@ -9,8 +9,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nmbot_v2.contracts import ComposedOption, ComposedResponse, DialogFocus, ExecutionResult, OptionCard, PendingAction, ResponseBrief, ResponsePlan, SearchResult, SelectedEntity, SemanticPlan, Stage, StateDelta, to_jsonable
 from nmbot_v2.constraints import normalize_constraints_delta
-from nmbot_v2.response_composer import assemble_composed_response, build_response_brief, compose_response_one_shot_async, compose_response_sync, load_prompt, parse_composer_json, request_payload, validate_composed_response
+from nmbot_v2.manager_rewriter import manager_rewriter_request_payload
+from nmbot_v2.response_composer import assemble_composed_response, build_response_brief, compose_response_one_shot_async, compose_response_sync, formatter_request_payload, load_prompt, parse_composer_json, request_payload, v3_answer_writer_request_payload, validate_composed_response, writer_request_payload
 from nmbot_v2.response import build_response_plan, render_response
+from nmbot_v2.search_contract import V2SearchRequest, build_request_data
 from nmbot_v2.state import ConversationState, apply_state_delta
 
 
@@ -726,7 +728,7 @@ def test_composer_validator_rejects_question_marks_outside_final_question():
 
 
 def test_response_composer_payload_has_conversation_stage_and_strict_prompt_contract(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "harmless-dummy-value")
     brief = build_response_brief(
         stage=Stage.FIRST_LIST,
         plan=SemanticPlan(operation="search"),
@@ -739,8 +741,7 @@ def test_response_composer_payload_has_conversation_stage_and_strict_prompt_cont
 
     assert payload["_payload_stage"] == "conversation_answer"
     assert payload["model"] == "chat-model"
-    assert payload["external_api_key"] == "test-openrouter-key"
-    assert "test-openrouter-key" not in payload["query"]
+    assert "external_api_key" not in payload
     assert '"canonical_missing_summary": []' in payload["query"]
     assert "V2_RESPONSE_BRIEF=" in payload["query"]
     assert "strict" not in payload["query"].casefold()
@@ -749,6 +750,25 @@ def test_response_composer_payload_has_conversation_stage_and_strict_prompt_cont
     assert "response_format" not in payload["parameters"]
     assert "provider" not in payload["parameters"]
     assert payload["parameters"] == {"temperature": 0.25, "max_tokens": 1800}
+
+
+def test_v2_owner_request_builders_never_propagate_ambient_api_key(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "harmless-dummy-value")
+    brief = ResponseBrief(answer_goal="present_search_results")
+    search_request = V2SearchRequest(search_goal={"query_summary": "найди варианты"})
+
+    payloads = (
+        build_request_data(search_request, prompt="system"),
+        request_payload(brief, prompt="system"),
+        writer_request_payload(brief, prompt="system"),
+        v3_answer_writer_request_payload(brief, prompt="system"),
+        formatter_request_payload("черновик", brief, prompt="system"),
+        manager_rewriter_request_payload(
+            transcript=(), current_question="вопрос", prepared_answer="ответ", brief=brief, prompt="system"
+        ),
+    )
+
+    assert all("external_api_key" not in payload for payload in payloads)
 
 
 def test_composer_parse_accepts_already_parsed_structured_response():

@@ -1,0 +1,13 @@
+{
+  "archived_on": "2026-08-01",
+  "reason": "No runtime, test, diagnostic, or CI consumers found during source audit.",
+  "entries": {
+    "v3": "v0_answer_writer_promptmaster_v3.txt",
+    "v4": "v0_answer_writer_promptmaster_v4.txt",
+    "v5": "v0_answer_writer_promptmaster_v5.txt",
+    "v7": "v0_answer_writer_promptmaster_v7.txt",
+    "v8": "v0_answer_writer_promptmaster_v8.txt",
+    "v9": "v0_answer_writer_promptmaster_v9.txt"
+  },
+  "former_directory": "prompts/candidates"
+}

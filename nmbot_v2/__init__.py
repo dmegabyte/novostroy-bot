@@ -4,6 +4,8 @@ This package intentionally has no imports from the legacy router/presenter runti
 Adapters can be added around the ports, but the V2 turn semantics stay here.
 """
 
+RUNTIME_VERSION = "V2"
+
 from .contracts import (
     ExecutionResult,
     ExecutableTurn,
@@ -27,6 +29,7 @@ __all__ = [
     "ExecutableTurn",
     "OptionCard",
     "ResponsePlan",
+    "RUNTIME_VERSION",
     "SafeTurnContext",
     "SearchResult",
     "SemanticPlan",

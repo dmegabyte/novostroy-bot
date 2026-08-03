@@ -15,6 +15,19 @@ These files were moved from the project root with their original filenames. They
 are historical snapshots: old statuses, commands and conclusions must be read as
 dated evidence, not as current production state.
 
+## 2026-08-01 version-isolation working history
+
+- `docs/archive/working-history/2026-08-01/nmbot-version-isolation/` — historical
+  isolation plan, findings, and progress records; not current.
+- `docs/archive/working-history/2026-08-01/nmbot-version-global-audit/` —
+  historical global-audit plan, findings, and progress records; not current.
+- `docs/archive/working-history/2026-08-01/nmbot-version-global-remediation/` —
+  historical remediation plan, findings, and progress records; not current.
+
+These records preserve dated local and VPS evidence only. They are not live
+proof: verify current behavior against current owners and fresh, explicitly
+authorized runtime/VPS evidence.
+
 ## Release-candidate archive
 
 - Directory: `docs/archive/release-candidates/2026-07-24/manager_rewriter/`.

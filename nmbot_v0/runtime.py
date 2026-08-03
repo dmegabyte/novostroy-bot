@@ -5,22 +5,20 @@ import inspect
 import re
 from typing import Any, Awaitable, Callable, Mapping
 
-from nmbot_v2.contracts import OptionCard
-from nmbot_v2.search_contract import (
-    V2SearchRequest,
+from .contracts import JsonDict, OptionCard, V0Answer, V0State, V0TurnResult
+from .search_contract import (
+    V0SearchRequest,
     normalize_search_output,
     parse_strict_json,
     validate_search_output,
 )
 
 from .card_normalizer import normalize_search_result
-from .contracts import JsonDict, V0Answer, V0State, V0TurnResult
 from .field_contract import V0_PRESENTATION_TRACE_FIELDS, v0_presentation_search_fields
 from .presentation import build_shortlist_comparison_context, render_grounded_card_block, render_selected_lot_lines, selected_object_grounded_acknowledgement, shortlist_level_sparse_note
 
 
 ScenarioSearchPort = Callable[[JsonDict], str | Mapping[str, Any] | Awaitable[str | Mapping[str, Any]]]
-AnswerPort = Callable[[JsonDict], str | Mapping[str, Any] | Awaitable[str | Mapping[str, Any]]]
 
 
 ALLOWED_DECISIONS = {"search", "current_options", "selected_object", "open_question", "operator", "off_topic"}
@@ -43,8 +41,6 @@ ALLOWED_DECISION_KEYS = {
 ALLOWED_FOLLOWUP_OUTCOMES = {"accept", "decline", "new_question", "unclear"}
 ALLOWED_CONFIRMED_ACTIONS = {"check_selected_availability", "check_current_options_financing"}
 ALLOWED_COMPARISON_METRICS = {"price_min"}
-ANSWER_KEYS = {"answer_kind", "scope", "intro", "options", "recommendation", "missing_note", "final_question"}
-ANSWER_OPTION_KEYS = {"name"}
 OPERATOR_PHONE_QUESTION = "Оставите номер телефона, чтобы оператор проверил это и связался с вами?"
 V0_CONTACT_PHONE_DIGITS_REQUEST = "Пришлите, пожалуйста, номер телефона."
 SCENARIO_FORMAT_RECOVERY_MARKER: JsonDict = {"strict_json_only": True, "reason": "previous_output_invalid_strict_json"}
@@ -52,22 +48,22 @@ MALFORMED_SCENARIO_RETRY_MESSAGE = "Не получилось запустить
 SELECTED_OBJECT_QUESTION = "Что ещё проверить по этому ЖК?"
 SELECTED_OBJECT_PRESENTATION_QUESTION = "Проверить актуальные квартиры в этом ЖК?"
 FINANCING_CHECK_ALL_QUESTION = "Проверить условия оплаты по всем этим вариантам?"
-GREETING_RE = re.compile(r"^\s*(здравствуйте|добрый\s+день|доброе\s+утро|добрый\s+вечер|привет)\b", re.IGNORECASE)
 HARD_PARAM_KEYS = {"rooms", "max_price", "min_price", "ready", "finishing", "area_min_m2", "area_max_m2", "location", "district"}
 SEMANTIC_RELAX_PARAM_KEYS = {"down_payment", "financing", "payment_type", "mortgage", "mortgage_terms", "installment"}
 MAX_CONTEXT_TEXT_CHARS = 2000
 
 
 class V0TurnProcessor:
-    """Two-prompt V0 processor with injectable model/MCP gateway ports.
+    """V0 scenario/search processor with deterministic canonical rendering.
 
-    The first port owns scenario understanding plus MCP-grounded search. The
-    second port receives only the validated brief and writes client prose.
+    The scenario port is the only executable port.  Canonical rendering owns
+    client prose, card identity, facts, and state transitions.  ``answer`` is
+    accepted only as an ignored compatibility keyword for an out-of-scope
+    legacy adapter; it is not a V0 injection contract.
     """
 
-    def __init__(self, *, scenario_search: ScenarioSearchPort, answer: AnswerPort) -> None:
+    def __init__(self, *, scenario_search: ScenarioSearchPort, answer: object | None = None) -> None:
         self._scenario_search = scenario_search
-        self._answer = answer
 
     def process(self, user_text: str, state: V0State | None = None, *, conversation_ref: str = "local") -> V0TurnResult:
         input_state = state or V0State()
@@ -100,7 +96,7 @@ class V0TurnProcessor:
             raw_search = scenario_payload.get("search")
             search_result, validation, errors = _validated_search(raw_search, viewpoint=viewpoint, user_text=str(user_text or ""), decision=decision)
             search_validation = validation
-            if errors:
+            if errors or not validation.get("ok", False):
                 return _fallback(current, "invalid_search_output", errors, diagnostics={"search_validation": validation})
             validated_cards = _search_cards_without_shown_options(search_result, decision, current) if search_result is not None else ()
             normalized_params = _state_search_params(search_result.params, decision.get("params", {})) if search_result is not None else {}
@@ -139,7 +135,7 @@ class V0TurnProcessor:
 
         answer, answer_errors = _build_canonical_answer(allowed_cards=validated_cards, decision=decision, state=current)
         if answer_errors:
-            return _fallback(input_state, "invalid_answer_output", answer_errors)
+            return _fallback(input_state, "canonical_answer_failure", answer_errors)
 
         final_message = answer.text()
         next_state = _next_state(current, decision, cards=validated_cards, normalized_params=normalized_params, action=action, answer=answer, published_message=final_message)
@@ -176,7 +172,7 @@ class V0TurnProcessor:
             raw_search = scenario_payload.get("search")
             search_result, validation, errors = _validated_search(raw_search, viewpoint=viewpoint, user_text=str(user_text or ""), decision=decision)
             search_validation = validation
-            if errors:
+            if errors or not validation.get("ok", False):
                 return _fallback(current, "invalid_search_output", errors, diagnostics={"search_validation": validation})
             validated_cards = _search_cards_without_shown_options(search_result, decision, current) if search_result is not None else ()
             normalized_params = _state_search_params(search_result.params, decision.get("params", {})) if search_result is not None else {}
@@ -215,7 +211,7 @@ class V0TurnProcessor:
 
         answer, answer_errors = _build_canonical_answer(allowed_cards=validated_cards, decision=decision, state=current)
         if answer_errors:
-            return _fallback(input_state, "invalid_answer_output", answer_errors)
+            return _fallback(input_state, "canonical_answer_failure", answer_errors)
 
         final_message = answer.text()
         next_state = _next_state(current, decision, cards=validated_cards, normalized_params=normalized_params, action=action, answer=answer, published_message=final_message)
@@ -596,8 +592,8 @@ def _validated_search(raw_search: Any, *, viewpoint: str, user_text: str, decisi
         return None, {}, ["search_must_be_object"]
     params = _canonical_search_params((decision or {}).get("params", {}))
     hard = {key: value for key, value in params.items() if key in HARD_PARAM_KEYS and value not in (None, "", [], {})}
-    effective = {key: value for key, value in hard.items() if key not in {"max_price", "min_price"}}
-    request = V2SearchRequest(
+    effective = dict(hard)
+    request = V0SearchRequest(
         search_goal={"entity_type": "new_building_flat", "query_summary": user_text[:300], "explicit_terms": []},
         requested_hard=dict(hard),
         effective_hard=dict(effective),
@@ -655,7 +651,7 @@ def _maybe_enrich_selected_card(
     raw_name = str(raw_items[0].get("name") or raw_items[0].get("alias") or "").strip()
     if raw_name and _normalize_name(raw_name) != _normalize_name(selected.name):
         return cards, state, {"skipped": True, "selected_enrichment_rejected": "name_mismatch"}
-    request = V2SearchRequest(
+    request = V0SearchRequest(
         search_goal={"entity_type": "new_building_flat", "query_summary": user_text[:300], "explicit_terms": [selected.name]},
         requested_hard={"name": selected.name},
         effective_hard={"name": selected.name},
@@ -667,6 +663,8 @@ def _maybe_enrich_selected_card(
     )
     normalized = normalize_search_output(dict(raw_search), request)
     validation = validate_search_output(normalized, request)
+    if not validation.get("ok", False):
+        return cards, state, {**validation, "safe_code": "search_validation_error", "selected_enrichment_rejected": "search_validation_error"}
     result = normalize_search_result(normalized)
     enriched_cards = result.shortlist(1)
     if len(enriched_cards) != 1:
@@ -691,7 +689,7 @@ def _bootstrap_selected_card(state: V0State, decision: JsonDict, raw_search: Map
     raw_name = str(fact_items[0].get("name") or fact_items[0].get("alias") or "").strip()
     if not selected_name or _normalize_name(raw_name) != _normalize_name(selected_name):
         return (), state, {"skipped": True, "selected_bootstrap_rejected": "name_mismatch"}
-    request = V2SearchRequest(
+    request = V0SearchRequest(
         search_goal={"entity_type": "new_building_flat", "query_summary": user_text[:300], "explicit_terms": [selected_name], "entity_reference": selected_name, "lookup_mode": "exact_named_object"},
         requested_hard={},
         effective_hard={},
@@ -703,6 +701,8 @@ def _bootstrap_selected_card(state: V0State, decision: JsonDict, raw_search: Map
     )
     normalized = normalize_search_output(_canonicalize_raw_search(raw_search), request)
     validation = validate_search_output(normalized, request)
+    if not validation.get("ok", False):
+        return (), state, {**validation, "safe_code": "search_validation_error", "selected_bootstrap_rejected": "search_validation_error"}
     result = normalize_search_result(normalized)
     cards = result.shortlist(1)
     if len(cards) != 1 or cards[0].is_near or _normalize_name(cards[0].name) != _normalize_name(selected_name):
@@ -771,86 +771,6 @@ def _cards_for_current_options_decision(cards: tuple[OptionCard, ...], decision:
     if not priced:
         return ()
     return (min(priced, key=lambda card: card.price_min),)
-
-
-def _build_answer_brief(*, user_text: str, state: V0State, decision: JsonDict, cards: tuple[OptionCard, ...], search_validation: JsonDict) -> JsonDict:
-    response_policy = str(decision.get("response_policy") or "").strip()
-    if decision.get("action") == "operator" or response_policy == "operator_phone_request":
-        response_policy = "operator_phone_request"
-    expected = _expected_answer_contract(decision, response_policy=response_policy, state=state)
-    return {
-        "contract": "nmbot_v0_answer_brief",
-        "user_text": user_text[:2000],
-        "dialogue_memory": {
-            "is_continuing": bool(state.has_greeted or state.visible_options or state.selected_option_name),
-            "has_greeted": state.has_greeted,
-            "last_answer_kind": state.last_answer_kind,
-            "last_assistant_question": state.last_assistant_question,
-            "answered_facts": list(state.answered_facts),
-        },
-        "decision": {
-            "action": decision.get("action"),
-            "viewpoint": decision.get("viewpoint") or state.active_topic or "life",
-            "client_question": decision.get("client_question") or user_text[:500],
-            "requested_facts": list(_as_tuple_str(decision.get("requested_facts"))),
-            "response_policy": response_policy or "answer_directly",
-            "operator_handoff_template": OPERATOR_PHONE_QUESTION,
-            "expected_answer_kind": expected["answer_kind"],
-            "expected_scope": expected["scope"],
-            "cta_template": expected["final_question"],
-        },
-        "allowed_cards": [_card_to_dict(card) for card in cards[:3]],
-        "search_validation": search_validation,
-        "hard_rule": "Use only allowed_cards and this brief. Do not search or call MCP. Echo expected_answer_kind/scope exactly. options must be card references only: each option is exactly {\"name\": canonical allowed card name}. Do not include facts, prices, locations, benefit_fact or description. Do not greet when dialogue_memory.is_continuing=true.",
-    }
-
-
-def _validate_answer(raw: Mapping[str, Any], *, allowed_cards: tuple[OptionCard, ...], decision: JsonDict, state: V0State) -> tuple[V0Answer | None, list[str]]:
-    keys = set(raw)
-    errors: list[str] = []
-    if keys != ANSWER_KEYS:
-        errors.append("answer_keys_mismatch")
-    expected = _expected_answer_contract(decision, state=state)
-    answer_kind = str(raw.get("answer_kind") or "").strip()
-    scope = str(raw.get("scope") or "").strip()
-    if answer_kind != expected["answer_kind"]:
-        errors.append("answer_kind_mismatch")
-    if scope != expected["scope"]:
-        errors.append("answer_scope_mismatch")
-    options_raw = raw.get("options")
-    if not isinstance(options_raw, list):
-        errors.append("answer_options_must_be_list")
-        options_raw = []
-    if len(options_raw) > 3:
-        errors.append("answer_too_many_options")
-    allowed_names = {card.name for card in allowed_cards[:3]}
-    options: list[JsonDict] = []
-    for idx, item in enumerate(options_raw):
-        if not isinstance(item, Mapping):
-            errors.append(f"answer_option_{idx}_must_be_object")
-            continue
-        unknown_option_keys = set(item) - ANSWER_OPTION_KEYS
-        if unknown_option_keys:
-            errors.append(f"answer_option_{idx}_unknown_keys:" + ",".join(sorted(unknown_option_keys)))
-        name = str(item.get("name") or "").strip()
-        if name not in allowed_names:
-            errors.append(f"answer_option_{idx}_unknown_card")
-        options.append({"name": name})
-    expected_names = _expected_option_names(expected, allowed_cards)
-    actual_names = [str(item.get("name") or "").strip() for item in options]
-    if actual_names != expected_names:
-        errors.append("answer_option_names_mismatch")
-    # The answer model keeps this key for schema compatibility, but runtime owns
-    # and renders the canonical CTA below. Model wording must never reject an
-    # otherwise valid grounded answer or reach the customer.
-    if state.has_greeted and GREETING_RE.search(str(raw.get("intro") or "")):
-        errors.append("continuing_answer_must_not_greet")
-    for key in ("intro", "recommendation", "missing_note"):
-        if raw.get(key) is not None and not isinstance(raw.get(key), str):
-            errors.append(f"answer_{key}_must_be_string")
-    if errors:
-        return None, errors
-    return _build_canonical_answer(allowed_cards=allowed_cards, decision=decision, state=state, expected=expected, answer_kind=answer_kind, scope=scope)
 
 
 def _build_canonical_answer(*, allowed_cards: tuple[OptionCard, ...], decision: JsonDict, state: V0State, expected: JsonDict | None = None, answer_kind: str | None = None, scope: str | None = None) -> tuple[V0Answer | None, list[str]]:
@@ -959,13 +879,6 @@ def _fallback(state: V0State, code: str, errors: list[str], *, diagnostics: Json
             intro=MALFORMED_SCENARIO_RETRY_MESSAGE,
         )
         return V0TurnResult(ok=False, state=state, answer=answer, message=answer.text(), error_code=code, diagnostics={"errors": errors, **(diagnostics or {})})
-    if code in {"malformed_answer_output", "invalid_answer_output"}:
-        answer = V0Answer(
-            answer_kind="runtime_retry",
-            scope="runtime_retry",
-            intro="Не получилось подготовить ответ. Попробуйте, пожалуйста, ещё раз.",
-        )
-        return V0TurnResult(ok=False, state=state, answer=answer, message=answer.text(), error_code=code, diagnostics={"errors": errors, **(diagnostics or {})})
     answer = V0Answer(
         answer_kind="operator",
         scope="operator_phone",
@@ -1032,15 +945,6 @@ def _selected_object_cta(viewpoint: str) -> str:
     if topic == "family":
         return "Проверить подходящие семейные планировки в этом ЖК?"
     return SELECTED_OBJECT_PRESENTATION_QUESTION
-
-
-def _expected_option_names(expected: JsonDict, cards: tuple[OptionCard, ...]) -> list[str]:
-    scope = str(expected.get("scope") or "")
-    if scope == "shortlist":
-        return [card.name for card in cards[:3]]
-    if scope == "one_card":
-        return [cards[0].name] if cards else []
-    return []
 
 
 def _deterministic_answer_parts(expected: JsonDict, *, cards: tuple[OptionCard, ...], decision: JsonDict, state: V0State) -> JsonDict:

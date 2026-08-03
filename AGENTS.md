@@ -56,6 +56,26 @@ Before project-specific conclusions, check project memory/docs. After completed
 work: store important project facts in NotebookLM, personal summary in MemPalace
 diary, and if a new fact is absent from docs ask: «Обновить доку?».
 
+## Fast development route
+
+- Start with one route: `nmbot.py navigate`; do not run NotebookLM, FTS, grep
+  and broad scouts for the same narrow question.
+- Exact stage/symbol → strict `context-gate`. Vague query → choose one of at
+  most five navigation candidates first; never auto-gate the top fallback.
+  `navigate` marks this as `selection_required=true`; choose `c1..c5`
+  explicitly (CLI: `--select cN`) before copying its full exact target —
+  including symbol start/end lines when present — into the gate. Only
+  `selection_required=false` may enter the gate automatically.
+- Initial source budget: at most two ranges, 80 lines and 8000 characters; open
+  one linked consumer/test only when the owner range proves the dependency.
+- Test tiers: focused `related_test` during component work; one explicit
+  `nmbot_check.py v0|v1|v2|v3|runtime` owner gate after the package; aggregate
+  `nmbot_check.py release` only before release/integration acceptance.
+- Keep verbose logs on disk and return only command, first failure and counts.
+  After RECON, implementation and review, compress closed evidence.
+- Parallel subagents require disjoint file scopes and compact source-backed
+  results. Global audits are explicit exceptions, never the default route.
+
 ## UX North Star
 
 For answer, prompt, routing, state, MCP/search parsing, visible-options or

@@ -65,6 +65,40 @@ def test_run_checks_invokes_only_local_nmbot_check_direct_argv(monkeypatch) -> N
     assert report["overall"]["status"] == "incomplete"
 
 
+def test_release_cli_plans_owner_scopes_and_delegates_release_directly(monkeypatch, capsys) -> None:
+    mod = load_preflight_module()
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, stdout='{"status":"passed"}\n', stderr="")
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    assert mod.main(["--scope", "release", "--run-checks"]) == 0
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["manifest"]["selected_scopes"] == ["release"]
+    assert report["manifest"]["planned_owner_scopes"] == list(mod.RELEASE_OWNER_SCOPES)
+    assert set(report["manifest"]["plan"]) == set(mod.RELEASE_OWNER_SCOPES)
+    assert calls == [
+        ([sys.executable, "scripts/nmbot_check.py", "release", "--json"], {"cwd": ROOT, "text": True, "capture_output": True, "check": False})
+    ]
+    assert not any(token in calls[0][0] for token in ("ssh", "scp", "curl", "deploy", "scripts/nmbot_release.py"))
+
+
+def test_release_alias_fails_closed_when_an_expanded_manifest_scope_is_missing(tmp_path) -> None:
+    mod = load_preflight_module()
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({"scopes": {scope: {"commands": []} for scope in mod.RELEASE_OWNER_SCOPES if scope != "isolation"}}), encoding="utf-8")
+
+    try:
+        mod.load_manifest_plan(manifest, ["release"])
+    except mod.PreflightError as exc:
+        assert str(exc) == "scope missing from manifest: isolation"
+    else:
+        raise AssertionError("release planning must fail when an expanded owner scope is absent")
+
+
 def test_non_strict_architecture_finding_is_not_reported_as_clean_pass(monkeypatch) -> None:
     mod = load_preflight_module()
 

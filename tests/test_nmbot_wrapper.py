@@ -629,6 +629,31 @@ def test_diagnose_rejects_bad_selectors_and_unknown_options_before_dispatch(monk
     assert mod.main(["diagnose", "--unknown"]) == 2
 
 
+def test_diagnose_evidence_chain_requires_trace_and_dispatches_without_trace_normalization(monkeypatch, capsys) -> None:
+    mod = load_wrapper_module()
+    calls = []
+
+    def fake_run(argv, cwd, check, capture_output, text):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps({"schema_version": "nmbot.evidence_chain.v1", "trace_ref": "trace-1", "cards": [{"raw_fields": {"price": 1}}]}), stderr="")
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    assert mod.main(["diagnose", "--evidence-chain"]) == 2
+    assert mod.main(["diagnose", "--trace", "trace-1", "--evidence-chain", "--date", "2026-07-20", "--logs-dir", "/tmp/logs", "--json"]) == 0
+    assert calls == [[sys.executable, "scripts/nmbot_gateway_task_diag.py", "--evidence-chain", "--trace-ref", "trace-1", "--json", "--date", "2026-07-20", "--logs-dir", "/tmp/logs"]]
+    assert json.loads(capsys.readouterr().out)["cards"][0]["raw_fields"] == {"price": 1}
+
+
+def test_diagnose_evidence_chain_rejects_incompatible_selector_before_dispatch(monkeypatch) -> None:
+    mod = load_wrapper_module()
+
+    def fail_run(*args, **kwargs):  # pragma: no cover - should not run
+        raise AssertionError("subprocess must not be called")
+
+    monkeypatch.setattr(mod.subprocess, "run", fail_run)
+    assert mod.main(["diagnose", "--trace", "trace-1", "--evidence-chain", "--latest"]) == 2
+
+
 def test_diagnose_implicit_latest_task_routes_without_selector(monkeypatch, capsys, tmp_path: Path) -> None:
     mod = load_wrapper_module()
     logs = tmp_path / "logs"
@@ -1445,7 +1470,7 @@ def test_namespace_aliases_delegate_direct_argv_and_reject_unknown(monkeypatch) 
     assert mod.main(["planner", "find", "--q", "abc"]) == 23
     assert mod.main(["runtime", "compare", "--json"]) == 23
     assert mod.main(["release", "identity", "read"]) == 23
-    assert mod.main(["release", "status", "--json"]) == 23
+    assert mod.main(["release", "status", "--host", "release@example.test", "--port", "2222"]) == 23
     assert mod.main(["architecture", "--strict"]) == 23
     assert calls == [
         {"argv": [sys.executable, "scripts/nmbot_jivo_trace_analyze.py", "log.jsonl", "--strict"], "cwd": mod.ROOT, "check": False},
@@ -1454,7 +1479,7 @@ def test_namespace_aliases_delegate_direct_argv_and_reject_unknown(monkeypatch) 
         {"argv": [sys.executable, "scripts/find_planner_trace.py", "--q", "abc"], "cwd": mod.ROOT, "check": False},
         {"argv": [sys.executable, "scripts/nmbot_v2_version_compare.py", "--json"], "cwd": mod.ROOT, "check": False},
         {"argv": [sys.executable, "scripts/nmbot_release_identity.py", "read"], "cwd": mod.ROOT, "check": False},
-        {"argv": [sys.executable, "scripts/nmbot_release.py", "status", "--json"], "cwd": mod.ROOT, "check": False},
+        {"argv": [sys.executable, "scripts/nmbot_atomic_release.py", "recon", "--host", "release@example.test", "--port", "2222"], "cwd": mod.ROOT, "check": False},
         {"argv": [sys.executable, "scripts/nmbot_architecture_preflight.py", "--strict"], "cwd": mod.ROOT, "check": False},
     ]
     calls.clear()

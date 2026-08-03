@@ -1,0 +1,30 @@
+{
+  "success": {
+    "marker": "nmbot.v2.semantic-planner.gateway.v1",
+    "schema_version": 1,
+    "user_goal": "Узнать метро выбранного ЖК",
+    "refers_to_existing_objects": true,
+    "requests_new_objects": false,
+    "selected_reference": "ЖК Лучи",
+    "named_object_reference": null,
+    "requested_comparison": [],
+    "scenario_needs": [],
+    "response_viewpoint": "unchanged",
+    "scenario_change": null,
+    "constraints_delta": {},
+    "requires_enrichment": false,
+    "resolved_subject": "metro",
+    "resolved_intent": null,
+    "requested_facts": ["metro"],
+    "facts_needed": [],
+    "focus_action": "keep",
+    "domain_relation": "in_domain",
+    "clarification": null,
+    "confidence": 0.9,
+    "reason": "selected option question"
+  },
+  "malformed": {
+    "marker": "wrong.marker",
+    "schema_version": 1
+  }
+}

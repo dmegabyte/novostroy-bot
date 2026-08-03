@@ -1,0 +1,25 @@
+{
+  "contract_version": "nmbot.runtime-wire.v1",
+  "router": {
+    "migration_scope": ["V0", "V1", "V2", "V3"],
+    "excluded_versions": {"V4": "legacy_route_pending_separate_migration"},
+    "selector_contract": {
+      "schema_version": "nmbot.runtime-selector.v1",
+      "mutation_method": "PUT",
+      "initialization": "explicit_put_only",
+      "default": "none_fail_closed",
+      "supported_versions": ["V0", "V1", "V2", "V3"],
+      "excluded_versions": ["V4"]
+    },
+    "selector_state_owner": "router",
+    "selector_state_env": "NMBOT_VERSION_ROUTER_SELECTOR_STATE",
+    "authentication_env": "NMBOT_VERSION_ROUTER_TOKEN",
+    "transport": "loopback_http_only"
+  },
+  "versions": {
+    "V0": {"endpoint_env": "NMBOT_V0_INTERNAL_ENDPOINT", "token_env": "NMBOT_V0_INTERNAL_TOKEN", "state_owner": "nmbot_v0", "log_owner": "nmbot_v0", "release_owner": "nmbot_v0"},
+    "V1": {"endpoint_env": "NMBOT_V1_INTERNAL_ENDPOINT", "token_env": "NMBOT_V1_INTERNAL_TOKEN", "state_owner": "nmbot_v1", "log_owner": "nmbot_v1", "release_owner": "nmbot_v1"},
+    "V2": {"endpoint_env": "NMBOT_V2_INTERNAL_ENDPOINT", "token_env": "NMBOT_V2_INTERNAL_TOKEN", "state_owner": "nmbot_v2", "log_owner": "nmbot_v2", "release_owner": "nmbot_v2"},
+    "V3": {"endpoint_env": "NMBOT_V3_INTERNAL_ENDPOINT", "token_env": "NMBOT_V3_INTERNAL_TOKEN", "state_owner": "nmbot_v3", "log_owner": "nmbot_v3", "release_owner": "nmbot_v3"}
+  }
+}

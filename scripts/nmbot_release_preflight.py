@@ -23,7 +23,21 @@ if not (ROOT / "scripts" / "nmbot_release_preflight.py").is_file():
 SCHEMA_VERSION = "nmbot.release_preflight.v1"
 SCRIPT_VERSION = "2026-07-22.step8-local-only"
 DEFAULT_MANIFEST = ROOT / "tests" / "nmbot_check_manifest.yaml"
-SUPPORTED_SCOPES = {"docs", "contracts", "v0", "v2", "runtime"}
+RELEASE_OWNER_SCOPES = (
+    "docs",
+    "contracts",
+    "v0",
+    "v1",
+    "v2",
+    "v3",
+    "runtime",
+    "audit",
+    "quality",
+    "artifact",
+    "isolation",
+)
+SCOPE_ALIASES = {"release": RELEASE_OWNER_SCOPES}
+SUPPORTED_SCOPES = {*RELEASE_OWNER_SCOPES, *SCOPE_ALIASES}
 DEFAULT_SCOPES = ("docs", "contracts")
 DEFAULT_TARGET_FILES = (
     "docs/NMBOT_PROJECT_SIMPLIFICATION_PLAN.md",
@@ -84,12 +98,13 @@ def load_manifest_plan(manifest_path: Path, scopes: list[str]) -> dict[str, Any]
     unknown = [scope for scope in scopes if scope not in SUPPORTED_SCOPES]
     if unknown:
         raise PreflightError(f"unknown scope: {', '.join(unknown)}")
-    missing = [scope for scope in scopes if scope not in manifest_scopes]
+    planned_scopes = [owner_scope for scope in scopes for owner_scope in SCOPE_ALIASES.get(scope, (scope,))]
+    missing = [scope for scope in planned_scopes if scope not in manifest_scopes]
     if missing:
         raise PreflightError(f"scope missing from manifest: {', '.join(missing)}")
 
     planned: dict[str, Any] = {}
-    for scope in scopes:
+    for scope in planned_scopes:
         spec = manifest_scopes[scope]
         commands = spec.get("commands") if isinstance(spec, dict) else None
         if not isinstance(commands, list):
@@ -112,6 +127,7 @@ def load_manifest_plan(manifest_path: Path, scopes: list[str]) -> dict[str, Any]
         "path": str(manifest_path.relative_to(ROOT) if manifest_path.is_relative_to(ROOT) else manifest_path),
         "status": "passed",
         "selected_scopes": scopes,
+        "planned_owner_scopes": planned_scopes,
         "plan": planned,
     }
 

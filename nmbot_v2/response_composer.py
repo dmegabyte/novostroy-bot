@@ -127,6 +127,8 @@ _ALLOWLISTED_ERROR_CODES = {
     "formatter_card_text_empty",
     "formatter_project_name_introduced",
     "formatter_content_mismatch",
+    "adapter_invalid_output",
+    "adapter_exception",
 }
 _PROVIDER_CODES = {"provider_invalid_argument", "corrupted_thought_signature", "choices_response_parse", "response_parse"}
 
@@ -495,9 +497,6 @@ def request_payload(brief: ResponseBrief, *, prompt: str | None = None, model: s
             "max_tokens": 1800,
         },
     }
-    api_key = os.getenv("OPENROUTER_API_KEY") or ""
-    if api_key:
-        request["external_api_key"] = api_key
     return request
 
 
@@ -511,9 +510,6 @@ def writer_request_payload(brief: ResponseBrief, *, prompt: str | None = None, m
         "system_prompt": prompt if prompt is not None else load_writer_prompt(),
         "parameters": {"temperature": 0.25, "max_tokens": 1800},
     }
-    api_key = os.getenv("OPENROUTER_API_KEY") or ""
-    if api_key:
-        request["external_api_key"] = api_key
     return request
 
 
@@ -531,9 +527,6 @@ def v3_answer_writer_request_payload(brief: ResponseBrief, *, prompt: str | None
         "system_prompt": prompt if prompt is not None else load_v3_answer_writer_prompt(),
         "parameters": {"temperature": 0.35, "max_tokens": 1800},
     }
-    api_key = os.getenv("OPENROUTER_API_KEY") or ""
-    if api_key:
-        request["external_api_key"] = api_key
     return request
 
 
@@ -567,9 +560,6 @@ def formatter_request_payload(
         "system_prompt": prompt if prompt is not None else load_formatter_prompt(),
         "parameters": {"temperature": 0, "max_tokens": 1400},
     }
-    api_key = os.getenv("OPENROUTER_API_KEY") or ""
-    if api_key:
-        request["external_api_key"] = api_key
     return request
 
 
@@ -1592,7 +1582,7 @@ def _provider_like_code(error: Any) -> str | None:
 def _error_category(code: str) -> str:
     if code in _PROVIDER_CODES:
         return "provider"
-    if code in {"empty_response", "composer_exception", "gateway_not_ok", "upstream_error"}:
+    if code in {"empty_response", "composer_exception", "gateway_not_ok", "upstream_error", "adapter_invalid_output", "adapter_exception"}:
         return "transport"
     if code == "schema_unsupported" or code == "json_root_must_be_object" or code.startswith("formatter_"):
         return "schema"

@@ -92,17 +92,20 @@ prepared answer. До отдельного production-подтверждения
   цены проекта формируются кодом. Writer использует краткий prompt,
   `temperature=0.2` и `max_tokens=5000`; V2 model-facing payload эти поля не
   получает.
-- **Релиз:** immutable bundle `v3-client-first-temp02-20260803-r1` развёрнут
-  атомарно из fresh VPS snapshot `vps-source-20260803-190119-09c839fb7165`.
-  После deploy активный и persisted selector — `V3`; V3 composer — `publish`,
-  V2/V3 manager rewriter — `off`.
+- **Релиз:** follow-up bundle `v3-client-first-comparison-safe-20260803-r2`
+  развёрнут атомарно из fresh VPS snapshot
+  `vps-source-20260803-195834-8b897028c1d6`. Относительно тестового `r1`
+  изменены только три guard-условия: глобальные выводы о кратчайшем пешем
+  маршруте, минимальной стартовой цене и price decision signal разрешены только
+  при сопоставимых данных по всем показанным карточкам. Активный и persisted
+  selector — `V3`; V3 composer — `publish`, V2/V3 manager rewriter — `off`.
 - **Live evidence:** один синтетический Jivo smoke с event
-  `c6919647-7e5b-45ca-9050-9470c0c70aee` завершился `BOT_MESSAGE`. Journal
-  `logs/dialogue_journal.jsonl:3418-3419` связал ответ с этим release и runtime
-  V3: writer опубликован, fallback отсутствует, validation codes и quality
-  blockers пусты; свежих error events после smoke — 0. Ответ один раз назвал
-  общий статус `сдан`, сравнил подтверждённые 7/12/20 минут до метро и
-  рекомендовал вариант с семью минутами до станции.
+  `a97e78c5-167f-4f0b-81cb-2d5c38997da7` завершился `BOT_MESSAGE`. Journal ref
+  `sha256:2e5b47c1239a2a2c` связал ответ с `r2` и runtime V3: writer опубликован,
+  fallback отсутствует, validation codes и quality blockers пусты,
+  `error_summary.status=ok`; свежих warning/error записей API и bridge нет.
+  Ответ один раз назвал общий статус `сдан`, сравнил подтверждённые 7/12/20
+  минут до метро и рекомендовал вариант с семью минутами до станции.
 - **Статус:** оставлено на пользовательском тестировании. Один smoke
   подтверждает маршрут и контракт, но не доказывает качество на всём наборе
   диалогов.

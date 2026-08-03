@@ -73,8 +73,8 @@ def test_v3_writer_payload_uses_v3_prompt_and_answer_brief():
     assert payload["_payload_stage"] == "conversation_answer_writer"
     assert payload["query"].startswith("V3_ANSWER_BRIEF=")
     assert "V2_RESPONSE_BRIEF" not in payload["query"]
-    assert "AnswerBrief" in payload["system_prompt"]
-    assert payload["parameters"]["temperature"] == 0.35
+    assert "V3_ANSWER_BRIEF" in payload["system_prompt"]
+    assert payload["parameters"] == {"temperature": 0.2, "max_tokens": 5000}
     brief_payload = json.loads(payload["query"].split("V3_ANSWER_BRIEF=", 1)[1].split("\n", 1)[0])["answer_brief"]
     assert brief_payload["hard_rules"]["exact_cta_required"] is False
 
@@ -82,10 +82,10 @@ def test_v3_writer_payload_uses_v3_prompt_and_answer_brief():
 def test_v3_writer_prompt_pins_literal_facts_and_grounded_practical_benefit():
     prompt = v3_answer_writer_request_payload(_brief())["system_prompt"]
 
-    assert "копируй дословно только из `canonical_found_cards` или" in prompt
-    assert "не оценивай, не округляй, не пересчитывай и не\n  конвертируй" in prompt
-    assert "не добавляй рекламные, гарантийные, превосходные утверждения" in prompt
-    assert "практическая польза допустима, только если она прямо привязана" in prompt
+    assert "Сравнения и выводы можно формулировать только так" in prompt
+    assert "Стартовая цена ЖК" in prompt
+    assert "Не округляй" in prompt
+    assert "не добавляй неавторизованную выгоду" in prompt
 
 
 def test_formatter_payload_model_temp_schema_and_no_raw_state(monkeypatch):

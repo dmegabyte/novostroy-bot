@@ -682,6 +682,17 @@ class ResponseBrief:
     recipe_cards: tuple[JsonDict, ...] = ()
     exactly_one_question_policy: str = "exactly_one_final_question"
     fallback_question: str = "Какой вариант хотите рассмотреть подробнее?"
+    # Additive B-context for the V3 answer writer. These fields are assembled
+    # exclusively from the validated turn/state/card contracts.
+    client_priorities: JsonDict = field(default_factory=dict)
+    safe_comparisons: tuple[JsonDict, ...] = ()
+    allowed_conclusions: tuple[JsonDict, ...] = ()
+    dialogue_progress: JsonDict = field(default_factory=dict)
+    selection_scope: JsonDict = field(default_factory=dict)
+    card_guidance: tuple[JsonDict, ...] = ()
+    decision_signals: JsonDict = field(default_factory=dict)
+    next_actions: JsonDict = field(default_factory=dict)
+    cta_policy: JsonDict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

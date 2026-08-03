@@ -81,6 +81,36 @@ prepared answer. До отдельного production-подтверждения
   `row_ref='Лист1'!A32:D32`. Это не production-доказательство и не оценка
   качества model prose вне этого одного диалога.
 
+### V3 client-first writer — тестовый production-релиз 2026-08-03
+
+- **Цель:** отвечать прежде всего по текущему запросу и подтверждённым
+  приоритетам клиента, сохранив фактические и JSON/wire-границы V3 writer.
+- **Изменение:** `ResponseBrief` получил V3-only `client_priorities`,
+  `safe_comparisons`, `allowed_conclusions` и связанный B-context. Явно
+  запрошенные факты ранжируются раньше общих ограничений; общая готовность не
+  используется как ложный дифференциатор, а точные сравнения метро и стартовой
+  цены проекта формируются кодом. Writer использует краткий prompt,
+  `temperature=0.2` и `max_tokens=5000`; V2 model-facing payload эти поля не
+  получает.
+- **Релиз:** immutable bundle `v3-client-first-temp02-20260803-r1` развёрнут
+  атомарно из fresh VPS snapshot `vps-source-20260803-190119-09c839fb7165`.
+  После deploy активный и persisted selector — `V3`; V3 composer — `publish`,
+  V2/V3 manager rewriter — `off`.
+- **Live evidence:** один синтетический Jivo smoke с event
+  `c6919647-7e5b-45ca-9050-9470c0c70aee` завершился `BOT_MESSAGE`. Journal
+  `logs/dialogue_journal.jsonl:3418-3419` связал ответ с этим release и runtime
+  V3: writer опубликован, fallback отсутствует, validation codes и quality
+  blockers пусты; свежих error events после smoke — 0. Ответ один раз назвал
+  общий статус `сдан`, сравнил подтверждённые 7/12/20 минут до метро и
+  рекомендовал вариант с семью минутами до станции.
+- **Статус:** оставлено на пользовательском тестировании. Один smoke
+  подтверждает маршрут и контракт, но не доказывает качество на всём наборе
+  диалогов.
+- **Принятые временные ограничения:** safe comparisons могут включить
+  подтверждённый критерий вне `ranked_criteria`; наличие цены нужной
+  комнатности только у части карточек пока может скрыть unknown для остальных.
+  Эти ограничения нужно закрыть до окончательного acceptance.
+
 ### TEST-гипотеза — selected availability через `lot_examples`
 
 - **Цель:** проверить наличие выбранного ЖК без нового SQL/MCP-контура и без

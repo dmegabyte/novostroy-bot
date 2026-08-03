@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .card_normalizer import missing_text
+from .constraints import normalize_constraints_delta
 from .conversation import OPEN_QUESTION_HANDOFF_TEMPLATE, OPEN_QUESTION_OPERATOR_CONSENT_CTA
 from .contracts import ComposedResponse, ExecutableTurn, ExecutionResult, IntentGoal, OptionCard, ResponseBrief, ResponsePlan, SemanticPlan, Stage, StateDelta, TurnPlan, to_jsonable
 from .fact_context import fact_availability
@@ -264,6 +265,14 @@ def build_response_brief(*, stage: Stage, plan: TurnPlan, execution: ExecutionRe
             response_policy = "operator_consent_offer"
             operator_handoff_template = OPEN_QUESTION_HANDOFF_TEMPLATE
             cta_template = OPEN_QUESTION_OPERATOR_CONSENT_CTA
+    client_priorities = _build_client_priorities(state, plan, viewpoint)
+    dialogue_progress = _build_dialogue_progress(state, plan, missing_facts)
+    selection_scope_context = _build_selection_scope(cards, selected_name, state, execution)
+    card_guidance = _build_card_guidance(cards, scenario_context, missing_facts, client_priorities)
+    decision_signals = _build_decision_signals(cards, scenario_context, client_priorities)
+    safe_comparisons, allowed_conclusions = _build_safe_comparisons(cards, client_priorities)
+    next_actions = _build_next_actions(response_policy, operator_handoff_template, cta_template, response_plan, state, dialogue_progress)
+    cta_policy = _build_cta_policy(response_policy, operator_handoff_template, recipe_id, cta_template, response_plan.final_question, state.already_asked)
     return ResponseBrief(
         answer_goal=answer_goal,
         user_question=str(plan.query_text or ""),
@@ -292,6 +301,15 @@ def build_response_brief(*, stage: Stage, plan: TurnPlan, execution: ExecutionRe
         cta_template=cta_template,
         recipe_cards=_structural_recipe_cards(response_plan.recipe_cards),
         fallback_question=response_plan.final_question.rstrip("?.! ") + "?",
+        client_priorities=client_priorities,
+        safe_comparisons=safe_comparisons,
+        allowed_conclusions=allowed_conclusions,
+        dialogue_progress=dialogue_progress,
+        selection_scope=selection_scope_context,
+        card_guidance=card_guidance,
+        decision_signals=decision_signals,
+        next_actions=next_actions,
+        cta_policy=cta_policy,
     )
 
 
@@ -525,7 +543,7 @@ def v3_answer_writer_request_payload(brief: ResponseBrief, *, prompt: str | None
         "service": "openrouter",
         "model": model,
         "system_prompt": prompt if prompt is not None else load_v3_answer_writer_prompt(),
-        "parameters": {"temperature": 0.35, "max_tokens": 1800},
+        "parameters": {"temperature": 0.2, "max_tokens": 5000},
     }
     return request
 
@@ -572,6 +590,8 @@ def _model_facing_brief_payload(brief: ResponseBrief) -> dict[str, Any]:
     """
 
     data = to_jsonable(brief)
+    for key in ("client_priorities", "safe_comparisons", "allowed_conclusions", "dialogue_progress", "selection_scope", "card_guidance", "decision_signals", "next_actions", "cta_policy"):
+        data.pop(key, None)
     scenario_context = data.get("scenario_context")
     if is_one_shot_composer_eligible(brief):
         data["canonical_cards"] = [{"name": card.name} for card in brief.canonical_cards]
@@ -599,6 +619,7 @@ def build_v3_answer_brief_payload(brief: ResponseBrief) -> dict[str, Any]:
         "confirmed_facts_evidence": _v3_confirmed_evidence(brief, safe_cards),
         "missing_facts": [_redact_safe_text(item, limit=120) for item in brief.missing_facts[:8]],
         "answer_goal": _v3_answer_goal_text(brief),
+        **_v3_b_context_payload(brief),
         "schema": {
             "intro": "string",
             "cards": [{"name": "must exactly match canonical_found_cards[].name", "text": "client prose without heading"}],
@@ -618,6 +639,191 @@ def build_v3_answer_brief_payload(brief: ResponseBrief) -> dict[str, Any]:
             "forbidden_inferences": [_redact_safe_text(item, limit=240) for item in brief.forbidden_inferences[:8]],
         },
     }
+
+
+def _build_client_priorities(state: ConversationState, plan: TurnPlan, viewpoint: str) -> dict[str, Any]:
+    priorities: dict[str, Any] = {"viewpoint": str(viewpoint or "life")}
+    if state.active_topic:
+        priorities["active_topic"] = str(state.active_topic)
+    requested = tuple(dict.fromkeys(str(item).strip().lower() for item in (*plan.requested_facts, *plan.facts_needed) if str(item).strip()))
+    if requested:
+        priorities["requested_facts"] = list(requested[:8])
+    facets = tuple(dict.fromkeys(str(item).strip().lower() for item in getattr(plan, "facets", ()) if str(item).strip()))
+    if facets:
+        priorities["facets"] = list(facets[:8])
+    safe_keys = {"budget", "min_price", "max_price", "price_min", "price_max", "rooms", "room", "district", "location", "metro", "area", "area_min", "area_max", "area_min_m2", "area_max_m2", "finishing", "ready", "deadline", "property_class", "mortgage", "financing", "down_payment", "installment", "parking", "purpose"}
+    effective = dict(state.params)
+    effective.update(normalize_constraints_delta(plan.constraints_delta))
+    params: dict[str, Any] = {}
+    for key, value in effective.items():
+        normalized = str(key or "").strip().lower()
+        cleaned = _sanitize_v3_context_value(value, depth=0)
+        if normalized in safe_keys and cleaned not in (None, "", [], {}):
+            params[normalized] = cleaned
+    if params:
+        priorities["confirmed_constraints"] = params
+    ranked = _rank_client_criteria(requested, params)
+    if ranked:
+        priorities["ranked_criteria"] = ranked
+        priorities["primary_focus"] = ranked[0]
+    return priorities
+
+
+def _rank_client_criteria(requested: tuple[str, ...], params: Mapping[str, Any]) -> list[str]:
+    aliases = {"ready": "readiness", "readiness": "readiness", "готовность": "readiness", "срок сдачи": "readiness", "metro": "metro", "метро": "metro", "transport": "metro", "max_price": "budget", "min_price": "budget", "price_min": "budget", "price_max": "budget", "budget": "budget", "бюджет": "budget", "rooms": "rooms", "room": "rooms", "комнаты": "rooms", "комнатность": "rooms", "location": "location", "district": "location", "район": "location", "area": "area", "area_min": "area", "area_max": "area", "площадь": "area", "finishing": "finishing", "отделка": "finishing"}
+    ranked: list[str] = []
+    for item in requested:
+        criterion = aliases.get(str(item).strip().lower(), str(item).strip().lower())
+        if criterion and criterion not in ranked:
+            ranked.append(criterion)
+    for criterion, keys in (("budget", {"budget", "min_price", "max_price", "price_min", "price_max"}), ("rooms", {"rooms", "room"}), ("metro", {"metro"}), ("location", {"district", "location"}), ("area", {"area", "area_min", "area_max", "area_min_m2", "area_max_m2"}), ("readiness", {"ready", "deadline"}), ("finishing", {"finishing"})):
+        if any(key in params for key in keys) and criterion not in ranked:
+            ranked.append(criterion)
+    return ranked[:8]
+
+
+def _normalized_dialogue_text(value: Any) -> str:
+    return " ".join(str(value or "").casefold().replace("ё", "е").split())
+
+
+def _normalized_priority_text(value: Any) -> str:
+    tokens = re.findall(r"[a-zа-я0-9]+", _normalized_dialogue_text(value), flags=re.I)
+    while tokens and tokens[0] in {"давай", "давайте", "хочу", "нужно", "мне", "пожалуйста", "тогда", "все", "же"}:
+        tokens.pop(0)
+    return " ".join(tokens)
+
+
+def _build_dialogue_progress(state: ConversationState, plan: TurnPlan, missing_facts: tuple[str, ...]) -> dict[str, Any]:
+    turns = [item for item in state.dialogue_turns if isinstance(item, Mapping) and any(str(item.get(key) or "").strip() for key in ("user", "assistant"))]
+    current = _normalized_priority_text(plan.query_text)
+    previous = next((_normalized_priority_text(item.get("user")) for item in reversed(turns) if _normalized_priority_text(item.get("user"))), "")
+    repeated = bool(current and previous and (current == previous or (min(len(current), len(previous)) >= 6 and (current in previous or previous in current))))
+    status = "operator_offered" if state.operator_offered else "unconfirmed_fact_requires_handoff" if missing_facts else "stalled" if repeated else "active"
+    result: dict[str, Any] = {"substantive_turn_number": len(turns) + 1, "progress_status": status, "questions_already_asked": list(state.already_asked[-6:])}
+    if state.last_assistant_question:
+        result["last_assistant_question"] = state.last_assistant_question
+    if repeated:
+        result["repeated_priority"] = _redact_safe_text(str(plan.query_text or ""), limit=160)
+    return result
+
+
+def _build_selection_scope(cards: tuple[OptionCard, ...], selected_name: str | None, state: ConversationState, execution: ExecutionResult) -> dict[str, Any]:
+    names = [card.name for card in cards]
+    allowed = {_normalized_dialogue_text(name): name for name in names}
+    selected = allowed.get(_normalized_dialogue_text(selected_name)) if selected_name else None
+    pair = tuple(card.name for card in execution.comparison_cards[:2]) if len(execution.comparison_cards) >= 2 else state.comparison_scope_option_names
+    exact_pair = list(pair) if len(pair) == 2 and all(_normalized_dialogue_text(name) in allowed for name in pair) else []
+    result: dict[str, Any] = {"type": "pair" if exact_pair else "selected" if selected else "shortlist", "current_card_names": names}
+    if selected:
+        result["selected_card"] = selected
+    if exact_pair:
+        result["persisted_comparison_pair"] = exact_pair
+    return result
+
+
+def _priority_evidence(card: OptionCard, criterion: str) -> Any:
+    value = {"readiness": card.ready, "metro": card.metro, "budget": card.price_min, "rooms": card.rooms, "location": card.location or card.district, "area": card.area, "finishing": card.finishing}.get(criterion)
+    return value if value not in (None, "") else None
+
+
+def _evidence_key(value: Any) -> str:
+    return _normalized_dialogue_text(value)
+
+
+def _build_card_guidance(cards: tuple[OptionCard, ...], scenario_context: Mapping[str, Any], missing_facts: tuple[str, ...], client_priorities: Mapping[str, Any] | None = None) -> tuple[dict[str, Any], ...]:
+    ranked = (client_priorities or {}).get("ranked_criteria")
+    if isinstance(ranked, list):
+        for criterion in ranked[:8]:
+            values = [_priority_evidence(card, str(criterion)) for card in cards]
+            comparable = [value for value in values if value is not None]
+            if comparable and len({_evidence_key(value) for value in comparable}) >= 2:
+                return tuple({"card_name": card.name, "anchor_fact": str(criterion), "communication_goal": "address_client_priority", "evidence": {"criterion": str(criterion), "value": value}, "missing_facts": list(missing_facts[:8]) if len(cards) == 1 else []} for card, value in zip(cards, values) if value is not None)
+    scenario_cards = scenario_context.get("cards") if isinstance(scenario_context.get("cards"), list) else []
+    by_name = {_normalized_dialogue_text(item.get("card_name")): item for item in scenario_cards if isinstance(item, Mapping)}
+    out: list[dict[str, Any]] = []
+    for card in cards:
+        item = by_name.get(_normalized_dialogue_text(card.name), {})
+        guidance: dict[str, Any] = {"card_name": card.name, "missing_facts": list(missing_facts[:8]) if len(cards) == 1 else []}
+        for key in ("anchor_fact", "communication_goal", "allowed_concepts", "evidence"):
+            value = _sanitize_v3_context_value(item.get(key), depth=0)
+            if value not in (None, "", [], {}):
+                guidance["allowed_benefits" if key == "allowed_concepts" else key] = value
+        out.append(guidance)
+    return tuple(out)
+
+
+def _build_decision_signals(cards: tuple[OptionCard, ...], scenario_context: Mapping[str, Any], client_priorities: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    signals: dict[str, Any] = {}
+    priced = [card for card in cards if isinstance(card.price_min, (int, float)) and not isinstance(card.price_min, bool)]
+    if cards and len(priced) == len(cards):
+        winner = min(priced, key=lambda card: card.price_min)
+        signals["literal_lowest_starting_price"] = {"card_name": winner.name, "price_min": winner.price_min}
+    anchors = [{key: item[key] for key in ("card_name", "anchor_fact", "allowed_benefits") if key in item} for item in _build_card_guidance(cards, scenario_context, (), client_priorities)]
+    if anchors:
+        signals["card_anchors"] = anchors
+    return signals
+
+
+def _pedestrian_minutes(value: Any) -> int | None:
+    text = str(value or "").strip().casefold().replace("ё", "е")
+    if not re.search(r"пеш|ходьб", text):
+        return None
+    match = re.search(r"\b(\d{1,3})\s*(?:мин(?:ут[аы]?|\.)?)\b", text)
+    return int(match.group(1)) if match else None
+
+
+def _has_matching_room_price_evidence(cards: tuple[OptionCard, ...], constraints: Mapping[str, Any]) -> bool:
+    wanted = _evidence_key(constraints.get("rooms", constraints.get("room")))
+    if not wanted:
+        return False
+    for card in cards:
+        if any(_evidence_key(lot.rooms) == wanted and isinstance(lot.full_price, (int, float)) and not isinstance(lot.full_price, bool) for lot in card.lot_examples):
+            return True
+        for item in card.room_prices:
+            price = item.get("full_price", item.get("price", item.get("price_min"))) if isinstance(item, Mapping) else None
+            if isinstance(item, Mapping) and _evidence_key(item.get("rooms", item.get("room"))) == wanted and isinstance(price, (int, float)) and not isinstance(price, bool):
+                return True
+    return False
+
+
+def _build_safe_comparisons(cards: tuple[OptionCard, ...], client_priorities: Mapping[str, Any]) -> tuple[tuple[dict[str, Any], ...], tuple[dict[str, Any], ...]]:
+    comparisons: list[dict[str, Any]] = []
+    conclusions: list[dict[str, Any]] = []
+    ready = [str(card.ready).strip() for card in cards if str(card.ready or "").strip()]
+    if cards and len(ready) == len(cards) and len({_evidence_key(value) for value in ready}) == 1:
+        comparisons.append({"type": "shared_readiness", "card_names": [card.name for card in cards], "ready": ready[0]})
+        conclusions.append({"type": "shared_readiness", "conclusion": f"Все показанные ЖК имеют статус готовности «{ready[0]}».", "forbidden": ["keys", "immediate_move", "no_wait", "specific_apartment_readiness"]})
+    routes = [{"card_name": card.name, "metro": str(card.metro).strip(), "minutes": minutes} for card in cards if (minutes := _pedestrian_minutes(card.metro)) is not None]
+    if cards and len(routes) == len(cards):
+        winner = min(routes, key=lambda route: route["minutes"])
+        comparisons.append({"type": "shortest_pedestrian_metro", "routes": routes, "winner": dict(winner)})
+        conclusions.append({"type": "shortest_pedestrian_metro", "conclusion": f"Самый короткий подтверждённый пеший маршрут среди показанных вариантов — {winner['minutes']} минут в {winner['card_name']}.", "forbidden": ["rounded_minutes", "approximate_minutes"]})
+    priced = [card for card in cards if isinstance(card.price_min, (int, float)) and not isinstance(card.price_min, bool)]
+    if cards and len(priced) == len(cards):
+        winner = min(priced, key=lambda card: card.price_min)
+        comparisons.append({"type": "lowest_project_starting_price", "prices": [{"card_name": card.name, "price_min": card.price_min} for card in priced], "winner": {"card_name": winner.name, "price_min": winner.price_min}, "scope": "project_starting_price"})
+        conclusions.append({"type": "lowest_project_starting_price", "conclusion": f"Самая низкая стартовая цена ЖК среди показанных вариантов — у {winner.name}.", "scope": "project_starting_price", "limitations": ["does_not_prove_requested_room_availability", "does_not_prove_requested_room_price", "does_not_prove_budget_fit"]})
+    constraints = client_priorities.get("confirmed_constraints")
+    if isinstance(constraints, Mapping) and (any(key in constraints for key in ("max_price", "budget")) or any(key in constraints for key in ("rooms", "room"))) and not _has_matching_room_price_evidence(cards, constraints):
+        conclusions.append({"type": "matching_room_budget_fit", "status": "unknown", "reason": "no_room_specific_matching_unit_price_evidence", "forbidden_conclusion": "all_options_fit_budget"})
+    return tuple(comparisons[:4]), tuple(conclusions[:4])
+
+
+def _build_next_actions(response_policy: str, operator_template: str, cta_template: str, response_plan: ResponsePlan, state: ConversationState, dialogue_progress: Mapping[str, Any]) -> dict[str, Any]:
+    stalled = dialogue_progress.get("progress_status") == "stalled"
+    preferred = "offer_operator" if operator_template or response_policy == "operator_consent_offer" or (stalled and not state.operator_offered) else _redact_safe_text(cta_template or response_plan.final_question, limit=180) if cta_template or response_plan.final_question else "continue_dialogue"
+    return {"preferred": preferred, "operator_already_offered": bool(state.operator_offered), "cta": cta_template or response_plan.final_question}
+
+
+def _build_cta_policy(response_policy: str, operator_handoff_template: str, recipe_id: str, cta_template: str, fallback_question: str, already_asked: tuple[str, ...]) -> dict[str, Any]:
+    return {"exact_required": bool(operator_handoff_template or response_policy == "operator_consent_offer" or recipe_id in {"selected_financing", "current_options_financing"}), "exact_cta": cta_template, "fallback_question": fallback_question.rstrip("?.! ") + "?", "one_question": True, "must_advance": True, "do_not_repeat_already_asked": list(already_asked[-6:])}
+
+
+def _v3_b_context_payload(brief: ResponseBrief) -> dict[str, Any]:
+    cta_policy = dict(brief.cta_policy)
+    cta_policy["exact_required"] = _v3_exact_cta_required(brief)
+    clean = lambda value: _sanitize_v3_context_value(value, depth=-2)
+    return {"client_priorities": clean(brief.client_priorities) or {}, "safe_comparisons": clean(brief.safe_comparisons) or [], "allowed_conclusions": clean(brief.allowed_conclusions) or [], "dialogue_progress": clean(brief.dialogue_progress) or {}, "selection_scope": clean(brief.selection_scope) or {}, "card_guidance": clean(brief.card_guidance) or [], "decision_signals": clean(brief.decision_signals) or {}, "next_actions": clean(brief.next_actions) or {}, "cta_policy": clean(cta_policy) or {}}
 
 
 def _v3_answer_card_payload(card: OptionCard) -> dict[str, Any]:

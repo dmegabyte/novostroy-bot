@@ -72,20 +72,29 @@ class TurnProcessor:
         manager_rewriter_meta = {"used": False, "reason": "off"}
         mode = _response_composer_mode(self.response_composer_mode)
         if self.response_composer and mode in {"shadow", "publish"}:
-            response_meta = await self._compose_response_once(
-                mode=mode,
-                stage=decision.stage,
-                plan=plan,
-                execution=execution,
-                delta=delta if accepted_state else StateDelta(),
-                state=state,
-                response_plan=response_plan,
-                deterministic_text=deterministic_text,
-            )
-            if mode == "publish" and response_meta.get("used") and response_meta.get("published") and response_meta.get("text"):
-                response_text = str(response_meta.pop("text"))
+            if mode == "publish" and response_plan.recipe_id == "family_shortlist":
+                response_meta = {
+                    "mode": mode,
+                    "used": False,
+                    "published": False,
+                    "status": "skipped",
+                    "reason": "deterministic_family_shortlist",
+                }
             else:
-                response_meta.pop("text", None)
+                response_meta = await self._compose_response_once(
+                    mode=mode,
+                    stage=decision.stage,
+                    plan=plan,
+                    execution=execution,
+                    delta=delta if accepted_state else StateDelta(),
+                    state=state,
+                    response_plan=response_plan,
+                    deterministic_text=deterministic_text,
+                )
+                if mode == "publish" and response_meta.get("used") and response_meta.get("published") and response_meta.get("text"):
+                    response_text = str(response_meta.pop("text"))
+                else:
+                    response_meta.pop("text", None)
         manager_mode = _response_composer_mode(self.manager_rewriter_mode)
         if self.manager_rewriter and manager_mode in {"shadow", "publish"} and decision.action != TurnAction.RESET:
             manager_rewriter_meta = await self._rewrite_manager_once(
@@ -181,6 +190,14 @@ class TurnProcessor:
         response_plan: Any,
         deterministic_text: str,
     ) -> dict[str, Any]:
+        if mode == "publish" and getattr(response_plan, "recipe_id", "") == "family_shortlist":
+            return {
+                "mode": mode,
+                "used": False,
+                "published": False,
+                "status": "skipped",
+                "reason": "deterministic_family_shortlist",
+            }
         started = time.monotonic()
         try:
             from .response_composer import build_response_brief, is_one_shot_composer_eligible

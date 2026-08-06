@@ -100,6 +100,9 @@ class TurnProcessor:
                 response_text = str(manager_rewriter_meta.pop("text"))
             else:
                 manager_rewriter_meta.pop("text", None)
+            if manager_mode == "publish" and manager_rewriter_meta.get("operator_offer") and not manager_rewriter_meta.get("published"):
+                response_text = _v5_operator_offer_fallback(context.user_text)
+                manager_rewriter_meta["operator_offer_fallback"] = True
         elif self.manager_rewriter and manager_mode in {"shadow", "publish"}:
             manager_rewriter_meta = {
                 "mode": manager_mode,
@@ -194,6 +197,8 @@ class TurnProcessor:
             meta = result.to_meta() if hasattr(result, "to_meta") else {}
             used = bool(meta.get("used")) and bool(getattr(result, "text", ""))
             out = _runtime_response_composer_meta(meta, mode=mode, published=bool(mode == "publish" and used), elapsed_ms=round((time.monotonic() - started) * 1000))
+            if str(getattr(self.manager_rewriter, "runtime_version", "")).strip().lower() == "v5":
+                out["operator_offer"] = len(transcript) >= 3 and not state.operator_offered
             if used:
                 out["text"] = str(getattr(result, "text"))
             return out
@@ -523,6 +528,13 @@ def _temporary_strip_repeated_finance_unknown_sentence(text: str) -> str:
 def _manager_rewriter_transcript(state: ConversationState, current_question: str) -> tuple[dict[str, str], ...]:
     turns = tuple(dict(x) for x in state.dialogue_turns)
     return (*turns, {"user": str(current_question or "")[:500], "assistant": ""})
+
+
+def _v5_operator_offer_fallback(current_question: str) -> str:
+    question = " ".join(str(current_question or "").split())[:240]
+    if question:
+        return f"По вашему вопросу «{question}» лучше подключить менеджера, чтобы уточнить варианты. Передать ему ваш контакт?"
+    return "По этому вопросу лучше подключить менеджера, чтобы уточнить варианты. Передать ему ваш контакт?"
 
 
 def _runtime_response_composer_meta(meta: dict[str, Any], *, mode: str, published: bool, elapsed_ms: int) -> dict[str, Any]:

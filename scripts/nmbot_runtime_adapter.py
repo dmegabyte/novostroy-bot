@@ -21,7 +21,7 @@ from nmbot_v2.conversation import build_native_conversation_answer
 from nmbot_v2.execution_path import sanitize_execution_path
 from nmbot_v2.fact_context import ALLOWED_FACTS, ALLOWED_SUBJECTS, SUBJECT_FACT_MAP, answered_facts, present_fact_names, split_requested_facts
 from nmbot_v2.runtime import TurnProcessor
-from nmbot_v2.manager_rewriter import manager_rewriter_request_payload as build_manager_rewriter_payload, parse_manager_rewriter_text
+from nmbot_v2.manager_rewriter import load_prompt as load_manager_rewriter_prompt, manager_rewriter_request_payload as build_manager_rewriter_payload, parse_manager_rewriter_text
 from nmbot_v2.pair_comparison import execute_pair_comparison
 from nmbot_v2.response_composer import compose_response_writer_formatter_async, formatter_request_payload as build_response_formatter_payload, v3_answer_writer_prompt_identity, v3_answer_writer_request_payload as build_v3_answer_writer_payload, writer_request_payload as build_response_writer_payload
 from nmbot_v2.pending import is_pending_contact_name, is_pending_contact_phone
@@ -91,7 +91,7 @@ except ImportError:  # pragma: no cover - package-style fallback
 SAFE_V2_ERROR_TEXT = "Сейчас не могу надёжно проверить нужную информацию, поэтому не буду гадать. Лучше передать вопрос специалисту, он сможет проверить актуальность вручную. Передать оператору запрос?"
 SCENARIO_NEED_FACETS = {"family", "rental", "investment", "life", "financing"}
 SCENARIO_NEED_ALIASES = {"mortgage": "financing", "finance": "financing"}
-SUPPORTED_RUNTIME_VERSIONS = frozenset({"V0", "V1", "V2", "V3", "V4"})
+SUPPORTED_RUNTIME_VERSIONS = frozenset({"V0", "V1", "V2", "V3", "V4", "V5"})
 MAX_V0_CONTEXT_TEXT_CHARS = 2000
 V0_CONTACT_PHONE_CONSENT_MESSAGE = V0_CONTACT_PHONE_DIGITS_REQUEST
 
@@ -325,6 +325,8 @@ async def run_runtime_turn(
             return await _run_v1_authoritative(app, user_id=user_id, message=message, channel=channel, meta=meta)
         if version == "V3":
             return _decorate_v3_result(await _run_v2_authoritative_for_public_runtime(app, user_id=user_id, message=message, channel=channel, meta=meta, runtime_version="v3", engine_version="v2"))
+        if version == "V5":
+            return _decorate_v5_result(await _run_v2_authoritative_for_public_runtime(app, user_id=user_id, message=message, channel=channel, meta=meta, runtime_version="v5", engine_version="v2"))
         if version == "V4":
             try:
                 return await _run_v4_authoritative(app, user_id=user_id, message=message, channel=channel, meta=meta)
@@ -347,6 +349,17 @@ def _decorate_v3_result(result: dict[str, Any]) -> dict[str, Any]:
     meta = public.get("meta") if isinstance(public.get("meta"), dict) else {}
     meta = dict(meta)
     meta["runtime"] = "v3"
+    meta.setdefault("engine", "v2")
+    public["meta"] = meta
+    return public
+
+
+def _decorate_v5_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Mark a V3-compatible V5 turn without changing its client answer."""
+    public = copy.deepcopy(result) if isinstance(result, dict) else {}
+    meta = public.get("meta") if isinstance(public.get("meta"), dict) else {}
+    meta = dict(meta)
+    meta["runtime"] = "v5"
     meta.setdefault("engine", "v2")
     public["meta"] = meta
     return public
@@ -3117,7 +3130,7 @@ async def _run_v2_response_gateway_once(client: Any, request_data: dict[str, Any
     if not hasattr(client, "_run_gateway_request_once"):
         return "", {"ok": False, "error_code": "v2_response_gateway_once_missing", "_upstream_error": True, "_safe_fallback": True}
     headers = {"Authorization": f"Bearer {os.getenv('OVERMIND_TOKEN') or os.getenv('GATEWAY_POLL_TOKEN') or ''}"}
-    default_timeout = "20" if timeout_env == "NMBOT_RESPONSE_FORMATTER_TIMEOUT" else "25"
+    default_timeout = "20" if timeout_env == "NMBOT_RESPONSE_FORMATTER_TIMEOUT" else "45" if timeout_env == "NMBOT_V5_MANAGER_REWRITER_TIMEOUT" else "25"
     timeout = int(os.getenv(timeout_env, default_timeout))
     raw, meta = await client._run_gateway_request_once(request_data, headers, timeout)
     return raw if raw is not None else "", meta if isinstance(meta, dict) else {}
@@ -3199,12 +3212,16 @@ class _ManagerRewriterAdapter:
 
     async def rewrite_manager_answer(self, *, transcript: tuple[dict[str, str], ...], current_question: str, prepared_answer: str, brief: Any) -> Any:
         client = self.app.get("overmind_client") if hasattr(self.app, "get") else self.app["overmind_client"]
+        is_v5 = self.runtime_version == "v5"
+        model = (os.getenv("NMBOT_V5_MANAGER_REWRITER_MODEL") or "deepseek/deepseek-v4-flash") if is_v5 else (os.getenv("NMBOT_MANAGER_REWRITER_MODEL") or "google/gemini-2.5-flash")
         payload = build_manager_rewriter_payload(
             transcript=transcript,
             current_question=current_question,
             prepared_answer=prepared_answer,
             brief=brief,
-            model=os.getenv("NMBOT_MANAGER_REWRITER_MODEL") or "google/gemini-2.5-flash",
+            model=model,
+            prompt=load_manager_rewriter_prompt("v5" if is_v5 else "v2"),
+            runtime_version=self.runtime_version,
         )
         v3_bluesminds_reason = "none"
         if self.runtime_version == "v3" and bluesminds_manager_rewriter.is_enabled():
@@ -3215,7 +3232,8 @@ class _ManagerRewriterAdapter:
             v3_bluesminds_reason = self._bluesminds_fallback_reason(bluesminds_raw, bluesminds_meta)
         elif self.runtime_version == "v3":
             v3_bluesminds_reason = "disabled"
-        raw, meta = await _run_v2_response_gateway_once(client, payload, timeout_env="NMBOT_MANAGER_REWRITER_TIMEOUT")
+        timeout_env = "NMBOT_V5_MANAGER_REWRITER_TIMEOUT" if is_v5 else "NMBOT_MANAGER_REWRITER_TIMEOUT"
+        raw, meta = await _run_v2_response_gateway_once(client, payload, timeout_env=timeout_env)
         safe_meta = meta if isinstance(meta, dict) else {}
         if safe_meta.get("_upstream_error") or safe_meta.get("_safe_fallback") or safe_meta.get("safe_fallback") or safe_meta.get("ok") is False:
             if self.runtime_version == "v3":
@@ -3238,6 +3256,9 @@ def _v2_response_composer_mode() -> str:
 
 
 def _runtime_response_composer_mode(runtime_version: str) -> str:
+    if runtime_version == "v5":
+        mode = str(os.getenv("NMBOT_V5_RESPONSE_COMPOSER_MODE") or "off").strip().lower()
+        return mode if mode in {"off", "shadow", "publish"} else "off"
     if runtime_version == "v3":
         return _v3_response_composer_mode()
     if runtime_version == "v2":
@@ -3255,6 +3276,10 @@ def _runtime_manager_rewriter_mode(runtime_version: str) -> str:
         return _manager_rewriter_mode("NMBOT_V2_MANAGER_REWRITER_MODE")
     if runtime_version == "v3":
         return _manager_rewriter_mode("NMBOT_V3_MANAGER_REWRITER_MODE")
+    if runtime_version == "v5":
+        if os.getenv("NMBOT_V5_MANAGER_REWRITER_MODE"):
+            return _manager_rewriter_mode("NMBOT_V5_MANAGER_REWRITER_MODE")
+        return _manager_rewriter_mode("NMBOT_MANAGER_REWRITER_MODE")
     return "off"
 
 

@@ -40,7 +40,7 @@ from pathlib import Path
 root = Path.cwd()
 default_runtime = root / "data" / "nmbot_runtime_version.json"
 runtime_path = Path(os.getenv("NMBOT_RUNTIME_VERSION_FILE", str(default_runtime))).expanduser()
-supported = {"V0", "V2", "V3"}
+supported = {"V0", "V2", "V3", "V5"}
 runtime = {"path": str(runtime_path), "status": "missing", "effective_version": "V2"}
 if runtime_path.exists():
     try:
@@ -93,7 +93,7 @@ from pathlib import Path
 
 bot_dir = Path("/home/neiro/novostroy-bot")
 services = ["novostroy-bot-api.service", "novostroy-bot-n8n-bridge.service"]
-supported_runtime_versions = {"V0", "V2", "V3"}
+supported_runtime_versions = {"V0", "V2", "V3", "V5"}
 
 def run(args):
     try:

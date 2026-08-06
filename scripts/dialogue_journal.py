@@ -164,7 +164,7 @@ def _safe_execution_path(value: Any) -> dict[str, Any] | None:
 
 def _safe_runtime_version(value: Any) -> str | None:
     normalized = str(value or "").strip().upper()
-    return normalized if normalized in {"V0", "V1", "V2", "V3"} else None
+    return normalized if normalized in {"V0", "V1", "V2", "V3", "V5"} else None
 
 
 def _safe_response_model(value: Any) -> dict[str, Any] | None:

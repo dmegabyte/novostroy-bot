@@ -667,6 +667,15 @@ RUNTIME_IDENTITIES = {
         ),
         "state_namespace": "nmbot_v2",
     },
+    "V5": {
+        "name": "Светлана",
+        "start_greeting": (
+            "Здравствуйте! Меня зовут Светлана, я помогаю подобрать квартиру в Москве и области — "
+            "для жизни, инвестиций или сдачи в аренду. Напишите, какой район или метро рассматриваете, "
+            "сколько комнат нужно и какой бюджет планируете — я сразу начну подбор."
+        ),
+        "state_namespace": "nmbot_v2",
+    },
     "V4": {
         "name": "Марина",
         "start_greeting": (
@@ -2334,12 +2343,12 @@ def build_jivo_invite_agent(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _is_start_command(text: str) -> bool:
     normalized = str(text or "").strip().lower()
-    return normalized in {"/start", "start", "/start_0", "/start_1", "/start_2", "/start_3", "/start_4"}
+    return normalized in {"/start", "start", "/start_0", "/start_1", "/start_2", "/start_3", "/start_4", "/start_5"}
 
 
 def _start_command_version(text: str) -> str | None:
     normalized = str(text or "").strip().lower()
-    return {"/start_0": "V0", "/start_1": "V1", "/start_2": "V2", "/start_3": "V3", "/start_4": "V4"}.get(normalized)
+    return {"/start_0": "V0", "/start_1": "V1", "/start_2": "V2", "/start_3": "V3", "/start_4": "V4", "/start_5": "V5"}.get(normalized)
 
 
 async def run_chat(app: web.Application, *, user_id: str, message: str, channel: str, meta: dict[str, Any] | None = None) -> dict[str, Any]:

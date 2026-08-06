@@ -103,6 +103,8 @@ class TurnProcessor:
             if manager_mode == "publish" and manager_rewriter_meta.get("operator_offer") and not manager_rewriter_meta.get("published"):
                 response_text = _v5_operator_offer_fallback(context.user_text)
                 manager_rewriter_meta["operator_offer_fallback"] = True
+            if manager_mode == "publish" and manager_rewriter_meta.get("operator_offer"):
+                delta = replace(delta, operator_offered=True)
         elif self.manager_rewriter and manager_mode in {"shadow", "publish"}:
             manager_rewriter_meta = {
                 "mode": manager_mode,
@@ -197,8 +199,6 @@ class TurnProcessor:
             meta = result.to_meta() if hasattr(result, "to_meta") else {}
             used = bool(meta.get("used")) and bool(getattr(result, "text", ""))
             out = _runtime_response_composer_meta(meta, mode=mode, published=bool(mode == "publish" and used), elapsed_ms=round((time.monotonic() - started) * 1000))
-            if str(getattr(self.manager_rewriter, "runtime_version", "")).strip().lower() == "v5":
-                out["operator_offer"] = len(transcript) >= 3 and not state.operator_offered
             if used:
                 out["text"] = str(getattr(result, "text"))
             return out
@@ -229,12 +229,17 @@ class TurnProcessor:
         context: SafeTurnContext,
     ) -> dict[str, Any]:
         started = time.monotonic()
+        transcript = _manager_rewriter_transcript(state, context.user_text)
+        operator_offer_required = (
+            str(getattr(self.manager_rewriter, "runtime_version", "")).strip().lower() == "v5"
+            and len(transcript) == 3
+            and not state.operator_offered
+        )
         try:
             from .manager_rewriter import rewrite_manager_answer_async
             from .response_composer import build_response_brief
 
             brief = build_response_brief(stage=stage, plan=plan, execution=execution, delta=delta, state=state, response_plan=response_plan)
-            transcript = _manager_rewriter_transcript(state, context.user_text)
             result = await rewrite_manager_answer_async(
                 transcript=transcript,
                 current_question=context.user_text,
@@ -245,6 +250,8 @@ class TurnProcessor:
             meta = result.to_meta() if hasattr(result, "to_meta") else {}
             used = bool(meta.get("used")) and bool(getattr(result, "text", ""))
             out = _runtime_response_composer_meta(meta, mode=mode, published=bool(mode == "publish" and used), elapsed_ms=round((time.monotonic() - started) * 1000))
+            if str(getattr(self.manager_rewriter, "runtime_version", "")).strip().lower() == "v5":
+                out["operator_offer"] = operator_offer_required
             if used:
                 out["text"] = str(getattr(result, "text"))
             return out
@@ -259,6 +266,7 @@ class TurnProcessor:
                 "attempts": 1,
                 "elapsed_ms": _bounded_int(round((time.monotonic() - started) * 1000), 0, 10 * 60 * 1000),
                 "attempt_summaries": (),
+                "operator_offer": operator_offer_required,
             }
 
     async def _execute_async(self, action: TurnAction, plan: TurnPlan, state: ConversationState, error_code: str | None, context: SafeTurnContext) -> ExecutionResult:

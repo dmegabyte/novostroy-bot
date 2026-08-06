@@ -1390,6 +1390,10 @@ async def _run_v2_authoritative(
         answer = result.response_text or _v2_failure_text(result, v2_state)
         failure_state = v2_state
         should_save_failure_state = False
+        manager_meta = result.trace.get("manager_rewriter") if isinstance(result.trace.get("manager_rewriter"), dict) else {}
+        if runtime_version == "v5" and manager_meta.get("operator_offer") and answer:
+            failure_state = apply_state_delta(failure_state, StateDelta(operator_offered=True))
+            should_save_failure_state = True
         is_recoverable_search_failure = result.action == TurnAction.SEARCH and _is_v2_terminal_operator_offer(answer)
         if is_recoverable_search_failure:
             failure_state = apply_state_delta(

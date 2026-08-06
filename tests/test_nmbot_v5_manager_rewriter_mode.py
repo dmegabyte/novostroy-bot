@@ -18,7 +18,7 @@ def test_set_command_is_fixed_to_test_api_and_helper() -> None:
     command = build_set_command("shadow", "backup.env")
     assert "/home/neiro/novostroy-bot" in command
     assert "nmbot_env_secrets.py" in command
-    assert "NMBOT_MANAGER_REWRITER_MODE" in command
+    assert "NMBOT_V5_MANAGER_REWRITER_MODE" in command
     assert "novostroy-bot-api.service" in command
     assert "client-production" not in command
     assert "novostroy-bot-n8n-bridge.service" not in command

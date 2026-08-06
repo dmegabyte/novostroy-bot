@@ -103,7 +103,7 @@ def build_set_command(mode: str, backup_name: str) -> str:
         "set -eu; "
         f"mkdir -p {root}/backups; "
         f"cp -p {env_file} {backup}; "
-        f"python3 {helper} --env {env_file} --key NMBOT_MANAGER_REWRITER_MODE --value {shlex.quote(selected)}; "
+        f"python3 {helper} --env {env_file} --key NMBOT_V5_MANAGER_REWRITER_MODE --value {shlex.quote(selected)}; "
         f"systemctl --user restart {shlex.quote(TEST_SERVICE)}; "
         f"systemctl --user is-active {shlex.quote(TEST_SERVICE)}"
     )

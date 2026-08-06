@@ -83,7 +83,7 @@ def _v5_card_payload(card: Any, *, rank: int, requested_rooms: Any) -> dict[str,
     raw = to_jsonable(card)
     raw = raw if isinstance(raw, Mapping) else {}
     facts: list[dict[str, Any]] = []
-    for field in ("location", "district", "ready", "metro", "developer", "property_class", "infrastructure"):
+    for field in ("location", "district", "ready", "metro", "developer", "property_class", "infrastructure", "finishing", "area"):
         value = raw.get(field)
         if value not in (None, "", [], ()):
             facts.append({"field": field, "value": value, "scope": "project", "authoritative": True})
@@ -97,8 +97,8 @@ def _v5_card_payload(card: Any, *, rank: int, requested_rooms: Any) -> dict[str,
         room_prices.append({key: item[key] for key in ("rooms", "price", "price_min", "price_max", "area") if key in item})
     if room_prices:
         facts.append({"field": "room_prices", "value": room_prices[:5], "scope": "unit_type", "applies_to_rooms": requested_rooms, "authoritative": True})
-    elif raw.get("price") not in (None, ""):
-        facts.append({"field": "price_start", "value": raw["price"], "scope": "project", "applies_to_rooms": None, "authoritative": True})
+    elif raw.get("price") not in (None, "") or raw.get("price_min") not in (None, ""):
+        facts.append({"field": "price_start", "value": raw.get("price") or raw.get("price_min"), "scope": "project", "applies_to_rooms": None, "authoritative": True})
 
     card_id = raw.get("entity_id") or raw.get("name") or f"card-{rank}"
     return {"card_id": str(card_id), "rank": rank, "name": str(raw.get("name") or ""), "facts": facts}
@@ -188,7 +188,7 @@ def parse_manager_rewriter_text(raw: Any) -> str:
 
 def _v5_operator_offer_failsafe(text: str, *, transcript: tuple[dict[str, str], ...], current_question: str) -> str:
     """Keep the third-turn operator offer a stable runtime contract."""
-    if not text or len(transcript) < 3:
+    if not text or len(transcript) != 3:
         return text
     lowered = text.casefold()
     if "менеджер" in lowered or "оператор" in lowered:

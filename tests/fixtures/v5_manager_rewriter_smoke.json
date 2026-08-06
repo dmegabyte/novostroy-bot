@@ -1,0 +1,56 @@
+{
+  "prompt_file": "v5_manager_rewriter_prompt.txt",
+  "model": "deepseek/deepseek-v4-flash",
+  "temperature": 0.35,
+  "max_tokens": 1800,
+  "timeout_seconds": 180,
+  "active_request": {
+    "current_user_message": "двушкав люблино",
+    "resolved_user_criteria": {
+      "rooms": 2,
+      "location": "Люблино"
+    }
+  },
+  "dialogue_history": [
+    {
+      "role": "assistant",
+      "authority": "context_only",
+      "text": "Искала двухкомнатные квартиры для жизни в Люблино. Бюджет пока не ограничивала — нашла один вариант."
+    },
+    {
+      "role": "user",
+      "text": "двушкав люблино"
+    }
+  ],
+  "mcp_evidence": {
+    "cards": [
+      {
+        "card_id": "lubinsky-park",
+        "rank": 1,
+        "name": "ЖК «Люблинский парк»",
+        "facts": [
+          {"field": "location", "value": "Люблино", "scope": "project"},
+          {"field": "price_start", "value": "10,8 млн ₽", "scope": "project"},
+          {"field": "delivery", "value": "дом сдан", "scope": "project"},
+          {"field": "area", "value": "19,8–87,3 м²", "scope": "project", "applies_to_rooms": null},
+          {"field": "metro", "value": "Братиславская — 15 минут пешком; Люблино — 20 минут пешком", "scope": "project"},
+          {"field": "developer", "value": "ПИК", "scope": "project"},
+          {"field": "class", "value": "комфорт-класс", "scope": "project"},
+          {"field": "infrastructure", "value": "школа, детский сад, парк", "scope": "project"}
+        ]
+      }
+    ],
+    "missing_facts": [
+      "точная цена двухкомнатной квартиры",
+      "точная площадь двухкомнатной квартиры",
+      "бюджет клиента",
+      "срок покупки"
+    ]
+  },
+  "rewrite_policy": {
+    "card_count": 1,
+    "cta_mode": "single_card_followup",
+    "question_limit": 1
+  },
+  "prepared_answer": "Искала двухкомнатные квартиры для жизни в Люблино. Бюджет пока не ограничивала — нашла один вариант. ЖК «Люблинский парк» — Люблино, цены от 10,8 млн рублей, дом сдан, 19,8–87,3 м², метро Братиславская — 15 минут пешком; Люблино — 20 минут пешком, застройщик ПИК, комфорт-класс. Какой вариант хотите рассмотреть подробнее?"
+}

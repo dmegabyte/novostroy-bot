@@ -180,6 +180,7 @@ def _default_state() -> dict[str, Any]:
         "last_bot_question": "",
         "last_offer_type": "",
         "last_answer_kind": "",
+        "last_offer": {},
         "active_task": {},
         "active_scenario": {},
         "selected_option_card_shown_count": 0,

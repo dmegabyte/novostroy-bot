@@ -15,11 +15,11 @@ from typing import Any
 from aiohttp import web
 from nmbot_v0.contracts import V0Answer, V0State, V0TurnResult
 from nmbot_v0.field_contract import v0_presentation_search_fields
-from nmbot_v2.contracts import ExecutableTurn, IntentGoal, OptionCard, ResponseBrief, SafeTurnContext, SearchResult, SemanticPlan, Stage, StateDelta, TurnAction
+from nmbot_v2.contracts import ExecutableTurn, IntentGoal, OptionCard, ResponseBrief, ResponsePlan, SafeTurnContext, SearchResult, SemanticPlan, Stage, StateDelta, TurnAction
 from nmbot_v2.semantic_planner import derive_runtime_decision, normalize_semantic_planner_result
 from nmbot_v2.pending import PendingKind
 from nmbot_v2.state import ConversationState, EnrichedCardCacheEntry, apply_state_delta, enriched_card_identity
-from nmbot_v2.runtime import TurnProcessor
+from nmbot_v2.runtime import TurnProcessor, _last_offer_for_response
 import nmbot_v2.manager_rewriter as manager_rewriter_mod
 import scripts.nmbot_runtime_adapter as runtime_adapter_mod
 from scripts.nmbot_runtime_adapter import _OvermindSearchAdapter, _SemanticPlannerAdapter, _canonical_v0_envelope, _inherit_selected_scope, _legacy_to_v2_state, _pending_scenario_for_planner, _queue_v2_callback_result, _safe_response_composer_trace, _semantic_plan_from_planner, _semantic_plan_from_semantic_result, _v2_to_planner_legacy_state, run_runtime_turn
@@ -34,6 +34,153 @@ mod = importlib.util.module_from_spec(spec)
 assert spec and spec.loader
 sys.modules["nmbot_api_server"] = mod
 spec.loader.exec_module(mod)
+
+
+def test_last_offer_preserves_subject_and_action_for_followup() -> None:
+    selected = OptionCard(name="ЖК «Люблинский парк»")
+    state = ConversationState(visible_options=(selected,))
+    plan = SemanticPlan(
+        operation="answer_open_question",
+        requested_facts=("apartment_types", "ads"),
+        facts_needed=("apartment_types", "ads"),
+    )
+    response_plan = ResponsePlan(
+        acknowledgement="",
+        recipe_id="selected_live_fact_check",
+        answer_kind="selected_live_fact_check",
+    )
+
+    offer = _last_offer_for_response(
+        stage=Stage.SELECTED_OBJECT,
+        plan=plan,
+        response_plan=response_plan,
+        delta=StateDelta(selected_option_name=selected.name),
+        state=state,
+        question="Показать планировки?",
+    )
+
+    assert offer == {
+        "action": "verify_selected_live_facts",
+        "subject_type": "visible_option",
+        "subject_name": "ЖК «Люблинский парк»",
+        "requested_facts": ["apartment_types", "ads"],
+        "scope": "one",
+        "question": "Показать планировки?",
+        "recipe_id": "selected_live_fact_check",
+    }
+
+
+def test_last_offer_does_not_guess_subject_for_current_options() -> None:
+    state = ConversationState(visible_options=(OptionCard(name="ЖК Один"), OptionCard(name="ЖК Два")))
+    plan = SemanticPlan(operation="answer_open_question")
+    response_plan = ResponsePlan(acknowledgement="", recipe_id="repeat_current_options", answer_kind="answer_open_question")
+
+    offer = _last_offer_for_response(
+        stage=Stage.CURRENT_OPTIONS,
+        plan=plan,
+        response_plan=response_plan,
+        delta=StateDelta(),
+        state=state,
+        question="Какой ЖК разобрать подробнее?",
+    )
+
+    assert offer["action"] == "choose_option"
+    assert offer["subject_name"] == ""
+    assert offer["scope"] == "all"
+
+
+def test_last_offer_cannot_reuse_subject_after_reset_or_new_search() -> None:
+    selected = OptionCard(name="Старый ЖК")
+    state = ConversationState(
+        selected_option_name=selected.name,
+        selected_enriched=selected,
+        visible_options=(selected,),
+        last_offer={"subject_name": selected.name, "action": "show_selected_details"},
+    )
+    plan = SemanticPlan(operation="answer_open_question")
+    response_plan = ResponsePlan(acknowledgement="", recipe_id="repeat_current_options", answer_kind="answer_open_question")
+
+    reset_offer = _last_offer_for_response(
+        stage=Stage.FIRST_LIST,
+        plan=plan,
+        response_plan=response_plan,
+        delta=StateDelta(reset=True),
+        state=state,
+        question="Что подобрать дальше?",
+    )
+    search_offer = _last_offer_for_response(
+        stage=Stage.REFINEMENT,
+        plan=plan,
+        response_plan=response_plan,
+        delta=StateDelta(clear_fields=("selected_option_name", "selected_enriched", "last_offer")),
+        state=state,
+        question="Какой вариант разобрать подробнее?",
+    )
+
+    assert reset_offer["subject_name"] == ""
+    assert search_offer["subject_name"] == ""
+
+
+def test_failure_context_clear_removes_stale_offer() -> None:
+    selected = OptionCard(name="Старый ЖК")
+    state = ConversationState(
+        selected_option_name=selected.name,
+        selected_enriched=selected,
+        pending_followup="selected_live_fact_consent",
+        last_offer={"subject_name": selected.name, "action": "show_selected_details"},
+    )
+
+    cleared = apply_state_delta(
+        state,
+        StateDelta(clear_fields=("selected_option_name", "selected_enriched", "pending_followup", "last_offer")),
+    )
+
+    assert cleared.selected_option_name is None
+    assert cleared.selected_enriched is None
+    assert cleared.pending_followup is None
+    assert cleared.last_offer == {}
+
+
+def test_search_failure_public_result_and_saved_state_clear_stale_selected_context(monkeypatch) -> None:
+    async def scenario() -> None:
+        env(monkeypatch, version="v2")
+        patch_planner(monkeypatch, {"operation": "refine_search", "constraints_delta": {"hard": {"max_price": 17_000_000}}, "confidence": 1.0})
+        initial = mod._default_state()
+        initial["selected_option"] = {"name": "Старый ЖК", "price_range": "от 15 млн"}
+        initial["visible_options"] = [{"name": "Старый ЖК", "price_range": "от 15 млн"}]
+        initial["last_offer"] = {"subject_name": "Старый ЖК", "action": "show_selected_details"}
+        app = make_app(initial, client=FakeClient(fail=True))
+
+        result = await mod.run_chat(app, user_id="u", message="до 17", channel="jivo", meta={})
+
+        saved = app["state_store"].states["u"]["nmbot_v2"]
+        assert result["selected_option"] is None
+        assert saved.get("selected_option_name") is None
+        assert saved.get("last_offer", {}) == {}
+
+    asyncio.run(scenario())
+
+
+def test_nonrecoverable_search_failure_clears_stale_context_without_operator_pending(monkeypatch) -> None:
+    async def scenario() -> None:
+        env(monkeypatch, version="v2")
+        monkeypatch.setattr(sys.modules["nmbot_runtime_adapter"], "_is_v2_terminal_operator_offer", lambda _answer: False)
+        patch_planner(monkeypatch, {"operation": "refine_search", "constraints_delta": {"hard": {"max_price": 17_000_000}}, "confidence": 1.0})
+        initial = mod._default_state()
+        initial["selected_option"] = {"name": "Старый ЖК", "price_range": "от 15 млн"}
+        initial["visible_options"] = [{"name": "Старый ЖК", "price_range": "от 15 млн"}]
+        initial["last_offer"] = {"subject_name": "Старый ЖК", "action": "show_selected_details"}
+        app = make_app(initial, client=FakeClient(fail=True))
+
+        result = await mod.run_chat(app, user_id="u", message="до 17", channel="jivo", meta={})
+
+        saved = app["state_store"].states["u"]["nmbot_v2"]
+        assert result["selected_option"] is None
+        assert saved.get("selected_option_name") is None
+        assert saved.get("last_offer", {}) == {}
+        assert saved.get("pending_followup") is None
+
+    asyncio.run(scenario())
 
 
 def test_v0_gateway_redaction_keeps_building_numbers_but_hides_phone() -> None:
@@ -2694,9 +2841,9 @@ def test_pending_contact_is_visible_to_semantic_planner_with_bounded_resume_outc
     pending = _pending_scenario_for_planner(state)
 
     assert pending == {
-        "id": "contact_name",
-        "allowed_reply_outcomes": ["resume_contact"],
-        "context": {"scope": "one", "offered_action": "collect_contact", "selected_option_name": "Лучи"},
+        "id": "operator_consent",
+        "allowed_reply_outcomes": ["accept", "decline", "ask_or_clarify", "unexpected"],
+        "context": {"scope": "one", "offered_action": "collect_contact_phone", "selected_option_name": "Лучи"},
     }
 
 
@@ -3810,6 +3957,42 @@ def test_v2_financing_pending_scenario_payload_is_bounded_and_maps_outcome(monke
     asyncio.run(scenario())
 
 
+def test_v2_canonical_plan_bypasses_second_semantic_normalization(monkeypatch):
+    async def scenario() -> None:
+        monkeypatch.delenv("NMBOT_INTENT_PLAN_VERSION", raising=False)
+
+        async def fake_plan(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "action": "operator_contact",
+                "dialog_action": "operator_live_check",
+                "target": "operator",
+                "search_policy": "forbidden",
+                "operator_contact": {"requested": True, "consent": "granted"},
+                "canonical_valid": True,
+                "canonical_errors": [],
+                "confidence": 1.0,
+            }
+
+        def unexpected_normalization(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("canonical plan was semantically normalized twice")
+
+        monkeypatch.setattr(mod.followup_intent_classifier, "plan_dialog_state", fake_plan)
+        monkeypatch.setattr(runtime_adapter_mod, "normalize_semantic_planner_result", unexpected_normalization)
+        monkeypatch.setattr(runtime_adapter_mod, "derive_runtime_decision", unexpected_normalization)
+
+        adapter = _SemanticPlannerAdapter(make_app())
+        plan = await adapter.plan(
+            SafeTurnContext(conversation_ref="u", user_text="давайте"),
+            ConversationState(pending_followup="contact_name", operator_offered=True),
+        )
+
+        assert plan.operation == "operator"
+        assert plan.operator_consent is True
+        assert adapter.last_planner_plan["semantic_adapter_route"] == "canonical_direct"
+
+    asyncio.run(scenario())
+
+
 def test_v2_explicit_new_objects_becomes_ephemeral_fresh_search(monkeypatch):
     async def scenario() -> None:
         async def fake_plan(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
@@ -4109,6 +4292,24 @@ def test_v2_missing_open_question_waits_for_operator_consent_before_callback_flo
         assert third["intent"] == "callback_queued"
         assert app["state_store"].states["u"]["nmbot_v2"].get("pending_followup") is None
         assert "9991234567" not in json.dumps(app["state_store"].states["u"], ensure_ascii=False)
+
+    asyncio.run(scenario())
+
+
+def test_unconfirmed_operator_offer_routes_affirmation_to_planner(monkeypatch):
+    async def scenario() -> None:
+        env(monkeypatch, version="v2")
+        initial = {
+            **mod._default_state(),
+            "nmbot_v2": {"pending_followup": "contact_name", "operator_offered": True},
+        }
+        patch_planner(monkeypatch, {"operation": "operator", "operator_consent": True, "confidence": 1.0})
+        app = make_app(initial)
+
+        result = await mod.run_runtime_turn(app, user_id="u", message="давайте", channel="jivo", meta={})
+
+        assert result["intent"] == "collect_contact_phone"
+        assert result["answer"].rstrip().endswith("На какой номер вам удобно позвонить?")
 
     asyncio.run(scenario())
 

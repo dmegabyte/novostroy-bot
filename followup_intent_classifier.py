@@ -124,6 +124,14 @@ INTENT_PLAN_V3_PROMPT = """
 - resume_pending — клиент явно возвращается к незавершённой заявке/contact/pending-сценарию.
 - off_topic — реплика явно не про недвижимость, подбор, квартиру, ЖК, покупку, аренду или текущий диалог.
 
+При входном pending_scenario с id=operator_consent это отдельный сценарий согласия
+на уже предложенное подключение менеджера, а не поиск и не уточнение квартиры.
+Определи смысл текущей реплики по контексту этого сценария: согласие -> goal=operator,
+operator_consent=true; отказ -> goal=operator, operator_consent=false; вопрос,
+смена темы или неуверенность -> operator_consent=null и выбери фактический goal.
+В этом сценарии не заполняй selected_option_name, requested_facts или constraints_delta,
+если клиент не дал отдельного содержательного запроса.
+
 Few-shot examples:
 1) user: "подбери двушку до 18 млн у метро" -> {"schema_version":3,"goal":"new_search","viewpoint":"life","selected_option_name":null,"named_object_reference":null,"comparison_option_names":[],"requested_facts":[],"constraints_delta":{"hard":{"rooms":2,"max_price":18000000,"metro":true}},"operator_consent":null,"explicit_operator_request":false,"clarification":null,"confidence":0.95}
 2) context: есть текущий список; user: "теперь до 15 млн" -> {"schema_version":3,"goal":"refine_search","viewpoint":"unchanged","selected_option_name":null,"named_object_reference":null,"comparison_option_names":[],"requested_facts":[],"constraints_delta":{"hard":{"max_price":15000000}},"operator_consent":null,"explicit_operator_request":false,"clarification":null,"confidence":0.95}
@@ -255,6 +263,8 @@ FOLLOWUP_INTENT_PROMPT = """
 Правила:
 - Ты НЕ пишешь клиентский ответ. Для intent=consultation_answer, conversation_answer, recommend_options, compare_selected, operator_for_selected поле clarification_question всегда пустая строка. Это поле нужно только для clarify/clarify_negation, когда без уточнения нельзя выбрать действие.
 - "да", "нет", "наверное", "возможно", "хочу" всегда понимай через last_bot_question и last_offer_type.
+- Если во входе есть last_offer, сначала разреши текущую реплику относительно него. last_offer.subject_name — единственный допустимый предмет для короткого подтверждения; last_offer.action и last_offer.requested_facts определяют продолжение. Не заменяй last_offer на весь список visible_options.
+- Если last_offer отсутствует или его subject_name пуст при нескольких visible_options, короткое подтверждение не выбирает объект: верни clarify с одним коротким вопросом.
 - Если последний вопрос был про сравнение, согласие означает compare_selected, отказ — reject_offer.
 - Если последний вопрос был про оператора, согласие означает operator_for_selected, отказ — reject_offer.
 - Если последний вопрос был про оператора, согласие означает operator_for_selected, отказ от звонка/оператора/номера — reject_operator или reject_phone.
@@ -316,6 +326,11 @@ DIALOG_STATE_PLANNER_PROMPT = """
 }
 
 Разрешённые словари приходят во входе: allowed_subjects, allowed_facts, subject_fact_map, dynamic_fields. Используй только их значения.
+
+Контекст последнего предложения:
+- Если во входе есть state.last_offer, сначала разреши текущую реплику относительно него.
+- last_offer.subject_name — единственный допустимый предмет короткого подтверждения; last_offer.action и last_offer.requested_facts определяют продолжение.
+- Не заменяй last_offer на весь список visible_options. Если last_offer отсутствует или его subject_name пуст при нескольких visible_options, короткое подтверждение не выбирает объект: верни clarification.
 
 Домены:
 - domain_relation="in_domain" — клиент говорит про квартиру, новостройку, подбор, ЖК, оплату, локацию или следующий шаг по текущему подбору.
@@ -517,6 +532,7 @@ SEMANTIC_OPERATIONS = {"search", "current_options", "select_option", "operator_c
 SEMANTIC_KEYS = {
     "goal", "operation", "intent", "response_viewpoint", "constraints_delta", "reference", "scope", "confidence",
     "clarification", "facets", "operator_contact", "missing_fields", "followup_outcome",
+    "operator_consent",
     "resolved_subject", "resolved_intent", "requested_facts", "facts_needed", "requires_enrichment", "focus_action", "domain_relation",
     "named_object_reference", "requests_new_objects", "refers_to_existing_objects",
 }
@@ -664,6 +680,7 @@ def _normalize_semantic_plan(data: dict[str, Any]) -> dict[str, Any]:
         "missing_fields": list(result.facts_needed),
         "semantic_valid": not result.errors,
         "semantic_errors": list(result.errors),
+        "operator_consent": result.operator_consent,
     })
     if result.raw_legacy_operation:
         semantic["operation"] = result.raw_legacy_operation
@@ -695,6 +712,12 @@ def _derive_canonical_from_semantic(semantic: dict[str, Any], state: dict[str, A
     confidence = float(semantic.get("confidence") or 0.0)
     clarification = str(semantic.get("clarification") or "").strip()
     operator_contact = semantic.get("operator_contact") if isinstance(semantic.get("operator_contact"), dict) else {"requested": False, "consent": "none"}
+    direct_consent = semantic.get("operator_consent")
+    if isinstance(direct_consent, bool):
+        operator_contact = {
+            "requested": True,
+            "consent": "granted" if direct_consent else "refused",
+        }
     missing_fields = list(decision.facts_needed)
 
     canonical = _default_canonical_plan(reason=str(semantic.get("reason") or ""))

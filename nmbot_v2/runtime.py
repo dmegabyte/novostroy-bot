@@ -67,8 +67,14 @@ class TurnProcessor:
         response_text = deterministic_text
         response_meta = {"used": False, "reason": "deterministic_renderer"}
         manager_rewriter_meta = {"used": False, "reason": "off"}
+        rewrite_allowed = accepted_state and decision.action not in {TurnAction.RESET, TurnAction.ACCEPT_OPERATOR}
+        rewrite_skip_reason = (
+            "transition_rejected" if not accepted_state
+            else "reset_turn" if decision.action == TurnAction.RESET
+            else "ineligible_response_goal"
+        )
         mode = _response_composer_mode(self.response_composer_mode)
-        if self.response_composer and mode in {"shadow", "publish"}:
+        if self.response_composer and mode in {"shadow", "publish"} and rewrite_allowed:
             response_meta = await self._compose_response_once(
                 mode=mode,
                 stage=decision.stage,
@@ -83,8 +89,16 @@ class TurnProcessor:
                 response_text = str(response_meta.pop("text"))
             else:
                 response_meta.pop("text", None)
+        elif self.response_composer and mode in {"shadow", "publish"}:
+            response_meta = {
+                "mode": mode,
+                "used": False,
+                "published": False,
+                "status": "skipped",
+                "reason": rewrite_skip_reason,
+            }
         manager_mode = _response_composer_mode(self.manager_rewriter_mode)
-        if self.manager_rewriter and manager_mode in {"shadow", "publish"} and decision.action != TurnAction.RESET:
+        if self.manager_rewriter and manager_mode in {"shadow", "publish"} and rewrite_allowed:
             manager_rewriter_meta = await self._rewrite_manager_once(
                 mode=manager_mode,
                 stage=decision.stage,
@@ -104,19 +118,32 @@ class TurnProcessor:
                 response_text = _v5_operator_offer_fallback(context.user_text)
                 manager_rewriter_meta["operator_offer_fallback"] = True
             if manager_mode == "publish" and manager_rewriter_meta.get("operator_offer"):
-                delta = replace(delta, operator_offered=True)
+                # A published V5 offer must carry the same typed follow-up
+                # state as any other operator consent CTA.  The next short
+                # client reply is therefore routed through the planner's
+                # operator_consent scenario, never inferred from prose.
+                delta = replace(delta, operator_offered=True, pending_followup=delta.pending_followup or "contact_name", contact_consent=False)
         elif self.manager_rewriter and manager_mode in {"shadow", "publish"}:
             manager_rewriter_meta = {
                 "mode": manager_mode,
                 "used": False,
                 "published": False,
                 "status": "skipped",
-                "reason": "reset_turn",
+                "reason": rewrite_skip_reason,
             }
         response_text = _temporary_strip_repeated_finance_unknown_sentence(response_text)
         response_done_at = time.monotonic()
         if accepted_state:
-            delta = self._finalize_delta(delta, context, response_text, response_plan.answer_kind)
+            delta = self._finalize_delta(
+                delta,
+                context,
+                response_text,
+                response_plan.answer_kind,
+                stage=decision.stage,
+                plan=plan,
+                response_plan=response_plan,
+                state=state,
+            )
         new_state = apply_state_delta(state, delta, accepted=accepted_state)
         timing_ms = {
             "planner": round((planner_done_at - started_at) * 1000),
@@ -389,7 +416,13 @@ class TurnProcessor:
                     state.enriched_card_cache,
                     tuple(getattr(self.search_service, "last_shortlist_cache_entries", ())),
                 ) if tuple(getattr(self.search_service, "last_shortlist_cache_entries", ())) else None,
-                clear_fields=("retry_search",),
+                clear_fields=(
+                    "retry_search",
+                    "selected_option_name",
+                    "selected_enriched",
+                    "pending_followup",
+                    "last_offer",
+                ),
             )
         if action == TurnAction.ANSWER_SELECTED_OPTION:
             params_update = normalize_constraints_delta(plan.constraints_delta)
@@ -456,7 +489,18 @@ class TurnProcessor:
             return pending_delta_for_action(action, state)
         return StateDelta()
 
-    def _finalize_delta(self, delta: StateDelta, context: SafeTurnContext, response_text: str, answer_kind: str) -> StateDelta:
+    def _finalize_delta(
+        self,
+        delta: StateDelta,
+        context: SafeTurnContext,
+        response_text: str,
+        answer_kind: str,
+        *,
+        stage: Stage,
+        plan: TurnPlan,
+        response_plan: Any,
+        state: ConversationState,
+    ) -> StateDelta:
         question = response_text.split("?")[-2].split("\n")[-1].strip() + "?" if "?" in response_text else None
         return replace(
             delta,
@@ -464,9 +508,65 @@ class TurnProcessor:
             append_dialogue_turn={"user": context.user_text, "assistant": response_text},
             last_assistant_question=question,
             last_answer_kind=answer_kind,
+            last_offer=_last_offer_for_response(
+                stage=stage,
+                plan=plan,
+                response_plan=response_plan,
+                delta=delta,
+                state=state,
+                question=question,
+            ),
             already_asked_add=(question,) if question else (),
             answered_add=(answer_kind,),
         )
+
+
+def _last_offer_for_response(
+    *,
+    stage: Stage,
+    plan: TurnPlan,
+    response_plan: Any,
+    delta: StateDelta,
+    state: ConversationState,
+    question: str | None,
+) -> dict[str, Any]:
+    """Build a typed continuation contract for the next user turn.
+
+    This is derived from the runtime plan, not from keywords in the client
+    message.  A missing subject is intentional: the planner must clarify when
+    a response refers to a list rather than one uniquely selected object.
+    """
+    if not question:
+        return {}
+
+    recipe_id = str(getattr(response_plan, "recipe_id", "") or "")
+    requested = tuple(dict.fromkeys(str(item) for item in (*plan.requested_facts, *plan.facts_needed) if str(item).strip()))
+    if delta.reset or "selected_option_name" in delta.clear_fields:
+        subject_name = ""
+    else:
+        subject_name = str(delta.selected_option_name or state.selected_option_name or "").strip()
+    subject_is_known = bool(subject_name and (state.find_visible_option(subject_name) or delta.selected_option_name))
+
+    if recipe_id in {"selected_live_fact_check", "selected_fact_not_confirmed"}:
+        action = "verify_selected_live_facts"
+    elif recipe_id.startswith("selected_"):
+        action = "show_selected_details"
+    elif stage in {Stage.FIRST_LIST, Stage.REFINEMENT, Stage.CURRENT_OPTIONS}:
+        action = "choose_option"
+    elif recipe_id in {"operator_handoff_name_capture", "operator_handoff_phone_capture"}:
+        action = "collect_contact"
+    else:
+        action = "continue_dialogue"
+
+    return {
+        "action": action,
+        "subject_type": "visible_option" if subject_is_known else "current_options",
+        "subject_name": subject_name if subject_is_known else "",
+        "requested_facts": list(requested),
+        "scope": "one" if subject_is_known else "all",
+        "question": question[:500],
+        "recipe_id": recipe_id,
+    }
 
 async def _maybe_await(value: Any) -> Any:
     if inspect.isawaitable(value):

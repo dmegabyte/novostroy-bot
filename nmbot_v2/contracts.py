@@ -513,6 +513,7 @@ class StateDelta:
     enriched_card_cache: tuple[Any, ...] | None = None
     last_assistant_question: str | None = None
     last_answer_kind: str | None = None
+    last_offer: JsonDict | None = None
     already_asked_add: tuple[str, ...] = ()
     answered_add: tuple[str, ...] = ()
     contact_name: str | None = None

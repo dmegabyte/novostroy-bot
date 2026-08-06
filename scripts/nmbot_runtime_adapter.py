@@ -26,7 +26,7 @@ from nmbot_v2.pair_comparison import execute_pair_comparison
 from nmbot_v2.response_composer import compose_response_writer_formatter_async, formatter_request_payload as build_response_formatter_payload, v3_answer_writer_prompt_identity, v3_answer_writer_request_payload as build_v3_answer_writer_payload, writer_request_payload as build_response_writer_payload
 from nmbot_v2.pending import is_pending_contact_name, is_pending_contact_phone
 from nmbot_v2.prompt_provenance import build_prompt_provenance, identity_from_text, merge_prompt_provenance, sanitize_prompt_provenance
-from nmbot_v2.scenario_recipes import FINANCING_CONSENT_FOLLOWUP, SELECTED_LIVE_FACT_CONSENT_FOLLOWUP, reply_contract_for_pending
+from nmbot_v2.scenario_recipes import FINANCING_CONSENT_FOLLOWUP, OPERATOR_CONSENT_FOLLOWUP, SELECTED_LIVE_FACT_CONSENT_FOLLOWUP, reply_contract_for_pending
 from nmbot_v2.search_enrichment import _filter_option_lot_examples, enrich_search_result_top_options, fetch_enriched_option_v2, merge_option_cards
 from nmbot_v2.search_contract import ALLOWED_PREFERENCES, HARD_KEYS, SEARCH_MODEL, build_request_data as build_v2_search_request_data
 from nmbot_v2.search_contract import MCP_ALIAS, available_fact_fields, build_candidate_retrieval_request, build_search_request, is_candidate_retrieval_request, load_prompt as load_v2_search_prompt, normalize_search_output, parse_strict_json, validate_search_output
@@ -1406,6 +1406,21 @@ async def _run_v2_authoritative(
             )
             should_save_failure_state = True
         if result.action == TurnAction.SEARCH:
+            failure_state = apply_state_delta(
+                failure_state,
+                StateDelta(
+                    clear_fields=(
+                        "selected_option_name",
+                        "selected_enriched",
+                        "last_offer",
+                    ),
+                ),
+            )
+            if not is_recoverable_search_failure:
+                failure_state = apply_state_delta(
+                    failure_state,
+                    StateDelta(clear_fields=("pending_followup",)),
+                )
             failure_state = _state_with_failed_search_retry(failure_state, result, answer)
             should_save_failure_state = True
         if is_recoverable_search_failure:
@@ -1420,7 +1435,7 @@ async def _run_v2_authoritative(
             "intent": "safe_upstream_fallback",
             "awaiting_phone": False,
             "handoff_to_operator": False,
-            "selected_option": v2_state.selected_option_name,
+            "selected_option": failure_state.selected_option_name,
             "buttons": [],
             "meta": {"channel": channel, "runtime": runtime_version, **({"engine": engine_version} if engine_version else {}), "trace": _safe_trace(result)},
         }
@@ -1499,12 +1514,23 @@ class _SemanticPlannerAdapter:
             session,
             **planner_kwargs,
         )
-        self.last_planner_plan = dict(plan) if isinstance(plan, dict) else {}
-        normalized = normalize_semantic_planner_result(plan if isinstance(plan, dict) else {}, available_fact_fields=ALLOWED_FACTS)
+        plan_dict = dict(plan) if isinstance(plan, dict) else {}
+        self.last_planner_plan = plan_dict
+        if "canonical_valid" in plan_dict and "action" in plan_dict:
+            if plan_dict.get("canonical_valid") is False:
+                self.last_planner_plan["semantic_adapter_route"] = "canonical_direct"
+                return _inherit_selected_scope(
+                    SemanticPlan(operation="freeform", confidence=0.0, clarification=str(plan_dict.get("clarification") or "") or None),
+                    state,
+                )
+            self.last_planner_plan["semantic_adapter_route"] = "canonical_direct"
+            return _inherit_selected_scope(_semantic_plan_from_planner(plan_dict, query_text=context.user_text), state)
+        self.last_planner_plan["semantic_adapter_route"] = "legacy_compat"
+        normalized = normalize_semantic_planner_result(plan_dict, available_fact_fields=ALLOWED_FACTS)
         normalized = _keep_transition_accepted_legacy_operation(normalized, plan if isinstance(plan, dict) else {})
         normalized = _drop_legacy_search_reference(normalized, plan if isinstance(plan, dict) else {})
         decision = derive_runtime_decision(normalized, planner_state)
-        semantic = _semantic_plan_from_semantic_result(normalized, decision, plan if isinstance(plan, dict) else {}, query_text=context.user_text)
+        semantic = _semantic_plan_from_semantic_result(normalized, decision, plan_dict, query_text=context.user_text)
         return _inherit_selected_scope(semantic, state)
 
 
@@ -2409,7 +2435,12 @@ def _inherit_selected_scope(plan: TurnPlan, state: ConversationState) -> TurnPla
 
 
 def _pending_scenario_for_planner(state: ConversationState) -> dict[str, Any] | None:
-    contract = reply_contract_for_pending(state.pending_followup)
+    pending_key = state.pending_followup
+    contract = (
+        reply_contract_for_pending(OPERATOR_CONSENT_FOLLOWUP)
+        if pending_key == "contact_name" and not state.contact_consent
+        else reply_contract_for_pending(pending_key)
+    )
     if contract is None:
         return None
     selected = str(state.selected_option_name or (state.selected_enriched.name if state.selected_enriched else "") or "").strip()
@@ -2566,6 +2597,7 @@ def _legacy_to_v2_state(state: dict[str, Any]) -> ConversationState:
         "recent_turns": _safe_recent_turns(state, {}),
         "last_assistant_question": _redact(str(state.get("last_bot_question") or ""))[:1000] or None,
         "last_answer_kind": _redact(str(state.get("last_answer_kind") or ""))[:120] or None,
+        "last_offer": _safe_nested(state.get("last_offer") or {}),
         "operator_declined": bool(state.get("operator_declined")),
         "contact_name": legacy_contact_name,
         "contact_consent": bool(legacy_callback_ref),
@@ -2599,6 +2631,7 @@ def _v2_to_planner_legacy_state(state: ConversationState) -> dict[str, Any]:
         "last_response_text": last_response_text,
         "last_bot_question": state.last_assistant_question or "",
         "last_answer_kind": state.last_answer_kind or "",
+        "last_offer": to_jsonable(state.last_offer),
         "current_options_scope": "one" if state.selected_option_name else "all" if visible else "unknown",
         "dialog_focus": to_jsonable(state.dialog_focus),
         "selected_object": _selected_object_context(state),
@@ -2610,7 +2643,7 @@ def _safe_v2_state_dict(data: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "params", "pending_followup", "selected_option_name", "visible_options", "previous_options",
         "last_search", "operator_offered", "operator_declined", "active_topic", "dialog_focus", "selected_enriched", "enriched_card_cache",
-        "recent_turns", "dialogue_turns", "last_assistant_question", "last_answer_kind", "already_asked", "answered",
+        "recent_turns", "dialogue_turns", "last_assistant_question", "last_answer_kind", "last_offer", "already_asked", "answered",
         "contact_name", "contact_phone_redacted", "contact_consent", "callback_ref", "retry_search",
     }
     return {key: _safe_nested(value) for key, value in data.items() if key in allowed}
@@ -2692,16 +2725,18 @@ def _try_capture_contact(
     if not (pending_name or pending_phone):
         return None
     if pending_name:
-        # A pending name must not swallow a reply to the preceding operator
-        # offer. Let the semantic planner resolve explicit consent/decline.
-        if _is_operator_consent_reply_v2(text) and not contact_consent:
-            return None
+        # A pending name must not decide the meaning of the preceding operator
+        # offer locally. Let the single semantic planner resolve consent,
+        # decline, a new question, or an actual name from the structured
+        # operator-consent scenario.
         phone = _extract_phone_v2(text)
         if phone:
             _save_v2_contact_draft(app, user_id=user_id, phone=phone, event_id=str(meta.get("event_id") or ""))
             next_state = state if isinstance(state, ConversationState) else replace(state, pending_action="contact_name")
             public = _public_callback_result("Номер сохранила. Напишите, пожалуйста, как к вам обращаться.", "collect_contact_name", False, next_state, runtime_version=runtime_version, engine_version=engine_version)
             return {"state": next_state, "public": public}
+        if not contact_consent and bool(getattr(state, "operator_offered", False)):
+            return None
         name = _safe_contact_name_v2(text)
         if not name:
             if contact_consent and _is_operator_consent_reply_v2(text):

@@ -88,6 +88,7 @@ class ConversationState:
     dialogue_turns: tuple[dict[str, str], ...] = ()
     last_assistant_question: str | None = None
     last_answer_kind: str | None = None
+    last_offer: dict[str, Any] = field(default_factory=dict)
     already_asked: tuple[str, ...] = ()
     answered: tuple[str, ...] = ()
     contact_name: str | None = None
@@ -124,6 +125,7 @@ class ConversationState:
             dialogue_turns=tuple(_redact_turn(x) for x in dialogue_turns),
             last_assistant_question=data.get("last_assistant_question"),
             last_answer_kind=data.get("last_answer_kind"),
+            last_offer=dict(data.get("last_offer") or {}) if isinstance(data.get("last_offer"), Mapping) else {},
             already_asked=tuple(data.get("already_asked", [])),
             answered=tuple(data.get("answered", [])),
             contact_name=data.get("contact_name"),
@@ -176,6 +178,8 @@ def apply_state_delta(state: ConversationState, delta: StateDelta, *, accepted: 
                 return ()
             if isinstance(current, bool):
                 return False
+            if isinstance(current, dict):
+                return {}
             return None
         return new_value if new_value is not None else current
 
@@ -223,6 +227,7 @@ def apply_state_delta(state: ConversationState, delta: StateDelta, *, accepted: 
         dialogue_turns=dialogue,
         last_assistant_question=keep_or(delta.last_assistant_question, state.last_assistant_question, "last_assistant_question"),
         last_answer_kind=keep_or(delta.last_answer_kind, state.last_answer_kind, "last_answer_kind"),
+        last_offer=keep_or(delta.last_offer, state.last_offer, "last_offer"),
         already_asked=already_asked,
         answered=answered,
         contact_name=keep_or(delta.contact_name, state.contact_name, "contact_name"),

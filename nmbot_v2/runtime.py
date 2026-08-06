@@ -122,7 +122,13 @@ class TurnProcessor:
                 # state as any other operator consent CTA.  The next short
                 # client reply is therefore routed through the planner's
                 # operator_consent scenario, never inferred from prose.
-                delta = replace(delta, operator_offered=True, pending_followup=delta.pending_followup or "contact_name", contact_consent=False)
+                delta = replace(
+                    delta,
+                    operator_offered=True,
+                    pending_followup=delta.pending_followup or "contact_name",
+                    contact_consent=False,
+                    clear_fields=tuple(field for field in delta.clear_fields if field != "pending_followup"),
+                )
         elif self.manager_rewriter and manager_mode in {"shadow", "publish"}:
             manager_rewriter_meta = {
                 "mode": manager_mode,

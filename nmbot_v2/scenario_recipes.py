@@ -66,6 +66,7 @@ class ResolvedRecipe:
 
 FINANCING_CONSENT_FOLLOWUP = "financing_consent"
 SELECTED_LIVE_FACT_CONSENT_FOLLOWUP = "selected_live_fact_consent"
+OPERATOR_CONSENT_FOLLOWUP = "operator_consent"
 CONTACT_NAME_FOLLOWUP = "contact_name"
 CONTACT_PHONE_FOLLOWUP = "contact_phone"
 
@@ -74,6 +75,17 @@ _LIVE_FACT_FORBIDDEN = ("наличие квартиры", "бронь", "эта
 
 
 REPLY_CONTRACTS: dict[str, ReplyContractSpec] = {
+    OPERATOR_CONSENT_FOLLOWUP: ReplyContractSpec(
+        id=OPERATOR_CONSENT_FOLLOWUP,
+        allowed_outcomes=("accept", "decline", "ask_or_clarify", "unexpected"),
+        planner_context={"offered_action": "collect_contact_phone"},
+        outcome_transitions={
+            "accept": OutcomeTransition(Stage.OPERATOR_HANDOFF, TurnAction.ACCEPT_OPERATOR, "operator_handoff_phone_capture", clear_pending=True),
+            "decline": OutcomeTransition(Stage.OPERATOR_DECLINED, TurnAction.DECLINE_OPERATOR, "selected_live_fact_declined", clear_pending=True),
+            "ask_or_clarify": OutcomeTransition(Stage.OPERATOR_HANDOFF, TurnAction.OFFER_OPERATOR, "operator_handoff_name_capture", next_pending=OPERATOR_CONSENT_FOLLOWUP),
+            "unexpected": OutcomeTransition(Stage.OPERATOR_HANDOFF, TurnAction.OFFER_OPERATOR, "operator_handoff_name_capture", next_pending=OPERATOR_CONSENT_FOLLOWUP),
+        },
+    ),
     CONTACT_NAME_FOLLOWUP: ReplyContractSpec(
         id=CONTACT_NAME_FOLLOWUP,
         allowed_outcomes=("resume_contact",),

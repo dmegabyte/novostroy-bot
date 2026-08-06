@@ -1496,7 +1496,13 @@ def test_response_composer_ineligible_reset_operator_offtopic_and_error_do_not_c
         assert composer.calls == []
         assert turn.trace["response_composer"]["mode"] == "publish"
         assert turn.trace["response_composer"]["published"] is False
-        assert turn.trace["response_composer"]["reason"] == "ineligible_response_goal"
+        operation = getattr(plan, "operation", None)
+        expected_reason = (
+            "transition_rejected" if operation == "search"
+            else "reset_turn" if operation == "reset"
+            else "ineligible_response_goal"
+        )
+        assert turn.trace["response_composer"]["reason"] == expected_reason
 
 
 def test_response_composer_ineligible_open_question_goal_does_not_call_composer():

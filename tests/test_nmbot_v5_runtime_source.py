@@ -150,6 +150,8 @@ def test_v5_processor_publishes_third_turn_offer_and_persists_once() -> None:
     assert "менеджер" in turn.response_text.lower()
     assert turn.trace["manager_rewriter"]["operator_offer"] is True
     assert turn.state["operator_offered"] is True
+    assert turn.state["pending_followup"] == "contact_name"
+    assert turn.state["contact_consent"] is False
 
 
 def test_v5_processor_timeout_uses_offer_fallback_without_false_success() -> None:

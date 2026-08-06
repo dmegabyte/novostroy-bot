@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from .contracts import IntentGoal, IntentPlanV3
 from .fact_context import ALLOWED_FACTS, ALLOWED_SUBJECTS, FOCUS_ACTIONS, normalize_facts as normalize_semantic_facts, normalize_focus_action, normalize_subject
+from .pending import pending_state
 from .state import ConversationState
 
 
@@ -74,6 +75,7 @@ class SemanticPlannerResult:
     reason: str = ""
     errors: tuple[str, ...] = ()
     raw_legacy_operation: str | None = None
+    operator_consent: bool | str = BOOL_UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -159,6 +161,14 @@ def validate_intent_plan_v3(
                 errors.append("comparison_option_fields_conflict")
             if any(state.find_visible_option(name) is None for name in plan.comparison_option_names):
                 errors.append("comparison_option_not_visible")
+
+    # A refinement changes the current search constraints; it is not a new
+    # selection of the already visible object.  Models occasionally echo the
+    # selected object together with a valid refinement (for example,
+    # "двухкомнатную" after a ЖК was selected).  Normalize that stable
+    # structural conflict instead of failing the whole turn.
+    if plan.goal == IntentGoal.REFINE_SEARCH and plan.selected_option_name and plan.constraints_delta:
+        plan = replace(plan, selected_option_name=None)
 
     if plan.goal == IntentGoal.ANSWER_SELECTED:
         if not plan.selected_option_name or state.find_visible_option(plan.selected_option_name) is None:
@@ -493,6 +503,20 @@ def normalize_semantic_planner_result(
         errors.append("unsupported_subject")
     focus_action = normalize_focus_action(data.get("focus_action"))
     domain_relation = normalize_domain_relation(data.get("domain_relation"))
+    operator_consent = normalize_bool_unknown(data.get("operator_consent"))
+    operator_contact = data.get("operator_contact") if isinstance(data.get("operator_contact"), dict) else {}
+    if operator_consent == BOOL_UNKNOWN:
+        nested_consent = str(operator_contact.get("consent") or "").strip().lower()
+        if nested_consent == "granted":
+            operator_consent = True
+        elif nested_consent == "refused":
+            operator_consent = False
+    user_goal = str(data.get("user_goal") or data.get("goal") or data.get("reason") or "").strip()
+    if user_goal == "" and operator_consent != BOOL_UNKNOWN and (
+        operator_contact.get("requested") is True
+        or str(operator_contact.get("consent") or "").strip().lower() in {"granted", "refused"}
+    ):
+        user_goal = "operator"
     try:
         confidence = float(data.get("confidence") if data.get("confidence") is not None else 0.0)
     except (TypeError, ValueError):
@@ -538,7 +562,7 @@ def normalize_semantic_planner_result(
     errors.extend(f"unsupported_scenario_need:{need}" for need in dropped_needs)
 
     return SemanticPlannerResult(
-        user_goal=str(data.get("user_goal") or data.get("goal") or data.get("reason") or "").strip(),
+        user_goal=user_goal,
         refers_to_existing_objects=refers,
         requests_new_objects=requests_new,
         selected_reference=selected_reference,
@@ -560,6 +584,7 @@ def normalize_semantic_planner_result(
         reason=str(data.get("reason") or "").strip(),
         errors=tuple(sorted(set(errors))),
         raw_legacy_operation=legacy_operation,
+        operator_consent=operator_consent,
     )
 
 
@@ -610,6 +635,35 @@ def derive_runtime_decision(semantic: SemanticPlannerResult, state: dict[str, An
             constraints_patch=empty_constraints(), facts_needed=(), requested_facts=semantic.requested_facts,
             resolved_subject=semantic.resolved_subject, resolved_intent=semantic.resolved_intent, focus_action=semantic.focus_action, clarification=clarification,
             confidence=semantic.confidence, reason=semantic.reason, errors=tuple(sorted(set(errors))),
+        )
+
+    if semantic.operator_consent != BOOL_UNKNOWN:
+        pending = pending_state(
+            (state or {}).get("pending_followup") if isinstance(state, dict) else None,
+            contact_consent=bool((state or {}).get("contact_consent")) if isinstance(state, dict) else False,
+        )
+        consent_pending = bool(pending and pending.is_operator_consent)
+        operator_goal = semantic.user_goal in {"operator", "resume_pending"} or semantic.raw_legacy_operation in {"operator", "operator_contact"}
+        legacy_operator = semantic.raw_legacy_operation in {"operator", "operator_contact"}
+        if not operator_goal or (not legacy_operator and not consent_pending):
+            errors.append("invalid_operator_consent_scope")
+            return DerivedPlannerDecision(
+                action="recover_dialogue", target="none", search_policy="forbidden", scope="unknown",
+                selected_option_name=None, needs_search=False, needs_enrichment=False, context_source="dialogue",
+                dialog_action="ask_clarification", search_profile="none", intent=intent, intent_policy="keep",
+                constraints_patch=empty_constraints(), facts_needed=(), requested_facts=semantic.requested_facts,
+                resolved_subject=semantic.resolved_subject, resolved_intent=semantic.resolved_intent, focus_action=semantic.focus_action,
+                clarification=clarification, confidence=semantic.confidence, reason=semantic.reason,
+                errors=tuple(sorted(set(errors))), domain_relation=semantic.domain_relation,
+            )
+        return DerivedPlannerDecision(
+            action="operator_contact", target="operator", search_policy="forbidden", scope="unknown",
+            selected_option_name=None, needs_search=False, needs_enrichment=False, context_source="dialogue",
+            dialog_action="operator_live_check", search_profile="none", intent=intent, intent_policy=intent_policy,
+            constraints_patch=empty_constraints(), facts_needed=semantic.facts_needed, requested_facts=semantic.requested_facts,
+            resolved_subject=semantic.resolved_subject, resolved_intent=semantic.resolved_intent, focus_action=semantic.focus_action,
+            clarification=clarification, confidence=semantic.confidence, reason=semantic.reason,
+            errors=tuple(errors), domain_relation=semantic.domain_relation,
         )
 
     if legacy in {"current_options", "select_option"}:

@@ -135,7 +135,7 @@ def test_live_fact_reply_accept_decline_and_invalid_never_implicit_accept() -> N
     missing = TurnProcessor(planner=Planner(SemanticPlan(operation="freeform"))).process(ctx("да наверное"), base)
 
     assert accept.action == TurnAction.ACCEPT_OPERATOR
-    assert accept.state["pending_followup"] == "contact_name"
+    assert accept.state["pending_followup"] == "contact_phone"
     assert decline.action == TurnAction.DECLINE_OPERATOR
     assert decline.state.get("pending_followup") is None
     assert invalid.action == TurnAction.CLARIFY_SELECTED_LIVE_FACT

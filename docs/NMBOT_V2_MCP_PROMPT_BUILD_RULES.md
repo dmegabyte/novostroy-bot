@@ -139,6 +139,13 @@ preferences и routing/state decisions. Runtime собирает их после
 
 Наличие названий ЖК при contract errors не является PASS.
 
+Read-only probe `scripts/nmbot_v2_search_mcp_probe.py` в режиме `--diagnose`
+может дополнительно вывести bounded `inventory_evidence`: число найденных
+`ads`-записей и число записей с буквальными `state=2`/`status=2`. Это только
+диагностическая сводка нормализованного MCP-output; она не публикуется клиенту,
+не доказывает глобальное отсутствие квартир и не заменяет exact lot enrichment
+или live availability check.
+
 ## Source refs
 
 - `prompts/v2_search_mcp.txt`

@@ -119,6 +119,15 @@ State хранит техническую память диалога:
   "selected_option": null,
   "awaiting_phone": false,
   "last_offer_type": null,
+  "last_offer": {
+    "action": null,
+    "subject_type": null,
+    "subject_name": null,
+    "requested_facts": [],
+    "scope": null,
+    "question": null,
+    "recipe_id": null
+  },
   "last_answer_kind": null,
   "operator_context": null
 }

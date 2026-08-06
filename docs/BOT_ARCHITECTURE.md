@@ -278,6 +278,15 @@ MCP не дал парк → бот всё равно пишет “рядом �
   "visible_options": [],
   "selected_option": null,
   "last_offer_type": null,
+  "last_offer": {
+    "action": null,
+    "subject_type": null,
+    "subject_name": null,
+    "requested_facts": [],
+    "scope": null,
+    "question": null,
+    "recipe_id": null
+  },
   "last_answer_kind": null,
   "awaiting_phone": false,
   "search_model": "google/gemini-3.1-flash-lite-preview",
@@ -298,7 +307,15 @@ MCP не дал парк → бот всё равно пишет “рядом �
 | `selected_option` | ЖК, который клиент выбрал |
 | `awaiting_phone` | бот ждёт номер телефона |
 | `last_offer_type` | что бот предложил на прошлом шаге |
+| `last_offer` | typed-контракт последнего предложения: действие, предмет, facts, scope и вопрос для разрешения короткого follow-up |
 | `last_answer_kind` | тип прошлого ответа |
+
+`last_offer.subject_name` заполняется только для однозначно известного ЖК/объекта.
+Если последний ответ относится ко всему списку, subject остаётся пустым. После
+`reset`, нового поиска или failed-search fallback старый `last_offer` и старый
+selected subject очищаются; recoverable operator fallback сохраняет только новый
+typed pending-контракт оператора. Planner сначала разрешает короткую реплику
+относительно `last_offer`, а не подменяет её всем `visible_options`.
 
 ## 5. Основной поток первого подбора
 

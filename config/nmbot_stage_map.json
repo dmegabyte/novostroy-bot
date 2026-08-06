@@ -83,7 +83,37 @@
       "prompt": "prompts/v2_response_writer.txt",
       "payload_stage": "conversation_answer_writer",
       "doc": "docs/RESPONSE_MODEL_EVAL.md",
-      "test": "tests/test_nmbot_v2_response_writer_formatter.py"
+      "test": "tests/test_nmbot_v2_response_writer_formatter.py",
+      "development": {
+        "schema": "nmbot.development.v1",
+        "version": 1,
+        "capabilities": [
+          "prompt_candidate",
+          "parameter_overlay",
+          "focused_check",
+          "full_check"
+        ],
+        "check_scope": "v2",
+        "prompt_check": {
+          "kind": "presenter"
+        },
+        "parameter_profile": {
+          "schema": "nmbot.parameter_profile.v1",
+          "version": 1,
+          "parameters": {
+            "model": {
+              "type": "string",
+              "default": "google/gemini-2.5-flash",
+              "max_length": 160,
+              "pattern": "[A-Za-z0-9_.:/@+~-]+"
+            }
+          }
+        },
+        "case_set": {
+          "id": "not-run",
+          "fingerprint": "not-run"
+        }
+      }
     },
     "v2.response_formatter": {
       "purpose": "Optional model formatter attempt inside response composer.",

@@ -1348,7 +1348,7 @@ def _run_namespace(command: str, rest: list[str]) -> int | None:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] in {"-h", "--help"}:
-        print("usage: nmbot.py {check|audit|preflight|diag|diagnose|tools|trace|dialogue|planner|runtime|release|architecture|context|retrieve|navigate|context-gate|docs-gate|memory-registry|memory-outcomes|recipes|explain} [args...]\n")
+        print("usage: nmbot.py {check|audit|preflight|diag|diagnose|tools|trace|dialogue|planner|runtime|release|architecture|context|retrieve|navigate|context-gate|docs-gate|memory-registry|memory-outcomes|experiment|recipes|explain} [args...]\n")
         print("Thin wrapper: delegates by direct argv and preserves exit codes.")
         print("context prints local-only documentation context packs and never runs checks.")
         print("retrieve delegates to scripts/nmbot_retrieval.py for local SQLite FTS candidate cards; optional --source-cards adds navigation context only, for example: retrieve \"finance disclaimer first list\" --term runtime --json.")
@@ -1357,6 +1357,7 @@ def main(argv: list[str] | None = None) -> int:
         print("docs-gate delegates direct argv to scripts/project_documentation_gate.py for local fail-closed documentation update queues; it never edits docs or calls notebooks.")
         print("memory-registry delegates direct argv to scripts/project_memory_registry.py for passive project identity validation/resolution; it does not read sources or call memory tools.")
         print("memory-outcomes delegates direct argv to scripts/project_memory_outcomes.py for passive append-only privacy-safe outcome metadata; hints are disabled by policy.")
+        print("experiment delegates direct argv to scripts/nmbot_experiment.py for local, offline experiment records and checks.")
         print("explain resolves a local/read-only response path via scripts/nmbot_response_path.py, for example: explain, explain --version v2 --json, or explain --path-id jivo.v2.turn.v1 --json.")
         print("recipes overlap runs the explicit local Ollama recipe-overlap analysis command.")
         print("recipes pair RECIPE_A RECIPE_B prints a local-only deterministic Markdown/JSON overlap card.")
@@ -1401,6 +1402,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run([sys.executable, "scripts/project_memory_registry.py", *rest])
     if command == "memory-outcomes":
         return _run([sys.executable, "scripts/project_memory_outcomes.py", *rest])
+    if command == "experiment":
+        return _run([sys.executable, "scripts/nmbot_experiment.py", *rest])
     if command == "explain":
         explain_argv, error = _build_explain_argv(rest)
         if error:

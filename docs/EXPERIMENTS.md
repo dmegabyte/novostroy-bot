@@ -24,7 +24,48 @@
 | `P###` | Версия промпта. Например: `P002` = `CHAT_SYSTEM_PROMPT` от 2026-06-25. | ЧАТИ при изменении текста промпта |
 | `M###` | Версия модели. Например: `M001` = `gemini-3.1-flash-lite-preview`. | ЧАТИ при смене дефолта в коде |
 
-Один эксперимент = одна `H###` + один или несколько `P###/M###`. Лог диалогов в `logs/` привязан к этим ID.
+В журнале один эксперимент рекомендуется связывать с одной `H###` и одним или
+несколькими `P###/M###`; лог диалогов в `logs/` привязывается к этим ID. Текущий
+CLI принимает эти refs необязательно — точная граница описана ниже.
+
+## Локальный declarative experiment workflow
+
+Назначение workflow — локально зафиксировать и проверить декларативное изменение
+эксперимента. Текущий development-profile ограничен stage `v2.response_writer`;
+allowlist содержит только string-параметр `model`.
+
+Каноническая последовательность: `stages → start → diff → check → report → compare`;
+все команды запускаются через `python3 scripts/nmbot.py experiment ...`. Безопасно
+начинать с:
+
+```bash
+python3 scripts/nmbot.py experiment stages --json
+python3 scripts/nmbot.py experiment check ID --dry-run --full --json
+```
+
+`start` сохраняет полные baseline/candidate-копии prompt локально в
+`tmp/nmbot_experiments` по умолчанию; `--store-dir` меняет этот каталог. `diff`
+может показать prompt text с ограниченной redaction. Receipt содержит только
+metadata: raw prompt, payload, output и secrets в него не попадают.
+
+`--hypothesis`, `--prompt-version` и `--model-version` необязательны. CLI не
+генерирует `H/P/M` автоматически: если аргументы не переданы, соответствующие
+поля metadata/receipt сохраняются как `null`. Для traceability рекомендуется
+передавать `H/P/M` вручную.
+
+Точный flow `check`: overlay validation → static-check candidate prompt →
+registered focused pytest → optional registered full scope. Static-check относится
+к candidate prompt. Focused/full checks запускаются только по зарегистрированным
+repository paths/scope: candidate prompt и model overlay не передаются им в argv,
+поэтому эти проверки не доказывают candidate runtime/model behavior. Реальный
+`check` останавливается на первом failure; последующие действия не выполняются.
+`--dry-run` ничего не запускает.
+
+`report` предпочтительно делать после `check`. `checks_not_run` появляется только
+если summaries пусты; после partial failure report не добавляет отдельные skipped
+summaries. Не трактуйте report как полный execution ledger. `compare` сверяет
+только metadata compatibility, hashes и keys параметров, а не семантическое
+качество. Локальные результаты не являются доказательством production/Jivo.
 
 ### Правило ревизии prompt
 

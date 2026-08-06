@@ -68,7 +68,7 @@ may link or redirect here, but should not become duplicate owner docs.
 
 ## 4. Decisions and history
 
-- `planning` [`EXPERIMENTS.md`](EXPERIMENTS.md) — experiment and prompt/model change log.
+- `reference` [`EXPERIMENTS.md`](EXPERIMENTS.md) — owner experiment workflow and prompt/model evidence.
 - `planning` [`NMBOT_PROJECT_SIMPLIFICATION_PLAN.md`](NMBOT_PROJECT_SIMPLIFICATION_PLAN.md) — project simplification plan.
 - `planning` [`MULTI_PROJECT_MEMORY_HARNESS_INTEGRATION_PLAN.md`](MULTI_PROJECT_MEMORY_HARNESS_INTEGRATION_PLAN.md) — multi-project memory/context harness plan.
 - `planning` [`NMBOT_CONTEXT_WORKFLOW_PRODUCTION_ROADMAP.md`](NMBOT_CONTEXT_WORKFLOW_PRODUCTION_ROADMAP.md) — context workflow production roadmap.

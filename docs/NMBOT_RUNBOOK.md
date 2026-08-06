@@ -105,6 +105,21 @@ python scripts/nmbot.py context --pack prompt/rental --human
 
 This command reads `docs/NMBOT_CONTEXT_PACKS.md` and prints required docs/files/checks only. It does not execute checks, deploy, restart, call models/providers/VPS/API/Jivo, or prove production behavior.
 
+### Declarative prompt/model experiments
+
+For the local declarative experiment workflow, first load its context pack and
+inspect the registered stages:
+
+```bash
+python3 scripts/nmbot.py context --pack experiment/local --brief --human
+python3 scripts/nmbot.py experiment stages --json
+```
+
+Then follow `stages → start → diff → check → report → compare` in
+`docs/EXPERIMENTS.md`. This is a local bookkeeping/static-check route, not a
+model evaluation or production/Jivo gate. Candidate prompt/model overlays are not
+applied to registered focused/full checks.
+
 For a manual review of similar recipe semantics, run:
 
 ```bash

@@ -169,6 +169,23 @@
       "expected_field_priorities_include": ["mortgage_calc", "mortgage", "discount", "payment_by_installments", "novos.min_price", "novos.max_price"],
       "also_expected_overlay_preserves": ["location", "district", "ready", "finishing"],
       "shape_assertions": ["financing_base_overlay_explicit", "broad_results_allow_later_enrichment", "missing_for_unconfirmed_scenario_fields", "no_unconfirmed_rate_or_fee"]
+    },
+    {
+      "id": "broad_vlyublino_price_filter_check",
+      "search_goal": {
+        "entity_type": "new_building_flat",
+        "query_summary": "broad flat search where ЖК Влюблино must pass the backend project-price condition",
+        "explicit_terms": ["Влюблино"],
+        "lookup_mode": "exact_named_object"
+      },
+      "response_viewpoint": "rental",
+      "base_viewpoint": null,
+      "search_mode": "broad",
+      "facts_needed": ["lot_examples"],
+      "constraints": {"requested_hard": {}, "effective_hard": {}, "preferences": {}, "relaxation_audit": []},
+      "count": 1,
+      "expected_field_priorities_include": ["ads"],
+      "shape_assertions": ["search_goal_required", "only_allowed_top_level_keys", "no_absence_claim_without_evidence"]
     }
   ]
 }

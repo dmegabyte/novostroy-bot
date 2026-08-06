@@ -68,6 +68,40 @@ def test_build_request_data_includes_prompt_structured_input_model_and_mcp_alias
     assert probe.HARD_EVIDENCE_MAP is probe.core_contract.HARD_EVIDENCE_MAP
 
 
+def test_broad_price_filter_case_keeps_search_mode_and_ads_fact_in_payload() -> None:
+    fixture, scenario = _fixture_and_case("broad_vlyublino_price_filter_check")
+    payload = probe.structured_input(fixture, scenario)
+    query = probe.build_query(fixture, scenario)
+
+    assert payload["search_mode"] == "broad"
+    assert payload["facts_needed"] == ["lot_examples"]
+    assert '"search_mode": "broad"' in query
+    assert '"facts_needed": ["lot_examples"]' in query
+
+
+def test_prompt_scopes_exact_backend_price_condition_to_broad_search() -> None:
+    prompt = probe.load_prompt()
+
+    assert 'Для `search_mode="broad"`' in prompt
+    assert 'n.price_mod="def" and (n.price1>0 or n.price2>0 or n.price3>0 or n.price4>0 or n.price_n>0 or n.price_s>0)' in prompt
+    assert "не доказательство наличия конкретной квартиры" in prompt
+
+
+def test_inventory_evidence_is_bounded_and_does_not_expose_ads() -> None:
+    output = {
+        "facts": [{"ads": [{"id": "secret-1", "state": 2, "status": "2"}, {"state": 2}]}],
+        "near": [{"ads": {"id": "secret-2", "state": 1, "status": 2}}],
+    }
+
+    assert probe._inventory_evidence_summary(output) == {
+        "ads_records": 3,
+        "ads_state_2": 2,
+        "ads_status_2": 2,
+        "ads_state_2_status_2": 1,
+        "structured_ads_evidence_present": True,
+    }
+
+
 def test_parse_strict_json_rejects_markdown_or_trailing_text() -> None:
     parsed, errors = probe.parse_strict_json('{"facts": []}')
     assert parsed == {"facts": []}
@@ -218,6 +252,27 @@ def test_run_live_case_normalizes_failed_family_financing_overlay_diagnostics() 
     assert result["ok"], result["errors"]
 
 
+def test_inventory_evidence_is_emitted_only_in_diagnose_mode() -> None:
+    fixture, scenario = _fixture_and_case("broad_vlyublino_price_filter_check")
+    output = _valid_output(scenario)
+    output["facts"] = [{"id": "lot-1", "name": "Влюблино", "ads": [{"id": "ad-1", "state": 2, "status": 2}]}]
+
+    async def fake_gateway(_request_data, _timeout):
+        return json.dumps(output, ensure_ascii=False), {"ok": True}
+
+    plain = asyncio.run(probe.run_live_case(scenario["id"], timeout=3, gateway_func=fake_gateway))
+    diagnosed = asyncio.run(probe.run_live_case(scenario["id"], timeout=3, diagnose=True, gateway_func=fake_gateway))
+
+    assert "inventory_evidence" not in plain
+    assert diagnosed["inventory_evidence"] == {
+        "ads_records": 1,
+        "ads_state_2": 1,
+        "ads_status_2": 1,
+        "ads_state_2_status_2": 1,
+        "structured_ads_evidence_present": True,
+    }
+
+
 def test_missing_hard_evidence_keeps_item_out_of_exact_facts() -> None:
     fixture, scenario = _fixture_and_case("ready_finishing")
     output = _valid_output(scenario)
@@ -277,7 +332,7 @@ def test_absent_evidence_must_not_be_inventory_absence_claim() -> None:
     assert "absence_claim_without_hard_evidence" in result["errors"]
 
 
-def test_fixture_only_validates_all_15_without_network(monkeypatch) -> None:
+def test_fixture_only_validates_all_16_without_network(monkeypatch) -> None:
     fixture = probe.load_fixture()
     called = False
 
@@ -288,7 +343,7 @@ def test_fixture_only_validates_all_15_without_network(monkeypatch) -> None:
 
     monkeypatch.setattr(probe, "gateway_request", fake_gateway)
     results = [probe.validate_fixture_case(fixture, scenario) for scenario in fixture["scenarios"]]
-    assert len(results) == 15
+    assert len(results) == 16
     assert all(item["ok"] for item in results)
     assert all(item["network"] is False for item in results)
     assert called is False

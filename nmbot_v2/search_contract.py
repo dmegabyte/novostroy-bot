@@ -41,7 +41,7 @@ ALLOWED_PREFERENCES = {
     "infrastructure_preference", "transport_preference", "finance_preference", "sort_hint",
 }
 HARD_KEYS = {"district", "location", "rooms", "max_price", "min_price", "ready", "finishing", "area_min_m2", "area_max_m2"}
-LOT_HARD_KEYS = {"rooms"}
+LOT_HARD_KEYS = {"rooms", "max_price", "min_price", "area_min_m2", "area_max_m2", "ready", "finishing"}
 SENSITIVE_RE = re.compile(r"phone|телефон|email|mail|token|secret|password|client|chat_id|raw|payload", re.I)
 HARD_EVIDENCE_MAP: dict[str, list[str]] = {
     "rooms": ["rooms", "apartment_types.rooms", "ads.rooms"],
@@ -377,7 +377,16 @@ def hard_evidence_requirements(request: V2SearchRequest) -> dict[str, list[str]]
 
 
 def lot_hard_evidence_requirements(request: V2SearchRequest) -> dict[str, list[str]]:
-    return {field: ["ads.rooms"] for field in sorted(request.lot_hard) if field in LOT_HARD_KEYS}
+    evidence = {
+        "rooms": ["ads.rooms"],
+        "max_price": ["ads.fullprice", "ads.price"],
+        "min_price": ["ads.fullprice", "ads.price"],
+        "area_min_m2": ["ads.area"],
+        "area_max_m2": ["ads.area"],
+        "ready": ["ads.ready", "ads.delivered", "ads.state", "ads.status"],
+        "finishing": ["ads.renovation"],
+    }
+    return {field: evidence[field] for field in sorted(request.lot_hard) if field in evidence}
 
 
 def build_request_data(request: V2SearchRequest, *, prompt: str, model: str = SEARCH_MODEL) -> dict[str, Any]:
@@ -496,9 +505,10 @@ def validate_search_output(output: dict[str, Any], request: V2SearchRequest) -> 
             for field, expected in request.effective_hard.items():
                 if not _matches_hard(item, field, expected):
                     errors.append(f"fact_{idx}_violates_hard:{field}")
-            for field, expected in request.lot_hard.items():
-                if not _has_matching_active_lot(item, field, expected):
+            if request.lot_hard and not lot_matches_hard_constraints(item, request.lot_hard):
+                for field in request.lot_hard:
                     errors.append(f"fact_{idx}_violates_lot_hard:{field}")
+                    errors.append(f"fact_{idx}_violates_inventory_gate:{field}")
     allowed_params = set(request.effective_hard) | set(request.preferences)
     extra_params = set(params) - allowed_params
     if extra_params:
@@ -650,8 +660,7 @@ def _sanitize_option_containers(source: Mapping[str, Any], request: V2SearchRequ
         violates_hard = [field for field, expected in request.effective_hard.items() if not _matches_hard(cleaned, field, expected)]
         if violates_hard:
             notes.append("contract_warning:fact_violates_hard_reported")
-        violates_lot_hard = [field for field, expected in request.lot_hard.items() if not _has_matching_active_lot(cleaned, field, expected)]
-        if violates_lot_hard:
+        if request.lot_hard and not lot_matches_hard_constraints(cleaned, request.lot_hard):
             notes.append("contract_warning:fact_violates_lot_hard_reported")
         facts.append(cleaned)
     return facts, near, notes
@@ -1205,17 +1214,36 @@ def _safe_lot_hard(value: Any) -> dict[str, Any]:
     return out
 
 
-def _has_matching_active_lot(item: Mapping[str, Any], field: str, expected: Any) -> bool:
-    if field not in LOT_HARD_KEYS:
+def lot_matches_hard_constraints(item: Mapping[str, Any], lot_hard: Mapping[str, Any] | None) -> bool:
+    """Require one active wire-level ad to prove every lot-scoped constraint."""
+
+    constraints = _safe_lot_hard(lot_hard)
+    if not constraints:
         return False
     ads = item.get("ads")
     rows = [ads] if isinstance(ads, Mapping) else [ad for ad in ads if isinstance(ad, Mapping)] if isinstance(ads, list) else []
     for ad in rows:
         if not _selected_lot_has_valid_id(ad.get("id")):
             continue
-        if not _selected_lot_status_active(ad.get("status")):
+        if not _selected_lot_wire_code_active(ad.get("state")) or not _selected_lot_wire_code_active(ad.get("status")):
             continue
-        if _matches_hard({"rooms": ad.get("rooms")}, field, expected):
+        # Keep matching on the existing canonical hard matcher, but only expose
+        # this one ad as evidence. Project-level ranges must never qualify it.
+        canonical_ad = dict(ad)
+        # LotExample serializes wire ``fullprice`` as ``full_price``; restore
+        # only that structural field for the existing ads price matcher.
+        if "full_price" in canonical_ad and "fullprice" not in canonical_ad:
+            canonical_ad["fullprice"] = canonical_ad["full_price"]
+        ad_evidence = {
+            "rooms": ad.get("rooms"),
+            "ready": ad.get("ready"),
+            "delivered": ad.get("delivered"),
+            "state": ad.get("state"),
+            "status": ad.get("status"),
+            "finishing": ad.get("finishing"),
+            "ads": [canonical_ad],
+        }
+        if all(_matches_hard(ad_evidence, field, expected) for field, expected in constraints.items()):
             return True
     return False
 
@@ -1228,13 +1256,12 @@ def _selected_lot_has_valid_id(lot_id: Any) -> bool:
     return bool(str(lot_id).strip()) and str(lot_id).strip() != "0"
 
 
-def _selected_lot_status_active(status: Any) -> bool:
-    if isinstance(status, bool) or status in (None, ""):
+def _selected_lot_wire_code_active(value: Any) -> bool:
+    if isinstance(value, bool) or value in (None, ""):
         return False
-    if isinstance(status, (int, float)):
-        return int(status) == 2
-    normalized = re.sub(r"[^a-zа-я0-9]+", "_", str(status).strip().casefold().replace("ё", "е")).strip("_")
-    return normalized in {"2", "active", "available", "sale", "in_sale", "on_sale", "for_sale", "в_продаже", "продается"}
+    if isinstance(value, (int, float)):
+        return value == 2
+    return str(value).strip() == "2"
 
 
 def _get_nested(item: Mapping[str, Any], key: str) -> Any:

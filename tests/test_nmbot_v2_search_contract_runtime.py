@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nmbot_v2.contracts import IntentGoal, OptionCard, SafeTurnContext, SemanticPlan, Stage, TurnAction, ExecutableTurn
 from nmbot_v2.constraints import normalize_constraints_delta
-from nmbot_v2.search_contract import HARD_EVIDENCE_MAP, V2SearchRequest, build_candidate_retrieval_request, build_current_options_fact_check_request, build_query, build_search_request, matches_hard_constraint, normalize_and_validate_search_output, normalize_search_output, validate_current_options_fact_check_result, validate_search_output
+from nmbot_v2.search_contract import HARD_EVIDENCE_MAP, V2SearchRequest, build_candidate_retrieval_request, build_current_options_fact_check_request, build_query, build_search_request, lot_matches_hard_constraints, matches_hard_constraint, normalize_and_validate_search_output, normalize_search_output, validate_current_options_fact_check_result, validate_search_output
 from nmbot_v2.state import ConversationState
 from scripts import nmbot_runtime_adapter as runtime_adapter
 
@@ -963,7 +963,7 @@ def test_selected_lot_hard_rooms_accepts_mixed_complex_room_formats_with_matchin
         available_fact_fields=["id", "name", "rooms", "ads"],
     )
     output = _output_for(request)
-    output["facts"] = [{"id": "complex", "name": "Новое Видное", "rooms": "1,3", "ads": [{"id": 1, "rooms": "2", "status": "2"}]}]
+    output["facts"] = [{"id": "complex", "name": "Новое Видное", "rooms": "1,3", "ads": [{"id": 1, "rooms": "2", "state": "2", "status": "2"}]}]
 
     assert validate_search_output(output, request)["ok"]
 
@@ -983,10 +983,6 @@ def test_selected_lot_hard_rooms_rejects_missing_or_invalid_status_ads() -> None
     assert "fact_0_violates_lot_hard:rooms" in validation["errors"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Current contract gap: search_contract.validate_search_output has no inventory gate for lot-scoped price evidence.",
-)
 def test_inventory_gate_rejects_project_price_without_qualifying_ad() -> None:
     # Future owner: nmbot_v2.search_contract.validate_search_output inventory gate.
     # price_mod is project-level metadata, not evidence for a qualifying ad.
@@ -1008,6 +1004,27 @@ def test_inventory_gate_rejects_project_price_without_qualifying_ad() -> None:
 
     assert not validation["ok"]
     assert "fact_0_violates_inventory_gate:max_price" in validation["errors"]
+
+
+def test_lot_hard_requires_one_same_ad_for_rooms_and_price() -> None:
+    ads = {
+        "ads": [
+            {"id": 1, "state": 2, "status": 2, "rooms": 2, "fullprice": 12_000_000},
+            {"id": 2, "state": 2, "status": 2, "rooms": 1, "fullprice": 9_000_000},
+        ]
+    }
+
+    assert not lot_matches_hard_constraints(ads, {"rooms": 2, "max_price": 10_000_000})
+    assert lot_matches_hard_constraints({"ads": [{"id": 3, "state": 2, "status": 2, "rooms": 2, "fullprice": 10_000_000}]}, {"rooms": 2, "max_price": 10_000_000})
+
+
+@pytest.mark.parametrize("ad", [
+    {"id": "", "state": 2, "status": 2, "rooms": 2},
+    {"id": 1, "state": 1, "status": 2, "rooms": 2},
+    {"id": 1, "state": 2, "status": 1, "rooms": 2},
+])
+def test_lot_hard_requires_valid_id_active_state_and_status(ad) -> None:
+    assert not lot_matches_hard_constraints({"ads": [ad]}, {"rooms": 2})
 
 
 def test_selected_followup_phrase_extracts_lot_scoped_rooms_constraint() -> None:

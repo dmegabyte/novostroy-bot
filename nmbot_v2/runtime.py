@@ -908,16 +908,30 @@ def _inventory_gate_runtime_summary(attempts: list[dict[str, Any]]) -> dict[str,
     gate_attempts = [item for item in attempts if item.get("stage") == "broad_inventory_gate"]
     if not gate_attempts:
         return {}
-    first, last = gate_attempts[0], gate_attempts[-1]
+    # A retry/backfill can produce multiple gate attempts. Never combine their
+    # counts: the last complete attempt is the only coherent observation.
+    last = gate_attempts[-1]
     status = str(last.get("status") or "").strip().lower()
     if not isinstance(last.get("enabled"), bool) or status not in {"filtered", "unchanged", "disabled"}:
         return {}
+    try:
+        source_count = int(last.get("source_count"))
+        visible_count = int(last.get("visible_count"))
+        excluded_count = int(last.get("excluded_unqualified_count"))
+    except (TypeError, ValueError):
+        return {}
+    if min(source_count, visible_count, excluded_count) < 0:
+        return {}
+    source_count = min(source_count, 1000)
+    visible_count = min(visible_count, source_count)
+    # Counts are an invariant, not three independently trusted diagnostics.
+    excluded_count = source_count - visible_count
     return {
         "enabled": last["enabled"],
         "status": status,
-        "source_count": _bounded_int(first.get("source_count"), 0, 1000),
-        "visible_count": _bounded_int(last.get("visible_count"), 0, 1000),
-        "excluded_unqualified_count": _bounded_int(last.get("excluded_unqualified_count"), 0, 1000),
+        "source_count": source_count,
+        "visible_count": visible_count,
+        "excluded_unqualified_count": excluded_count,
     }
 
 

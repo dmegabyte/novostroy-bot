@@ -129,7 +129,7 @@ def test_runtime_summary_inventory_gate_is_aggregate_only(tmp_path: Path, monkey
         assert forbidden not in dumped
 
 
-def test_runtime_summary_extracts_inventory_gate_aggregates_from_first_and_last_attempt() -> None:
+def test_runtime_summary_uses_one_coherent_last_inventory_gate_attempt() -> None:
     from nmbot_v2.contracts import ExecutionResult, SemanticPlan, Stage, TurnAction
     from nmbot_v2.runtime import _runtime_summary
     from nmbot_v2.state import ConversationState
@@ -147,7 +147,7 @@ def test_runtime_summary_extracts_inventory_gate_aggregates_from_first_and_last_
             attempts=(
                 {"stage": "broad_inventory_gate", "enabled": True, "status": "unchanged", "source_count": 9, "visible_count": 9, "excluded_unqualified_count": 0, "name": "Первый секрет"},
                 {"stage": "gateway_attempt", "payload": "secret"},
-                {"stage": "broad_inventory_gate", "enabled": True, "status": "filtered", "source_count": 9, "visible_count": 3, "excluded_unqualified_count": 6, "raw_payload": "secret"},
+                {"stage": "broad_inventory_gate", "enabled": True, "status": "filtered", "source_count": 3, "visible_count": 3, "excluded_unqualified_count": 0, "raw_payload": "secret"},
             ),
         ),
         response_text="Какой вариант рассмотреть?",
@@ -156,9 +156,9 @@ def test_runtime_summary_extracts_inventory_gate_aggregates_from_first_and_last_
     assert summary["inventory_gate"] == {
         "enabled": True,
         "status": "filtered",
-        "source_count": 9,
+        "source_count": 3,
         "visible_count": 3,
-        "excluded_unqualified_count": 6,
+        "excluded_unqualified_count": 0,
     }
     assert "broad_inventory_gate" not in json.dumps(summary.get("gateway_attempt_details", []), ensure_ascii=False)
     dumped = json.dumps(summary, ensure_ascii=False)

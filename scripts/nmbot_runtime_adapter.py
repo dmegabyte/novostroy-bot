@@ -1657,6 +1657,7 @@ class _OvermindSearchAdapter:
                 max_options=len(cards),
                 timeout=max(0.2, _safe_float_env("NMBOT_V2_ENRICHMENT_ITEM_TIMEOUT", 20.0)),
                 facts_needed=facts_needed if facts_needed is not None else _shortlist_enrichment_facts(contract.response_viewpoint),
+                lot_hard=getattr(contract, "lot_hard", None),
             )
             enriched_cards = enriched.shortlist(limit=len(cards))
             applied_indexes = {
@@ -1683,7 +1684,7 @@ class _OvermindSearchAdapter:
                     applied_indexes,
                     max_options=len(cards),
                 )
-                enriched, gate_attempt = _apply_broad_inventory_gate(enriched)
+                enriched, gate_attempt = _apply_broad_inventory_gate(enriched, lot_hard=getattr(contract, "lot_hard", None))
                 self.last_attempts = (*self.last_attempts, gate_attempt)
             return enriched
         except Exception as exc:
@@ -1973,7 +1974,7 @@ def _broad_inventory_gate_enabled(value: Any = None) -> bool:
     return True
 
 
-def _apply_broad_inventory_gate(result: SearchResult) -> tuple[SearchResult, dict[str, Any]]:
+def _apply_broad_inventory_gate(result: SearchResult, *, lot_hard: Mapping[str, Any] | None = None) -> tuple[SearchResult, dict[str, Any]]:
     enabled = _broad_inventory_gate_enabled()
     source_count = len(result.facts) + len(result.near)
     if not enabled:
@@ -1985,7 +1986,7 @@ def _apply_broad_inventory_gate(result: SearchResult) -> tuple[SearchResult, dic
             "visible_count": source_count,
             "excluded_unqualified_count": 0,
         }
-    projected, counts = project_broad_inventory(result)
+    projected, counts = project_broad_inventory(result, lot_hard=lot_hard)
     return projected, {
         "stage": "broad_inventory_gate",
         "enabled": True,

@@ -3607,7 +3607,7 @@ def test_selected_lot_hard_room_scope_does_not_reuse_filtered_state_cache() -> N
                 return {
                     "name": "Мичуринский парк",
                     "apartment_inventory": 1,
-                    "ads": [{"id": 6375479 + self.enrich_calls, "rooms": rooms, "area": 40, "fullprice": 12_000_000, "status": 2}],
+                    "ads": [{"id": 6375479 + self.enrich_calls, "rooms": rooms, "area": 40, "fullprice": 12_000_000, "state": 2, "status": 2}],
                 }, {"ok": True}
 
         client = RoomScopedClient()
@@ -3657,7 +3657,7 @@ def test_selected_lot_hard_with_legacy_fetch_signature_uses_low_level_request_pa
         client = LegacyFetchPlusGatewayClient(options=[{
             "name": "Мичуринский парк",
             "apartment_inventory": 1,
-            "ads": [{"id": 6375481, "rooms": "1", "area": 40, "fullprice": 12_000_000, "status": 2}],
+            "ads": [{"id": 6375481, "rooms": "1", "area": 40, "fullprice": 12_000_000, "state": 2, "status": 2}],
         }])
         adapter = _OvermindSearchAdapter(make_app(client=client))
         base = OptionCard(name="Мичуринский парк")

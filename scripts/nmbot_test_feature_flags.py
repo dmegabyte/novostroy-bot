@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -23,10 +24,19 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-TEST_HOST = "neiro@193.107.155.236"
-TEST_PORT = "1905"
-TEST_ROOT = "/home/neiro/novostroy-bot"
-TEST_SERVICE = "novostroy-bot-api.service"
+# TEST identity is deliberately unconfigured by default. Supplying a host is
+# insufficient: an explicit profile and release marker make accidental writes
+# to the production contour fail closed before SSH is attempted.
+TEST_HOST = os.getenv("NMBOT_TEST_HOST", "")
+TEST_PORT = os.getenv("NMBOT_TEST_PORT", "")
+TEST_API_PORT = os.getenv("NMBOT_TEST_API_PORT", "")
+TEST_ROOT = os.getenv("NMBOT_TEST_ROOT", "")
+TEST_SERVICE = os.getenv("NMBOT_TEST_SERVICE", "")
+TEST_RELEASE_MARKER = os.getenv("NMBOT_TEST_RELEASE_MARKER", "")
+TEST_PROFILE = os.getenv("NMBOT_TEST_PROFILE", "")
+PRODUCTION_HOST = "neiro@193.107.155.236"
+PRODUCTION_ROOT = "/home/neiro/novostroy-bot"
+PRODUCTION_SERVICE = "novostroy-bot-api.service"
 ALLOWED_KEYS = frozenset(
     {
         "NMBOT_BROAD_INVENTORY_GATE_ENABLED",
@@ -35,10 +45,23 @@ ALLOWED_KEYS = frozenset(
     }
 )
 BOOLEAN_VALUES = {"on": "1", "off": "0"}
+EFFECTIVE_DEFAULTS = {
+    "NMBOT_BROAD_INVENTORY_GATE_ENABLED": True,
+    "NMBOT_MAIN_SEARCH_FALLBACK_ENABLED": True,
+    "NMBOT_OPENROUTER_EXCLUDE_REASONING": False,
+}
 
 
 class FeatureFlagError(RuntimeError):
     pass
+
+
+def validate_test_identity() -> None:
+    required = (TEST_HOST, TEST_PORT, TEST_API_PORT, TEST_ROOT, TEST_SERVICE, TEST_RELEASE_MARKER, TEST_PROFILE)
+    if not all(str(value or "").strip() for value in required):
+        raise FeatureFlagError("TEST identity is not fully configured")
+    if TEST_HOST == PRODUCTION_HOST or TEST_ROOT == PRODUCTION_ROOT or TEST_SERVICE == PRODUCTION_SERVICE:
+        raise FeatureFlagError("TEST identity matches production contour")
 
 
 def validate_assignment(raw: str) -> tuple[str, str]:
@@ -64,6 +87,7 @@ def validate_assignments(raw_assignments: list[str]) -> list[tuple[str, str]]:
 
 def _remote_status_script() -> str:
     keys = repr(sorted(ALLOWED_KEYS))
+    defaults = repr(EFFECTIVE_DEFAULTS)
     return f'''
 from pathlib import Path
 import json
@@ -71,6 +95,7 @@ import subprocess
 import urllib.request
 
 root = Path({TEST_ROOT!r})
+defaults = {defaults}
 values = {{}}
 for raw in (root / ".env").read_text(encoding="utf-8").splitlines():
     line = raw.strip()
@@ -93,9 +118,9 @@ service = subprocess.run(
     check=False,
 )
 print(json.dumps({{
-    "feature_flags": {{key: values.get(key, "").strip().lower() in {{"1", "true", "yes", "on"}} for key in {keys}}},
-    "runtime_v5": get_json("http://127.0.0.1:8088/api/runtime-version").get("runtime_version") == "V5",
-    "health_ok": get_json("http://127.0.0.1:8088/health").get("ok") is True,
+    "feature_flags": {{key: (values[key].strip().lower() in {{"1", "true", "yes", "on"}}) if key in values else defaults[key] for key in {keys}}},
+    "runtime_v5": get_json("http://127.0.0.1:{TEST_API_PORT}/api/runtime-version").get("runtime_version") == "V5",
+    "health_ok": get_json("http://127.0.0.1:{TEST_API_PORT}/health").get("ok") is True,
     "service_active": service.returncode == 0 and service.stdout.strip() == "active",
 }}, ensure_ascii=False))
 '''
@@ -107,10 +132,12 @@ def _encoded_remote_python(source: str) -> str:
 
 
 def build_status_command() -> str:
+    validate_test_identity()
     return _encoded_remote_python(_remote_status_script())
 
 
 def build_set_command(assignments: list[tuple[str, str]], backup_name: str) -> str:
+    validate_test_identity()
     if not assignments:
         raise FeatureFlagError("at least one --set assignment is required")
     if any(key not in ALLOWED_KEYS or value not in {"0", "1"} for key, value in assignments):
@@ -127,13 +154,26 @@ def build_set_command(assignments: list[tuple[str, str]], backup_name: str) -> s
         "set -eu; "
         f"mkdir -p {root}/backups; "
         f"cp -p {env_file} {backup}; "
+        f"rollback() {{ cp -p {backup} {env_file}; systemctl --user restart {shlex.quote(TEST_SERVICE)} || true; }}; "
+        "trap rollback ERR; "
         f"{updates} "
         f"systemctl --user restart {shlex.quote(TEST_SERVICE)}; "
-        f"systemctl --user is-active {shlex.quote(TEST_SERVICE)}"
+        f"systemctl --user is-active {shlex.quote(TEST_SERVICE)}; "
+        "trap - ERR"
     )
 
 
+def build_restore_command(backup_name: str) -> str:
+    validate_test_identity()
+    root = shlex.quote(TEST_ROOT)
+    env_file = shlex.quote(f"{TEST_ROOT}/.env")
+    backup = shlex.quote(f"{TEST_ROOT}/backups/{backup_name}")
+    service = shlex.quote(TEST_SERVICE)
+    return f"set -eu; test -f {backup}; cp -p {backup} {env_file}; systemctl --user restart {service}; systemctl --user is-active {service}"
+
+
 def run_remote(command: str) -> subprocess.CompletedProcess[str]:
+    validate_test_identity()
     return subprocess.run(
         ["ssh", "-p", TEST_PORT, "-o", "BatchMode=yes", TEST_HOST, command],
         capture_output=True,
@@ -162,7 +202,7 @@ def render_status(status: dict[str, Any]) -> dict[str, Any]:
         flags = {}
     return {
         "feature_flags": {
-            key: "enabled" if flags.get(key) is True else "disabled"
+            key: "enabled" if flags.get(key, EFFECTIVE_DEFAULTS[key]) is True else "disabled"
             for key in sorted(ALLOWED_KEYS)
         },
         "health": "healthy" if status.get("health_ok") is True else "unhealthy",
@@ -181,6 +221,23 @@ def _post_change_is_valid(status: dict[str, Any], assignments: list[tuple[str, s
         and status.get("service_active") is True
         and all(flags.get(key) is (value == "1") for key, value in assignments)
     )
+
+
+def _rollback_and_verify(before: dict[str, Any], backup_name: str) -> None:
+    restored = run_remote(build_restore_command(backup_name))
+    if restored.returncode != 0:
+        raise FeatureFlagError("TEST rollback command failed")
+    try:
+        after_restore = read_status()
+    except FeatureFlagError as exc:
+        raise FeatureFlagError("TEST rollback status check failed") from exc
+    if (
+        after_restore.get("runtime_v5") is not True
+        or after_restore.get("health_ok") is not True
+        or after_restore.get("service_active") is not True
+        or after_restore.get("feature_flags") != before.get("feature_flags")
+    ):
+        raise FeatureFlagError("TEST rollback verification failed")
 
 
 def main() -> int:
@@ -212,11 +269,18 @@ def main() -> int:
             raise FeatureFlagError("TEST runtime is not V5; refusing feature-flag mutation")
         backup_name = f"test-feature-flags-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.env"
         result = run_remote(build_set_command(assignments, backup_name))
-        if result.returncode != 0:
-            raise FeatureFlagError("remote TEST feature-flag update/restart failed")
-        after = read_status()
-        if not _post_change_is_valid(after, assignments):
-            raise FeatureFlagError("post-change TEST status did not satisfy flag/health/service/runtime contract")
+        try:
+            if result.returncode != 0:
+                raise FeatureFlagError("remote TEST feature-flag update/restart failed")
+            after = read_status()
+            if not _post_change_is_valid(after, assignments):
+                raise FeatureFlagError("post-change TEST status did not satisfy flag/health/service/runtime contract")
+        except FeatureFlagError as exc:
+            try:
+                _rollback_and_verify(before, backup_name)
+            except FeatureFlagError as rollback_exc:
+                raise FeatureFlagError(f"{exc}; rollback failed: {rollback_exc}") from rollback_exc
+            raise FeatureFlagError(f"{exc}; rollback restored previous TEST state") from exc
         print(json.dumps({
             "status": "updated",
             "changed_keys": changed_keys,

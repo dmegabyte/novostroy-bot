@@ -20,6 +20,7 @@ from .search_contract import (
     parse_strict_json,
     validate_search_output,
     matches_hard_constraint,
+    lot_matches_hard_constraints,
 )
 from .fact_context import ALLOWED_FACTS
 
@@ -206,6 +207,7 @@ async def enrich_search_result_top_options(
     max_options: int = 3,
     timeout: float | None = None,
     facts_needed: tuple[str, ...] | list[str] | None = None,
+    lot_hard: Mapping[str, Any] | None = None,
 ) -> tuple[SearchResult, dict[str, Any]]:
     # Enrich visible cards from both source containers without promoting
     # ``near`` alternatives into exact ``facts``.
@@ -223,6 +225,7 @@ async def enrich_search_result_top_options(
                 base_viewpoint=base_viewpoint,
                 timeout=timeout,
                 facts_needed=facts_needed,
+                lot_hard=lot_hard,
             )
         )
         for card in cards
@@ -499,42 +502,25 @@ def merge_option_cards(base: OptionCard, enriched: OptionCard) -> OptionCard:
 def _supported_lot_hard(value: Mapping[str, Any] | None) -> dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
-    out: dict[str, Any] = {}
-    rooms = value.get("rooms")
-    if rooms not in (None, "", [], {}, ()):
-        out["rooms"] = rooms
-    return out
+    supported = {"rooms", "max_price", "min_price", "area_min_m2", "area_max_m2", "ready", "finishing"}
+    return {
+        key: item
+        for key, item in value.items()
+        if key in supported and item not in (None, "", [], {}, ())
+    }
 
 
 def _filter_option_lot_examples(card: OptionCard, lot_hard: Mapping[str, Any] | None) -> OptionCard:
     safe_lot_hard = _supported_lot_hard(lot_hard)
     if not safe_lot_hard:
         return card
-    lots = []
-    for lot in card.lot_examples:
-        item = dict(to_jsonable(lot))
-        if not _lot_example_active(item):
-            continue
-        if all(matches_hard_constraint(item, field, expected) for field, expected in safe_lot_hard.items()):
-            lots.append(lot)
+    lots = [
+        lot for lot in card.lot_examples
+        if lot_matches_hard_constraints({"ads": [to_jsonable(lot)]}, safe_lot_hard)
+    ]
     data = dict(to_jsonable(card))
     data["lot_examples"] = [to_jsonable(lot) for lot in lots[:2]]
     return OptionCard.from_dict(data)
-
-
-def _lot_example_active(item: Mapping[str, Any]) -> bool:
-    lot_id = item.get("id")
-    if isinstance(lot_id, bool) or lot_id in (None, ""):
-        return False
-    if isinstance(lot_id, (int, float)) and int(lot_id) <= 0:
-        return False
-    status = item.get("status")
-    if isinstance(status, bool) or status in (None, ""):
-        return False
-    if isinstance(status, (int, float)):
-        return int(status) == 2
-    normalized = re.sub(r"[^a-zа-я0-9]+", "_", str(status).strip().casefold().replace("ё", "е")).strip("_")
-    return normalized in {"2", "active", "available", "sale", "in_sale", "on_sale", "for_sale", "в_продаже", "продается"}
 
 
 def _reconcile_missing(missing: tuple[str, ...], cards: tuple[OptionCard, ...]) -> tuple[str, ...]:

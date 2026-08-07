@@ -57,6 +57,23 @@ def test_inventory_projection_requires_active_in_sale_lot_with_valid_id():
     assert trace == {"source_count": 4, "visible_count": 1, "excluded_unqualified_count": 3}
 
 
+def test_inventory_projection_applies_lot_hard_to_the_same_active_lot():
+    matching = _card("Подходит", {"id": 1, "state": 2, "status": 2, "rooms": 2, "fullprice": 10_000_000})
+    split_evidence = _card(
+        "Разные лоты",
+        {"id": 2, "state": 2, "status": 2, "rooms": 2, "fullprice": 12_000_000},
+        {"id": 3, "state": 2, "status": 2, "rooms": 1, "fullprice": 9_000_000},
+    )
+
+    projected, trace = project_broad_inventory(
+        SearchResult(facts=(matching, split_evidence)),
+        lot_hard={"rooms": 2, "max_price": 10_000_000},
+    )
+
+    assert projected.facts == (matching,)
+    assert trace == {"source_count": 2, "visible_count": 1, "excluded_unqualified_count": 1}
+
+
 def test_runtime_inventory_gate_honors_env_and_emits_aggregate_only_trace(monkeypatch):
     active = _card("Секретное имя", {"id": 1, "state": 2, "status": 2})
     booked = _card("Ещё одно имя", {"id": 2, "state": 2, "status": 1})

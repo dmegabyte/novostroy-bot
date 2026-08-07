@@ -277,6 +277,7 @@ def build_search_request(plan: TurnPlan, state: ConversationState, context: Safe
         count=1 if named_lookup else 5 if viewpoint == "financing" and not effective_hard else 3,
         ignored_preferences=ignored,
         excluded_names=excluded_names,
+        lot_hard=lot_hard_from_hard(effective_hard),
     )
 
 
@@ -1214,6 +1215,14 @@ def _safe_lot_hard(value: Any) -> dict[str, Any]:
     return out
 
 
+def lot_hard_from_hard(hard: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Keep only executable lot-level constraints from broad hard filters."""
+
+    if not isinstance(hard, Mapping):
+        return {}
+    return _safe_lot_hard(hard)
+
+
 def lot_matches_hard_constraints(item: Mapping[str, Any], lot_hard: Mapping[str, Any] | None) -> bool:
     """Require one active wire-level ad to prove every lot-scoped constraint."""
 
@@ -1230,17 +1239,22 @@ def lot_matches_hard_constraints(item: Mapping[str, Any], lot_hard: Mapping[str,
         # Keep matching on the existing canonical hard matcher, but only expose
         # this one ad as evidence. Project-level ranges must never qualify it.
         canonical_ad = dict(ad)
-        # LotExample serializes wire ``fullprice`` as ``full_price``; restore
-        # only that structural field for the existing ads price matcher.
+        # LotExample serializes wire fields to canonical names. Restore the
+        # supported wire aliases before using the established structured matcher.
         if "full_price" in canonical_ad and "fullprice" not in canonical_ad:
             canonical_ad["fullprice"] = canonical_ad["full_price"]
+        if "area_m2" in canonical_ad and "area" not in canonical_ad:
+            canonical_ad["area"] = canonical_ad["area_m2"]
+        for key in ("renovation", "ready", "delivered"):
+            if key in ad:
+                canonical_ad[key] = ad[key]
         ad_evidence = {
             "rooms": ad.get("rooms"),
-            "ready": ad.get("ready"),
-            "delivered": ad.get("delivered"),
+            "ready": canonical_ad.get("ready"),
+            "delivered": canonical_ad.get("delivered"),
             "state": ad.get("state"),
             "status": ad.get("status"),
-            "finishing": ad.get("finishing"),
+            "finishing": canonical_ad.get("finishing"),
             "ads": [canonical_ad],
         }
         if all(_matches_hard(ad_evidence, field, expected) for field, expected in constraints.items()):

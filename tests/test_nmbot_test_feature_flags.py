@@ -7,6 +7,8 @@ from scripts.nmbot_test_feature_flags import (
     ALLOWED_KEYS,
     FeatureFlagError,
     build_set_command,
+    build_restore_command,
+    _backup_name,
     render_status,
     validate_assignment,
     validate_assignments,
@@ -41,6 +43,7 @@ def test_set_command_requires_explicit_non_production_test_identity(monkeypatch)
     monkeypatch.setattr(flags_module, "TEST_SERVICE", "nmbot-test-api.service")
     monkeypatch.setattr(flags_module, "TEST_RELEASE_MARKER", "test-release")
     monkeypatch.setattr(flags_module, "TEST_PROFILE", "test")
+    monkeypatch.setattr(flags_module, "TEST_IDENTITY_FILE", "/srv/nmbot-test/test-identity.json")
     command = build_set_command(assignments, "backup.env")
 
     assert "/srv/nmbot-test" in command
@@ -48,8 +51,65 @@ def test_set_command_requires_explicit_non_production_test_identity(monkeypatch)
     assert "nmbot-test-api.service" in command
     assert "novostroy-bot-n8n-bridge.service" not in command
     assert "client-production" not in command
+    assert "flock -n 9" in command
+    assert ".test-feature-flags.lock" in command
+    assert "test ! -e" in command
     for key in ALLOWED_KEYS:
         assert key in command
+
+
+def test_backup_names_are_unique_and_restore_uses_only_test_api_service(monkeypatch) -> None:
+    monkeypatch.setattr(flags_module, "TEST_HOST", "test@example.invalid")
+    monkeypatch.setattr(flags_module, "TEST_PORT", "2222")
+    monkeypatch.setattr(flags_module, "TEST_API_PORT", "8088")
+    monkeypatch.setattr(flags_module, "TEST_ROOT", "/srv/nmbot-test")
+    monkeypatch.setattr(flags_module, "TEST_SERVICE", "nmbot-test-api.service")
+    monkeypatch.setattr(flags_module, "TEST_RELEASE_MARKER", "test-release")
+    monkeypatch.setattr(flags_module, "TEST_PROFILE", "test")
+    monkeypatch.setattr(flags_module, "TEST_IDENTITY_FILE", "/srv/nmbot-test/test-identity.json")
+    monkeypatch.setattr(flags_module.uuid, "uuid4", lambda: type("UUID", (), {"hex": "a"})())
+    first = _backup_name()
+    monkeypatch.setattr(flags_module.uuid, "uuid4", lambda: type("UUID", (), {"hex": "b"})())
+    second = _backup_name()
+    restore = build_restore_command(first)
+
+    assert first != second
+    assert first.endswith("-a.env")
+    assert second.endswith("-b.env")
+    assert "test-feature-flags" in restore
+    assert "nmbot-test-api.service" in restore
+    assert "n8n-bridge" not in restore
+
+
+def test_remote_status_script_checks_identity_file_without_rendering_identity_values(monkeypatch) -> None:
+    monkeypatch.setattr(flags_module, "TEST_IDENTITY_FILE", "/srv/nmbot-test/test-identity.json")
+    monkeypatch.setattr(flags_module, "TEST_PROFILE", "hidden-profile")
+    monkeypatch.setattr(flags_module, "TEST_RELEASE_MARKER", "hidden-marker")
+
+    script = flags_module._remote_status_script()
+
+    assert 'identity_file.read_text' in script
+    assert '"test_identity_ok": test_identity_ok' in script
+    assert '"profile"' not in script.split("print(json.dumps", 1)[1]
+    assert '"release_marker"' not in script.split("print(json.dumps", 1)[1]
+
+
+def test_missing_or_mismatched_test_identity_fails_before_remote_command(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(flags_module, "TEST_HOST", "")
+    monkeypatch.setattr(flags_module, "TEST_PORT", "2222")
+    monkeypatch.setattr(flags_module, "TEST_API_PORT", "8088")
+    monkeypatch.setattr(flags_module, "TEST_ROOT", "/srv/nmbot-test")
+    monkeypatch.setattr(flags_module, "TEST_SERVICE", "nmbot-test-api.service")
+    monkeypatch.setattr(flags_module, "TEST_RELEASE_MARKER", "test-release")
+    monkeypatch.setattr(flags_module, "TEST_PROFILE", "test")
+    monkeypatch.setattr(flags_module, "TEST_IDENTITY_FILE", "/srv/nmbot-test/test-identity.json")
+    monkeypatch.setattr(flags_module.subprocess, "run", lambda *args, **kwargs: calls.append("remote"))
+
+    with pytest.raises(FeatureFlagError, match="not fully configured"):
+        flags_module.read_status()
+
+    assert calls == []
 
 
 def test_render_status_is_bounded_and_never_includes_dotenv_values() -> None:

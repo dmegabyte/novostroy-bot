@@ -7,7 +7,7 @@ from pathlib import Path
 from nmbot_v2.card_normalizer import normalize_card
 from nmbot_v2.contracts import OptionCard, SearchResult, SemanticPlan
 from nmbot_v2.inventory_gate import project_broad_inventory
-from nmbot_v2.search_contract import V2SearchRequest, build_query
+from nmbot_v2.search_contract import V2SearchRequest, build_query, lot_matches_hard_constraints
 from nmbot_v2.search_enrichment import build_option_enrichment_request
 from scripts import nmbot_runtime_adapter as adapter_module
 
@@ -36,6 +36,21 @@ def test_normalizer_preserves_lot_state_at_end_of_compatible_contract():
 
     assert card.lot_examples[0].state == 2
     assert card.lot_examples[0].status == 2
+
+
+def test_normalized_lot_preserves_supported_ready_delivered_and_renovation_for_gate():
+    card = _card("Активный", {
+        "id": 1, "state": 2, "status": 2, "area": 54, "renovation": "с отделкой", "ready": "сдан", "delivered": True,
+    })
+    lot = card.lot_examples[0]
+
+    assert lot.ready == "сдан"
+    assert lot.delivered is True
+    assert lot.renovation == "с отделкой"
+    assert lot_matches_hard_constraints(
+        {"ads": [lot.__dict__]},
+        {"area_min_m2": 50, "ready": "delivered", "finishing": True},
+    )
 
 
 ROOT = Path(__file__).resolve().parents[1]

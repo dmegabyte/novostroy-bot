@@ -2160,11 +2160,11 @@ def test_v0_runtime_config_error_client_text_has_no_internal_wording() -> None:
 def test_underfilled_broad_search_supplements_exact_cards_and_runtime_renders_three() -> None:
     async def scenario() -> None:
         client = SequenceGatewayClient([
-            {"facts": [{"name": "ЖК Первый"}]},
-            {"facts": [{"name": "ЖК Первый", "ads": [{"id": 214801, "state": 2, "status": 2}]}]},
-            {"facts": [{"name": "ЖК Второй"}, {"name": "ЖК Третий"}]},
-            {"facts": [{"name": "ЖК Второй", "ads": [{"id": 214802, "state": 2, "status": 2}]}]},
-            {"facts": [{"name": "ЖК Третий", "ads": [{"id": 214803, "state": 2, "status": 2}]}]},
+            {"facts": [{"name": "ЖК Первый", "rooms": 2}]},
+            {"facts": [{"name": "ЖК Первый", "rooms": 2, "ads": [{"id": 214801, "rooms": 2, "state": 2, "status": 2}]}]},
+            {"facts": [{"name": "ЖК Второй", "rooms": 2}, {"name": "ЖК Третий", "rooms": 2}]},
+            {"facts": [{"name": "ЖК Второй", "rooms": 2, "ads": [{"id": 214802, "rooms": 2, "state": 2, "status": 2}]}]},
+            {"facts": [{"name": "ЖК Третий", "rooms": 2, "ads": [{"id": 214803, "rooms": 2, "state": 2, "status": 2}]}]},
         ])
         adapter = _OvermindSearchAdapter({"overmind_client": client}, user_text="двушки в Прикубанском")
         plan = SemanticPlan(operation="search", constraints_delta={"hard": {"district": "Прикубанский", "rooms": 2}})
@@ -2204,7 +2204,7 @@ def test_candidate_first_location_search_sends_broad_payload_and_moves_bad_locat
                 {"name": "ЖК Мимо", "location": "Химки", "rooms": [2], "min_price": 12_000_000},
                 {"name": "ЖК Без локации", "rooms": [2], "min_price": 12_000_000},
             ]},
-            {"facts": [{"name": "ЖК Зеленый", "location": "Зеленоград", "rooms": [2], "min_price": 12_000_000, "ads": [{"id": 218301, "state": 2, "status": 2}]}]},
+            {"facts": [{"name": "ЖК Зеленый", "location": "Зеленоград", "rooms": [2], "min_price": 12_000_000, "ads": [{"id": 218301, "rooms": 2, "fullprice": 12_000_000, "state": 2, "status": 2}]}]},
             {"facts": [{"name": "ЖК Мимо", "location": "Химки", "rooms": [2], "min_price": 12_000_000, "ads": [{"id": 218302, "state": 2, "status": 2}]}]},
             {"facts": [{"name": "ЖК Без локации", "rooms": [2], "min_price": 12_000_000, "ads": [{"id": 218303, "state": 2, "status": 2}]}]},
             {"facts": []},
@@ -2246,10 +2246,10 @@ def test_candidate_first_underfilled_supplement_keeps_location_separation_and_ex
     async def scenario() -> None:
         client = SequenceGatewayClient([
             {"facts": [{"name": "ЖК Первый", "location": "Зеленоград", "rooms": [2]}]},
-            {"facts": [{"name": "ЖК Первый", "location": "Зеленоград", "rooms": [2], "ads": [{"id": 222401, "state": 2, "status": 2}]}]},
+            {"facts": [{"name": "ЖК Первый", "location": "Зеленоград", "rooms": [2], "ads": [{"id": 222401, "rooms": 2, "state": 2, "status": 2}]}]},
             {"facts": [{"name": "ЖК Второй", "location": "Зеленоград", "rooms": [2]}, {"name": "ЖК Первый", "location": "Зеленоград", "rooms": [2]}]},
-            {"facts": [{"name": "ЖК Второй", "location": "Зеленоград", "rooms": [2], "ads": [{"id": 222402, "state": 2, "status": 2}]}]},
-            {"facts": [{"name": "ЖК Первый", "location": "Зеленоград", "rooms": [2], "ads": [{"id": 222401, "state": 2, "status": 2}]}]},
+            {"facts": [{"name": "ЖК Второй", "location": "Зеленоград", "rooms": [2], "ads": [{"id": 222402, "rooms": 2, "state": 2, "status": 2}]}]},
+            {"facts": [{"name": "ЖК Первый", "location": "Зеленоград", "rooms": [2], "ads": [{"id": 222401, "rooms": 2, "state": 2, "status": 2}]}]},
         ])
         adapter = _OvermindSearchAdapter({"overmind_client": client}, user_text="В Зеленограде есть двушки?")
         plan = SemanticPlan(operation="search", constraints_delta={"hard": {"location": ["Зеленоград"], "rooms": [2]}})
@@ -2274,7 +2274,7 @@ def test_underfilled_broad_search_supplements_near_cards_without_losing_near_mar
     async def scenario() -> None:
         client = SequenceGatewayClient([
             {"facts": [{"name": "ЖК Точный", "rooms": [2]}]},
-            {"facts": [{"name": "ЖК Точный", "rooms": [2], "ads": [{"id": 224901, "state": 2, "status": 2}]}]},
+            {"facts": [{"name": "ЖК Точный", "rooms": [2], "ads": [{"id": 224901, "rooms": 2, "state": 2, "status": 2}]}]},
             {"near": [{"name": "ЖК Почти один", "rooms": [1], "why_close": "другая комнатность"}, {"name": "ЖК Почти два", "rooms": [3], "why_close": "другая комнатность"}]},
             {"facts": []},
             {"facts": []},
@@ -2707,7 +2707,7 @@ def test_v2_search_adapter_normalizes_runtime_owned_diagnostics(monkeypatch):
         initial = mod._default_state()
         initial["primary_intent"] = "family"
         initial["params"] = {"purpose": "family"}
-        app = make_app(initial, client=FakeClient(options=[{"name": "Семейный", "rooms": [2], "min_price": 12_000_000, "mortgage_calc": {"payment": 100000}, "school": True, "ads": [{"id": 266601, "state": 2, "status": 2}]}], bad_diagnostics=True))
+        app = make_app(initial, client=FakeClient(options=[{"name": "Семейный", "rooms": [2], "min_price": 12_000_000, "mortgage_calc": {"payment": 100000}, "school": True, "ads": [{"id": 266601, "rooms": 2, "fullprice": 12_000_000, "state": 2, "status": 2}]}], bad_diagnostics=True))
 
         result = await mod.run_chat(app, user_id="u", message="а ипотека есть?", channel="jivo", meta={})
 
@@ -4680,9 +4680,9 @@ def test_v2_family_financing_contact_then_parking_dialogue_keeps_domain_context(
         monkeypatch.setattr(mod.followup_intent_classifier, "plan_dialog_state", fake_plan)
         client = FakeClient(
             options=[
-                {"name": "Бусиновский парк", "rooms": 2, "min_price": 13_000_000, "ads": [{"id": 460401, "state": 2, "status": 2}]},
-                {"name": "Лосиноостровский парк", "rooms": 2, "min_price": 14_000_000, "infrastructure": ["паркинг"], "ads": [{"id": 460402, "state": 2, "status": 2}]},
-                {"name": "Мичуринский парк", "rooms": 2, "min_price": 15_000_000, "ads": [{"id": 460403, "state": 2, "status": 2}]},
+                {"name": "Бусиновский парк", "rooms": 2, "min_price": 13_000_000, "ads": [{"id": 460401, "rooms": 2, "fullprice": 13_000_000, "state": 2, "status": 2}]},
+                {"name": "Лосиноостровский парк", "rooms": 2, "min_price": 14_000_000, "infrastructure": ["паркинг"], "ads": [{"id": 460402, "rooms": 2, "fullprice": 14_000_000, "state": 2, "status": 2}]},
+                {"name": "Мичуринский парк", "rooms": 2, "min_price": 15_000_000, "ads": [{"id": 460403, "rooms": 2, "fullprice": 15_000_000, "state": 2, "status": 2}]},
             ],
             enriched={"name": "Бусиновский парк", "developer": "ПИК"},
         )

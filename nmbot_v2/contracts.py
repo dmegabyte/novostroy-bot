@@ -219,6 +219,8 @@ class LotExample:
     window_view: str | None = None
     layout_features: tuple[str, ...] = ()
     state: str | int | None = None
+    ready: str | int | bool | None = None
+    delivered: str | int | bool | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "LotExample":

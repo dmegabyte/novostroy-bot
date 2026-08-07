@@ -195,7 +195,10 @@ async def _fetch_enriched_option_v2_once(
 def _only_lot_hard_violations(errors: Any) -> bool:
     if not isinstance(errors, list) or not errors:
         return False
-    return all(re.fullmatch(r"fact_\d+_violates_lot_hard:[a-z_]+", str(error or "")) for error in errors)
+    return all(
+        re.fullmatch(r"fact_\d+_violates_(?:lot_hard|inventory_gate):[a-z_]+", str(error or ""))
+        for error in errors
+    )
 
 
 async def enrich_search_result_top_options(

@@ -20,6 +20,7 @@ import os
 import shlex
 import subprocess
 import sys
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -34,6 +35,7 @@ TEST_ROOT = os.getenv("NMBOT_TEST_ROOT", "")
 TEST_SERVICE = os.getenv("NMBOT_TEST_SERVICE", "")
 TEST_RELEASE_MARKER = os.getenv("NMBOT_TEST_RELEASE_MARKER", "")
 TEST_PROFILE = os.getenv("NMBOT_TEST_PROFILE", "")
+TEST_IDENTITY_FILE = os.getenv("NMBOT_TEST_IDENTITY_FILE", "")
 PRODUCTION_HOST = "neiro@193.107.155.236"
 PRODUCTION_ROOT = "/home/neiro/novostroy-bot"
 PRODUCTION_SERVICE = "novostroy-bot-api.service"
@@ -57,7 +59,7 @@ class FeatureFlagError(RuntimeError):
 
 
 def validate_test_identity() -> None:
-    required = (TEST_HOST, TEST_PORT, TEST_API_PORT, TEST_ROOT, TEST_SERVICE, TEST_RELEASE_MARKER, TEST_PROFILE)
+    required = (TEST_HOST, TEST_PORT, TEST_API_PORT, TEST_ROOT, TEST_SERVICE, TEST_RELEASE_MARKER, TEST_PROFILE, TEST_IDENTITY_FILE)
     if not all(str(value or "").strip() for value in required):
         raise FeatureFlagError("TEST identity is not fully configured")
     if TEST_HOST == PRODUCTION_HOST or TEST_ROOT == PRODUCTION_ROOT or TEST_SERVICE == PRODUCTION_SERVICE:
@@ -95,6 +97,7 @@ import subprocess
 import urllib.request
 
 root = Path({TEST_ROOT!r})
+identity_file = Path({TEST_IDENTITY_FILE!r})
 defaults = {defaults}
 values = {{}}
 for raw in (root / ".env").read_text(encoding="utf-8").splitlines():
@@ -117,11 +120,21 @@ service = subprocess.run(
     text=True,
     check=False,
 )
+try:
+    identity = json.loads(identity_file.read_text(encoding="utf-8"))
+except Exception:
+    identity = {{}}
+test_identity_ok = (
+    isinstance(identity, dict)
+    and identity.get("profile") == {TEST_PROFILE!r}
+    and identity.get("release_marker") == {TEST_RELEASE_MARKER!r}
+)
 print(json.dumps({{
     "feature_flags": {{key: (values[key].strip().lower() in {{"1", "true", "yes", "on"}}) if key in values else defaults[key] for key in {keys}}},
     "runtime_v5": get_json("http://127.0.0.1:{TEST_API_PORT}/api/runtime-version").get("runtime_version") == "V5",
     "health_ok": get_json("http://127.0.0.1:{TEST_API_PORT}/health").get("ok") is True,
     "service_active": service.returncode == 0 and service.stdout.strip() == "active",
+    "test_identity_ok": test_identity_ok,
 }}, ensure_ascii=False))
 '''
 
@@ -153,6 +166,8 @@ def build_set_command(assignments: list[tuple[str, str]], backup_name: str) -> s
     return (
         "set -eu; "
         f"mkdir -p {root}/backups; "
+        f"exec 9>{root}/backups/.test-feature-flags.lock; flock -n 9; "
+        f"test ! -e {backup}; "
         f"cp -p {env_file} {backup}; "
         f"rollback() {{ cp -p {backup} {env_file}; systemctl --user restart {shlex.quote(TEST_SERVICE)} || true; }}; "
         "trap rollback ERR; "
@@ -192,6 +207,8 @@ def read_status() -> dict[str, Any]:
         raise FeatureFlagError("remote TEST status returned invalid JSON") from exc
     if not isinstance(status, dict):
         raise FeatureFlagError("remote TEST status returned invalid object")
+    if status.get("test_identity_ok") is not True:
+        raise FeatureFlagError("remote TEST identity verification failed")
     return status
 
 
@@ -217,6 +234,7 @@ def _post_change_is_valid(status: dict[str, Any], assignments: list[tuple[str, s
         return False
     return (
         status.get("runtime_v5") is True
+        and status.get("test_identity_ok") is True
         and status.get("health_ok") is True
         and status.get("service_active") is True
         and all(flags.get(key) is (value == "1") for key, value in assignments)
@@ -233,11 +251,16 @@ def _rollback_and_verify(before: dict[str, Any], backup_name: str) -> None:
         raise FeatureFlagError("TEST rollback status check failed") from exc
     if (
         after_restore.get("runtime_v5") is not True
+        or after_restore.get("test_identity_ok") is not True
         or after_restore.get("health_ok") is not True
         or after_restore.get("service_active") is not True
         or after_restore.get("feature_flags") != before.get("feature_flags")
     ):
         raise FeatureFlagError("TEST rollback verification failed")
+
+
+def _backup_name() -> str:
+    return f"test-feature-flags-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex}.env"
 
 
 def main() -> int:
@@ -267,7 +290,7 @@ def main() -> int:
         before = read_status()
         if before.get("runtime_v5") is not True:
             raise FeatureFlagError("TEST runtime is not V5; refusing feature-flag mutation")
-        backup_name = f"test-feature-flags-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.env"
+        backup_name = _backup_name()
         result = run_remote(build_set_command(assignments, backup_name))
         try:
             if result.returncode != 0:

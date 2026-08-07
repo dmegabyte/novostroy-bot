@@ -218,6 +218,7 @@ class LotExample:
     ceiling_height: int | float | str | None = None
     window_view: str | None = None
     layout_features: tuple[str, ...] = ()
+    state: str | int | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "LotExample":

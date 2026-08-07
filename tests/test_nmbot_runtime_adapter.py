@@ -448,7 +448,7 @@ class FakeClient:
         if self.fail:
             raise RuntimeError("provider down")
         payload = json.dumps({"facts": self.options, "near": [], "missing": []}, ensure_ascii=False)
-        return "Нашла варианты", {"location": "Москва"}, {"_response_text": payload}, {"_visible_options": [{"name": item["name"]} for item in self.options]}
+        return "Нашла варианты", {"location": "Москва"}, {"_response_text": payload}, {"_visible_options": [dict(item) for item in self.options]}
 
     async def _run_gateway_request(self, request_data: dict[str, Any], headers: dict[str, Any], timeout: int):
         self.gateway_calls += 1
@@ -509,9 +509,21 @@ class FakeClient:
         }
         if self.bad_diagnostics:
             diagnostics = {"mcp_tool": "wrong/tool", "requested_field_priorities": []}
+        response_options = self.options
+        if "full_card" in query:
+            matched = [item for item in self.options if str(item.get("name") or "") in query]
+            if matched:
+                response_options = matched
+        elif envelope.get("search_mode") == "broad":
+            excluded = {str(name).strip().casefold() for name in payload.get("excluded_names") or [] if str(name).strip()}
+            response_options = [item for item in self.options if str(item.get("name") or "").strip().casefold() not in excluded]
         facts = []
-        for item in self.options:
+        for item in response_options:
             fact = dict(item)
+            # Broad retrieval returns candidate cards; active inventory is
+            # supplied only by the subsequent exact full-card lookup.
+            if envelope.get("search_mode") == "broad":
+                fact.pop("ads", None)
             if "price_range" in fact and "min_price" not in fact:
                 fact["min_price"] = 12_000_000
                 fact.pop("price_range", None)
@@ -2149,7 +2161,10 @@ def test_underfilled_broad_search_supplements_exact_cards_and_runtime_renders_th
     async def scenario() -> None:
         client = SequenceGatewayClient([
             {"facts": [{"name": "ЖК Первый"}]},
+            {"facts": [{"name": "ЖК Первый", "ads": [{"id": 214801, "state": 2, "status": 2}]}]},
             {"facts": [{"name": "ЖК Второй"}, {"name": "ЖК Третий"}]},
+            {"facts": [{"name": "ЖК Второй", "ads": [{"id": 214802, "state": 2, "status": 2}]}]},
+            {"facts": [{"name": "ЖК Третий", "ads": [{"id": 214803, "state": 2, "status": 2}]}]},
         ])
         adapter = _OvermindSearchAdapter({"overmind_client": client}, user_text="двушки в Прикубанском")
         plan = SemanticPlan(operation="search", constraints_delta={"hard": {"district": "Прикубанский", "rooms": 2}})
@@ -2161,17 +2176,18 @@ def test_underfilled_broad_search_supplements_exact_cards_and_runtime_renders_th
         # enrichment for each of the three visible shortlist options.
         assert len(client.gateway_payloads) == 5
         primary_count, primary_excluded = _payload_count_and_excluded(client.gateway_payloads[0])
-        supplemental_count, supplemental_excluded = _payload_count_and_excluded(client.gateway_payloads[1])
+        supplemental_count, supplemental_excluded = _payload_count_and_excluded(client.gateway_payloads[2])
         assert primary_count == 3
         assert supplemental_count == 2
         assert primary_excluded == []
         assert "ЖК Первый" in supplemental_excluded
         _, primary_params = _request_parts(client.gateway_payloads[0])
-        _, supplemental_params = _request_parts(client.gateway_payloads[1])
+        _, supplemental_params = _request_parts(client.gateway_payloads[2])
         assert supplemental_params["effective_hard"] == primary_params["effective_hard"] == {"district": "Прикубанский", "rooms": 2}
-        assert adapter.last_attempts[-2] == {"stage": "underfilled_search_fill", "status": "filled", "requested": 2, "added": 2}
-        assert adapter.last_attempts[-1]["stage"] == "shortlist_top_options_enrichment"
-        assert adapter.last_attempts[-1]["count"] == 3
+        backfill = [item for item in adapter.last_attempts if item.get("stage") == "inventory_post_enrichment_backfill"][-1]
+        assert backfill == {"stage": "inventory_post_enrichment_backfill", "status": "filled", "requested": 2, "added": 2}
+        enrichments = [item for item in adapter.last_attempts if item.get("stage") == "shortlist_top_options_enrichment"]
+        assert [item["count"] for item in enrichments] == [1, 2]
 
         turn = await TurnProcessor(planner=type("P", (), {"plan": lambda self, context, state: plan})(), search_service=type("S", (), {"search": lambda self, plan, state: result})()).process_async(SafeTurnContext("u", "двушки"))
         assert [item["name"] for item in turn.state["visible_options"]] == ["ЖК Первый", "ЖК Второй", "ЖК Третий"]
@@ -2188,6 +2204,10 @@ def test_candidate_first_location_search_sends_broad_payload_and_moves_bad_locat
                 {"name": "ЖК Мимо", "location": "Химки", "rooms": [2], "min_price": 12_000_000},
                 {"name": "ЖК Без локации", "rooms": [2], "min_price": 12_000_000},
             ]},
+            {"facts": [{"name": "ЖК Зеленый", "location": "Зеленоград", "rooms": [2], "min_price": 12_000_000, "ads": [{"id": 218301, "state": 2, "status": 2}]}]},
+            {"facts": [{"name": "ЖК Мимо", "location": "Химки", "rooms": [2], "min_price": 12_000_000, "ads": [{"id": 218302, "state": 2, "status": 2}]}]},
+            {"facts": [{"name": "ЖК Без локации", "rooms": [2], "min_price": 12_000_000, "ads": [{"id": 218303, "state": 2, "status": 2}]}]},
+            {"facts": []},
         ])
         adapter = _OvermindSearchAdapter({"overmind_client": client}, user_text="В Зеленограде есть двушки?")
         plan = SemanticPlan(operation="search", constraints_delta={"hard": {"location": ["Зеленоград"], "rooms": [2]}})
@@ -2195,10 +2215,11 @@ def test_candidate_first_location_search_sends_broad_payload_and_moves_bad_locat
         result = await adapter.search(plan, ConversationState(), SafeTurnContext("u", "В Зеленограде есть двушки?"))
 
         assert [card.name for card in result.facts] == ["ЖК Зеленый"]
-        assert [card.name for card in result.near] == ["ЖК Мимо", "ЖК Без локации"]
+        # Invalid-location candidates remain diagnostic-only because broad
+        # inventory enrichment is reserved for the exact visible shortlist.
+        assert result.near == ()
         assert [card.name for card in result.shortlist(3)] == ["ЖК Зеленый"]
         assert [card.is_near for card in result.shortlist(3)] == [False]
-        assert [card.why_close for card in result.near] == ["локация отличается от запроса", "локация не подтверждена"]
         assert result.params == {"location": ["Зеленоград"], "rooms": [2]}
         _, sent_params = _request_parts(client.gateway_payloads[0])
         assert sent_params["effective_hard"] == {"rooms": [2]}
@@ -2225,7 +2246,10 @@ def test_candidate_first_underfilled_supplement_keeps_location_separation_and_ex
     async def scenario() -> None:
         client = SequenceGatewayClient([
             {"facts": [{"name": "ЖК Первый", "location": "Зеленоград", "rooms": [2]}]},
+            {"facts": [{"name": "ЖК Первый", "location": "Зеленоград", "rooms": [2], "ads": [{"id": 222401, "state": 2, "status": 2}]}]},
             {"facts": [{"name": "ЖК Второй", "location": "Зеленоград", "rooms": [2]}, {"name": "ЖК Первый", "location": "Зеленоград", "rooms": [2]}]},
+            {"facts": [{"name": "ЖК Второй", "location": "Зеленоград", "rooms": [2], "ads": [{"id": 222402, "state": 2, "status": 2}]}]},
+            {"facts": [{"name": "ЖК Первый", "location": "Зеленоград", "rooms": [2], "ads": [{"id": 222401, "state": 2, "status": 2}]}]},
         ])
         adapter = _OvermindSearchAdapter({"overmind_client": client}, user_text="В Зеленограде есть двушки?")
         plan = SemanticPlan(operation="search", constraints_delta={"hard": {"location": ["Зеленоград"], "rooms": [2]}})
@@ -2235,9 +2259,9 @@ def test_candidate_first_underfilled_supplement_keeps_location_separation_and_ex
         assert [card.name for card in result.shortlist(3)] == ["ЖК Первый", "ЖК Второй"]
         # Primary + supplemental broad search, then exact full-card requests
         # for the two cards actually present in the shortlist.
-        assert len(client.gateway_payloads) == 4
+        assert len(client.gateway_payloads) == 5
         _, primary_params = _request_parts(client.gateway_payloads[0])
-        _, supplemental_params = _request_parts(client.gateway_payloads[1])
+        _, supplemental_params = _request_parts(client.gateway_payloads[2])
         assert primary_params["effective_hard"] == {"rooms": [2]}
         assert supplemental_params["effective_hard"] == {"rooms": [2]}
         assert "ЖК Первый" in supplemental_params["excluded_names"]
@@ -2250,7 +2274,10 @@ def test_underfilled_broad_search_supplements_near_cards_without_losing_near_mar
     async def scenario() -> None:
         client = SequenceGatewayClient([
             {"facts": [{"name": "ЖК Точный", "rooms": [2]}]},
+            {"facts": [{"name": "ЖК Точный", "rooms": [2], "ads": [{"id": 224901, "state": 2, "status": 2}]}]},
             {"near": [{"name": "ЖК Почти один", "rooms": [1], "why_close": "другая комнатность"}, {"name": "ЖК Почти два", "rooms": [3], "why_close": "другая комнатность"}]},
+            {"facts": []},
+            {"facts": []},
         ])
         adapter = _OvermindSearchAdapter({"overmind_client": client}, user_text="семейные варианты")
         plan = SemanticPlan(operation="search", constraints_delta={"hard": {"rooms": 2}})
@@ -2275,6 +2302,7 @@ def test_underfilled_supplemental_failure_keeps_original_result() -> None:
     async def scenario() -> None:
         client = SequenceGatewayClient([
             {"facts": [{"name": "ЖК Один"}]},
+            {"facts": [{"name": "ЖК Один", "ads": [{"id": 227401, "state": 2, "status": 2}]}]},
             {"safe_fallback": True},
         ])
         adapter = _OvermindSearchAdapter({"overmind_client": client}, user_text="найди")
@@ -2283,9 +2311,8 @@ def test_underfilled_supplemental_failure_keeps_original_result() -> None:
 
         assert [card.name for card in result.shortlist(3)] == ["ЖК Один"]
         assert len(client.gateway_payloads) == 3
-        assert adapter.last_attempts[-2]["stage"] == "underfilled_search_fill"
-        assert adapter.last_attempts[-2]["status"] == "failed"
-        assert adapter.last_attempts[-1]["stage"] == "shortlist_top_options_enrichment"
+        backfill = [item for item in adapter.last_attempts if item.get("stage") == "inventory_post_enrichment_backfill"][-1]
+        assert backfill["status"] == "failed"
         turn = await TurnProcessor(planner=type("P", (), {"plan": lambda self, context, state: SemanticPlan(operation="search")})(), search_service=type("S", (), {"search": lambda self, plan, state: result})()).process_async(SafeTurnContext("u", "найди"))
         assert [item["name"] for item in turn.state["visible_options"]] == ["ЖК Один"]
         assert "Один" in turn.response_text
@@ -2297,27 +2324,37 @@ def test_underfilled_duplicate_supplemental_keeps_original_result() -> None:
     async def scenario() -> None:
         client = SequenceGatewayClient([
             {"facts": [{"name": "ЖК Один"}]},
+            {"facts": [{"name": "ЖК Один", "ads": [{"id": 229601, "state": 2, "status": 2}]}]},
             {"near": [{"name": "ЖК Один"}]},
+            {"facts": [{"name": "ЖК Один", "ads": [{"id": 229601, "state": 2, "status": 2}]}]},
         ])
         adapter = _OvermindSearchAdapter({"overmind_client": client}, user_text="найди")
 
         result = await adapter.search(SemanticPlan(operation="search"), ConversationState(), SafeTurnContext("u", "найди"))
 
         assert [card.name for card in result.shortlist(3)] == ["ЖК Один"]
-        assert len(client.gateway_payloads) == 3
+        assert len(client.gateway_payloads) == 4
 
     asyncio.run(scenario())
 
 
 def test_underfilled_does_not_supplement_when_primary_or_named_lookup_is_full_enough() -> None:
     async def scenario() -> None:
-        broad_client = SequenceGatewayClient([{"facts": [{"name": "ЖК 1"}, {"name": "ЖК 2"}, {"name": "ЖК 3"}]}])
+        broad_client = SequenceGatewayClient([
+            {"facts": [{"name": "ЖК 1"}, {"name": "ЖК 2"}, {"name": "ЖК 3"}]},
+            {"facts": [{"name": "ЖК 1", "ads": [{"id": 231201, "state": 2, "status": 2}]}]},
+            {"facts": [{"name": "ЖК 2", "ads": [{"id": 231202, "state": 2, "status": 2}]}]},
+            {"facts": [{"name": "ЖК 3", "ads": [{"id": 231203, "state": 2, "status": 2}]}]},
+        ])
         broad = _OvermindSearchAdapter({"overmind_client": broad_client}, user_text="найди")
         broad_result = await broad.search(SemanticPlan(operation="search"), ConversationState(), SafeTurnContext("u", "найди"))
         assert [card.name for card in broad_result.shortlist(3)] == ["ЖК 1", "ЖК 2", "ЖК 3"]
         assert len(broad_client.gateway_payloads) == 4
 
-        named_client = SequenceGatewayClient([{"facts": [{"name": "ЖК Лучи"}]}])
+        named_client = SequenceGatewayClient([
+            {"facts": [{"name": "ЖК Лучи"}]},
+            {"facts": [{"name": "ЖК Лучи", "ads": [{"id": 231204, "state": 2, "status": 2}]}]},
+        ])
         named = _OvermindSearchAdapter({"overmind_client": named_client}, user_text="Лучи")
         named_result = await named.search(SemanticPlan(operation="lookup_object", reference="ЖК Лучи"), ConversationState(), SafeTurnContext("u", "Лучи"))
         assert [card.name for card in named_result.shortlist(3)] == ["ЖК Лучи"]
@@ -2650,7 +2687,7 @@ def test_v2_search_maps_state_and_commits_only_after_success(monkeypatch):
         env(monkeypatch, version="v2")
         patch_planner(monkeypatch, {"operation": "search", "constraints_delta": {"hard": {"location": "Москва"}}, "confidence": 1.0})
         monkeypatch.setattr(mod, "_ensure_derived_canonical_plan", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("V2 must not build canonical planner dict")))
-        app = make_app(client=FakeClient(options=[{"name": "Лучи", "price_range": "от 12 млн рублей", "location": "Москва"}]))
+        app = make_app(client=FakeClient(options=[{"name": "Лучи", "price_range": "от 12 млн рублей", "location": "Москва", "ads": [{"id": 264801, "state": 2, "status": 2}]}]))
 
         result = await mod.run_chat(app, user_id="u", message="найди в Москве", channel="jivo", meta={})
 
@@ -2670,7 +2707,7 @@ def test_v2_search_adapter_normalizes_runtime_owned_diagnostics(monkeypatch):
         initial = mod._default_state()
         initial["primary_intent"] = "family"
         initial["params"] = {"purpose": "family"}
-        app = make_app(initial, client=FakeClient(options=[{"name": "Семейный", "rooms": [2], "min_price": 12_000_000, "mortgage_calc": {"payment": 100000}, "school": True}], bad_diagnostics=True))
+        app = make_app(initial, client=FakeClient(options=[{"name": "Семейный", "rooms": [2], "min_price": 12_000_000, "mortgage_calc": {"payment": 100000}, "school": True, "ads": [{"id": 266601, "state": 2, "status": 2}]}], bad_diagnostics=True))
 
         result = await mod.run_chat(app, user_id="u", message="а ипотека есть?", channel="jivo", meta={})
 
@@ -2685,9 +2722,9 @@ def test_v2_search_rebuilds_cards_from_v1_raw_facts_and_visible_order(monkeypatc
     async def scenario() -> None:
         env(monkeypatch, version="v2")
         options = [
-            {"name": "Первый", "price_range": "от 12 млн рублей", "location": "Москва"},
-            {"name": "Второй", "price_range": "от 14 млн рублей", "location": "Москва"},
-            {"name": "Третий", "price_range": "от 16 млн рублей", "location": "Москва"},
+            {"name": "Первый", "price_range": "от 12 млн рублей", "location": "Москва", "ads": [{"id": 268401, "state": 2, "status": 2}]},
+            {"name": "Второй", "price_range": "от 14 млн рублей", "location": "Москва", "ads": [{"id": 268402, "state": 2, "status": 2}]},
+            {"name": "Третий", "price_range": "от 16 млн рублей", "location": "Москва", "ads": [{"id": 268403, "state": 2, "status": 2}]},
         ]
         patch_planner(monkeypatch, {"operation": "search", "confidence": 1.0})
         app = make_app(client=FakeClient(options=options))
@@ -2707,9 +2744,9 @@ def test_v2_first_list_enriches_shortlist_cards(monkeypatch):
     async def scenario() -> None:
         env(monkeypatch, version="v2")
         options = [
-            {"name": "Первый", "min_price": 12_000_000, "location": "Москва"},
-            {"name": "Второй", "min_price": 14_000_000, "location": "Москва"},
-            {"name": "Третий", "min_price": 16_000_000, "location": "Москва"},
+            {"name": "Первый", "min_price": 12_000_000, "location": "Москва", "ads": [{"id": 270601, "state": 2, "status": 2}]},
+            {"name": "Второй", "min_price": 14_000_000, "location": "Москва", "ads": [{"id": 270602, "state": 2, "status": 2}]},
+            {"name": "Третий", "min_price": 16_000_000, "location": "Москва", "ads": [{"id": 270603, "state": 2, "status": 2}]},
         ]
         patch_planner(monkeypatch, {"operation": "search", "intent": "life", "confidence": 1.0})
         client = FakeClient(options=options)
@@ -2739,9 +2776,9 @@ def test_v2_search_adapter_reports_missing_hard_evidence_without_demoting(monkey
 
         result = await adapter.search(plan, ConversationState(), SafeTurnContext("u", "нужна двушка"))
 
-        assert [card.name for card in result.facts] == ["ЖК Без комнат"]
+        assert result.facts == ()
         assert result.near == ()
-        assert client.gateway_calls == 3  # primary + fill + exact shortlist card
+        assert client.gateway_calls == 3  # primary + failed exact + empty excluded backfill
         report = [item for item in adapter.last_attempts if item.get("stage") == "search_validation_report"][0]
         assert report["status"] == "invalid"
         assert "fact_0_missing_hard_evidence" in report["errors"]
@@ -2758,7 +2795,7 @@ def test_v2_compare_dialog_action_resolves_from_current_state_without_new_search
             {"name": "Второй", "price_range": "от 14 млн рублей", "location": "Москва"},
         ]
         patch_planner(monkeypatch, {"dialog_action": "compare_options", "intent": "rental", "scope": "all", "confidence": 0.95})
-        client = FakeClient()
+        client = FakeClient(options=[{"name": "Лучи", "price_range": "от 12 млн рублей", "location": "Москва", "ads": [{"id": 287301, "state": 2, "status": 2}]}])
         app = make_app(initial, client=client)
 
         result = await mod.run_chat(app, user_id="u", message="сравни первый и второй", channel="jivo", meta={})
@@ -2851,8 +2888,8 @@ def test_v2_search_uses_full_v1_visible_cards_when_raw_search_payload_is_hidden(
     class FullVisibleClient(FakeClient):
         def __init__(self) -> None:
             super().__init__(options=[
-                {"name": "Первый", "min_price": 12_000_000, "location": "Москва", "ready": "2027"},
-                {"name": "Второй", "min_price": 14_000_000, "location": "Москва", "ready": "2028"},
+                {"name": "Первый", "min_price": 12_000_000, "location": "Москва", "ready": "2027", "ads": [{"id": 285001, "state": 2, "status": 2}]},
+                {"name": "Второй", "min_price": 14_000_000, "location": "Москва", "ready": "2028", "ads": [{"id": 285002, "state": 2, "status": 2}]},
             ])
 
     async def scenario() -> None:
@@ -2874,7 +2911,7 @@ def test_v2_search_uses_exact_original_message_not_intent_or_reference(monkeypat
     async def scenario() -> None:
         env(monkeypatch, version="v2")
         patch_planner(monkeypatch, {"operation": "search", "intent": "investment", "reference": "инвестиция", "confidence": 1.0})
-        client = FakeClient()
+        client = FakeClient(options=[{"name": "Лучи", "price_range": "от 12 млн рублей", "location": "Москва", "ads": [{"id": 287301, "state": 2, "status": 2}]}])
         app = make_app(client=client)
 
         result = await mod.run_chat(app, user_id="u", message="двушка в Москве под инвестицию до 60 млн", channel="jivo", meta={})
@@ -2887,7 +2924,9 @@ def test_v2_search_uses_exact_original_message_not_intent_or_reference(monkeypat
             if payload.get("_payload_stage") == "main_search"
         ]
         assert len(search_calls) == 3
-        assert all("двушка в Москве под инвестицию до 60 млн" in call["query"] for call in search_calls[:2])
+        broad_calls = [call for call in search_calls if "full_card" not in str(call.get("query") or "")]
+        assert len(broad_calls) == 2
+        assert all("двушка в Москве под инвестицию до 60 млн" in call["query"] for call in broad_calls)
 
     asyncio.run(scenario())
 
@@ -3062,7 +3101,8 @@ def test_v2_unknown_named_object_uses_mcp_and_returns_honest_not_found(monkeypat
         assert "Проверим написание названия" in result["answer"]
         assert "всем этим ЖК" not in result["answer"]
         assert result["answer"].count("?") == 1
-        assert app["overmind_client"].gateway_calls == 1
+        assert app["overmind_client"].gateway_calls == 2
+        assert all("Нет такого" in str(payload.get("query") or "") for payload in app["overmind_client"].gateway_payloads)
         assert app["state_store"].saved
         assert "retry_search" not in app["state_store"].states["u"].get("nmbot_v2", {})
 
@@ -3083,8 +3123,8 @@ def test_v2_named_object_lookup_accepts_only_exact_mcp_card(monkeypatch):
             "confidence": 1.0,
         })
         client = FakeClient(options=[
-            {"name": "Северный парк", "parking": True},
-            {"name": "ЖК «Северный берег»", "parking": True, "location": "Москва"},
+            {"name": "Северный парк", "parking": True, "ads": [{"id": 307201, "state": 2, "status": 2}]},
+            {"name": "ЖК «Северный берег»", "parking": True, "location": "Москва", "ads": [{"id": 307202, "state": 2, "status": 2}]},
         ])
         app = make_app(client=client)
 
@@ -3127,6 +3167,7 @@ def test_v2_named_object_lookup_combines_budget_price_and_mortgage(monkeypatch):
             "min_price": 12_400_000,
             "location": "Москва",
             "ready": "сдан",
+            "ads": [{"id": 310801, "state": 2, "status": 2}],
         }])
         app = make_app(client=client)
 
@@ -3154,7 +3195,7 @@ def test_v2_malformed_semantic_operation_fails_closed_without_side_effects(monke
     async def scenario() -> None:
         env(monkeypatch, version="v2")
         patch_planner(monkeypatch, {"operation": "malformed_side_effect", "constraints_delta": {"hard": {"location": "Москва"}}, "confidence": 1.0})
-        client = FakeClient()
+        client = FakeClient(options=[{"name": "Лучи", "price_range": "от 12 млн рублей", "location": "Москва", "ads": [{"id": 412501, "state": 2, "status": 2}]}])
         app = make_app(client=client)
 
         result = await mod.run_chat(app, user_id="u", message="найди в Москве", channel="jivo", meta={})
@@ -4129,7 +4170,7 @@ def test_v3_shadow_response_composer_routes_writer_formatter_gateway_calls(monke
         initial = mod._default_state()
         initial["runtime_version_override"] = "V3"
         patch_planner(monkeypatch, {"operation": "search", "intent": "life", "confidence": 1.0})
-        client = FakeClient()
+        client = FakeClient(options=[{"name": "Лучи", "price_range": "от 12 млн рублей", "location": "Москва", "ads": [{"id": 412501, "state": 2, "status": 2}]}])
         app = make_app(initial, client=client)
 
         result = await mod.run_chat(app, user_id="u", message="найди", channel="jivo", meta={})
@@ -4157,14 +4198,14 @@ def test_v3_publish_response_composer_publishes_model_text_and_v2_ignores_env(mo
     async def scenario() -> None:
         monkeypatch.setenv("NMBOT_V3_RESPONSE_COMPOSER_MODE", "publish")
         patch_planner(monkeypatch, {"operation": "search", "intent": "life", "confidence": 1.0})
-        v3_client = FakeClient()
+        v3_client = FakeClient(options=[{"name": "Лучи", "price_range": "от 12 млн рублей", "location": "Москва", "ads": [{"id": 415601, "state": 2, "status": 2}]}])
         v3_initial = mod._default_state()
         v3_initial["runtime_version_override"] = "V3"
         v3_app = make_app(v3_initial, client=v3_client)
         env(monkeypatch, version="v3")
         v3 = await mod.run_chat(v3_app, user_id="u", message="найди", channel="jivo", meta={})
 
-        v2_client = FakeClient()
+        v2_client = FakeClient(options=[{"name": "Лучи", "price_range": "от 12 млн рублей", "location": "Москва", "ads": [{"id": 415602, "state": 2, "status": 2}]}])
         v2_initial = mod._default_state()
         v2_initial["runtime_version_override"] = "V2"
         v2_app = make_app(v2_initial, client=v2_client)
@@ -4191,7 +4232,7 @@ def test_v3_publish_response_composer_provider_error_does_not_retry_model(monkey
         patch_planner(monkeypatch, {"operation": "search", "intent": "life", "confidence": 1.0})
         initial = mod._default_state()
         initial["runtime_version_override"] = "V3"
-        client = FakeClient(composer_provider_error=True)
+        client = FakeClient(options=[{"name": "Лучи", "price_range": "от 12 млн рублей", "location": "Москва", "ads": [{"id": 418801, "state": 2, "status": 2}]}], composer_provider_error=True)
         app = make_app(initial, client=client)
 
         result = await mod.run_chat(app, user_id="u", message="найди", channel="jivo", meta={})
@@ -4639,9 +4680,9 @@ def test_v2_family_financing_contact_then_parking_dialogue_keeps_domain_context(
         monkeypatch.setattr(mod.followup_intent_classifier, "plan_dialog_state", fake_plan)
         client = FakeClient(
             options=[
-                {"name": "Бусиновский парк", "rooms": 2, "min_price": 13_000_000},
-                {"name": "Лосиноостровский парк", "rooms": 2, "min_price": 14_000_000, "infrastructure": ["паркинг"]},
-                {"name": "Мичуринский парк", "rooms": 2, "min_price": 15_000_000},
+                {"name": "Бусиновский парк", "rooms": 2, "min_price": 13_000_000, "ads": [{"id": 460401, "state": 2, "status": 2}]},
+                {"name": "Лосиноостровский парк", "rooms": 2, "min_price": 14_000_000, "infrastructure": ["паркинг"], "ads": [{"id": 460402, "state": 2, "status": 2}]},
+                {"name": "Мичуринский парк", "rooms": 2, "min_price": 15_000_000, "ads": [{"id": 460403, "state": 2, "status": 2}]},
             ],
             enriched={"name": "Бусиновский парк", "developer": "ПИК"},
         )
@@ -4697,7 +4738,7 @@ def test_normal_v2_search_does_not_call_legacy(monkeypatch):
     async def scenario() -> None:
         env(monkeypatch, version="v2")
         patch_planner(monkeypatch, {"operation": "search", "constraints_delta": {"hard": {"location": "Москва"}}, "confidence": 1.0})
-        app = make_app()
+        app = make_app(client=FakeClient(options=[{"name": "Лучи", "price_range": "от 12 млн рублей", "location": "Москва", "ads": [{"id": 469601, "state": 2, "status": 2}]}]))
         calls: list[str] = []
 
         async def legacy(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
@@ -4724,7 +4765,7 @@ def test_v2_runtime_uses_low_level_main_search_with_shortlist_enrichment(monkeyp
     async def scenario() -> None:
         env(monkeypatch, version="v2")
         patch_planner(monkeypatch, {"operation": "search", "constraints_delta": {"hard": {"location": "Москва"}}, "confidence": 1.0})
-        client = LowLevelOnlyClient(options=[{"name": "Лучи", "location": "Москва", "min_price": 12_000_000, "developer": "ПИК"}])
+        client = LowLevelOnlyClient(options=[{"name": "Лучи", "location": "Москва", "min_price": 12_000_000, "developer": "ПИК", "ads": [{"id": 472301, "state": 2, "status": 2}]}])
         app = make_app(client=client)
 
         result = await mod.run_runtime_turn(app, user_id="u", message="найди квартиру в Москве", channel="jivo", meta={})
@@ -4806,8 +4847,8 @@ def test_v2_parking_operator_accept_then_bare_yes_stays_in_phone_capture(monkeyp
         app = make_app(
             client=FakeClient(
                 options=[
-                    {"name": "2-й Иртышский", "location": "Иртышский", "min_price": 12_000_000},
-                    {"name": "Лучи", "location": "Москва", "min_price": 13_000_000},
+                    {"name": "2-й Иртышский", "location": "Иртышский", "min_price": 12_000_000, "ads": [{"id": 479101, "state": 2, "status": 2}]},
+                    {"name": "Лучи", "location": "Москва", "min_price": 13_000_000, "ads": [{"id": 479102, "state": 2, "status": 2}]},
                 ],
                 enriched={"name": "2-й Иртышский", "location": "Иртышский", "min_price": 12_000_000},
             )

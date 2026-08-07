@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from nmbot_v2.contracts import OptionCard, ResponseBrief, SafeTurnContext, SearchResult, SemanticPlan
 from nmbot_v2.manager_rewriter import (
     _v5_card_payload,
@@ -11,7 +13,7 @@ from nmbot_v2.manager_rewriter import (
 from nmbot_v2.runtime import TurnProcessor, _v5_operator_offer_fallback
 from nmbot_v2.state import ConversationState
 from scripts.nmbot_api_server import _is_start_command, _start_command_version
-from scripts.nmbot_runtime_adapter import _normalize_runtime_version
+from scripts.nmbot_runtime_adapter import _normalize_runtime_version, _try_capture_contact
 
 
 def _brief() -> ResponseBrief:
@@ -188,3 +190,53 @@ def test_v5_fourth_turn_does_not_repeat_offer() -> None:
 
     assert turn.response_text == "Обычный четвёртый ответ."
     assert turn.trace["manager_rewriter"].get("operator_offer") is False
+
+
+@pytest.mark.parametrize("reply", ["да", "давай", "хорошо", "конечно"])
+def test_v5_operator_offer_positive_reply_advances_atomically_to_phone(reply: str) -> None:
+    offered_state = ConversationState(
+        pending_followup="contact_name",
+        operator_offered=True,
+        contact_consent=False,
+    )
+
+    result = _try_capture_contact(
+        {},
+        user_id="test",
+        text=reply,
+        channel="jivo",
+        meta={},
+        state=offered_state,
+        runtime_version="v5",
+        engine_version="v2",
+    )
+
+    assert result is not None
+    assert result["public"]["intent"] == "collect_contact_phone"
+    assert result["public"]["awaiting_phone"] is True
+    assert result["public"]["answer"] == "На какой номер вам удобно позвонить?"
+    assert result["state"].pending_followup == "contact_phone"
+    assert result["state"].operator_offered is True
+    assert result["state"].contact_consent is True
+
+
+@pytest.mark.parametrize("reply", ["нет", "не надо", "можно", "А какие цены в ЖК Лучи?"])
+def test_v5_operator_offer_decline_or_question_stays_for_planner(reply: str) -> None:
+    offered_state = ConversationState(
+        pending_followup="contact_name",
+        operator_offered=True,
+        contact_consent=False,
+    )
+
+    result = _try_capture_contact(
+        {},
+        user_id="test",
+        text=reply,
+        channel="jivo",
+        meta={},
+        state=offered_state,
+        runtime_version="v5",
+        engine_version="v2",
+    )
+
+    assert result is None

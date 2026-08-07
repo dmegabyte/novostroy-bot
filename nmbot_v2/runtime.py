@@ -883,6 +883,9 @@ def _runtime_summary(
     }
     if gateway_attempt_details:
         summary["gateway_attempt_details"] = gateway_attempt_details
+    inventory_gate = _inventory_gate_runtime_summary(attempts)
+    if inventory_gate:
+        summary["inventory_gate"] = inventory_gate
     if execution.comparison_cards:
         summary["call_counts"]["pair_enrichment"] = 1
     option_enrichment = _option_enrichment_runtime_summary(attempts)
@@ -898,6 +901,24 @@ def _runtime_summary(
         if isinstance(intent_transition, dict):
             summary["intent_transition"] = intent_transition
     return summary
+
+
+def _inventory_gate_runtime_summary(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Project the broad-inventory gate to durable aggregate-only telemetry."""
+    gate_attempts = [item for item in attempts if item.get("stage") == "broad_inventory_gate"]
+    if not gate_attempts:
+        return {}
+    first, last = gate_attempts[0], gate_attempts[-1]
+    status = str(last.get("status") or "").strip().lower()
+    if not isinstance(last.get("enabled"), bool) or status not in {"filtered", "unchanged", "disabled"}:
+        return {}
+    return {
+        "enabled": last["enabled"],
+        "status": status,
+        "source_count": _bounded_int(first.get("source_count"), 0, 1000),
+        "visible_count": _bounded_int(last.get("visible_count"), 0, 1000),
+        "excluded_unqualified_count": _bounded_int(last.get("excluded_unqualified_count"), 0, 1000),
+    }
 
 
 def _option_enrichment_runtime_summary(attempts: list[dict[str, Any]]) -> dict[str, Any]:

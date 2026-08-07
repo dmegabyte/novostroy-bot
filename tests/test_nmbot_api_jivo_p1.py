@@ -1371,7 +1371,7 @@ def test_run_chat_budget_like_short_digits_reaches_overmind(monkeypatch) -> None
                 seen.append(request_data)
                 if request_data.get("_payload_stage") == "conversation_answer":
                     return json.dumps({"intro": "Вот подборка.", "options": [{"name": "Лучи", "facts": "до 200к."}], "missing_note": "", "final_question": "Показать подробнее?"}, ensure_ascii=False), {"ok": True}
-                return json.dumps({"facts": [{"name": "Лучи", "min_price": 200000}], "near": [], "missing": [], "params": {"max_price": 200000}, "diagnostics": {"mcp_tool": "novostroym/get_flat_info", "requested_field_priorities": [], "relaxation_audit": []}}, ensure_ascii=False), {"ok": True}
+                return json.dumps({"facts": [{"name": "Лучи", "min_price": 200000}], "ads": [{"id": 1, "state": 2, "status": 2}], "near": [], "missing": [], "params": {"max_price": 200000}, "diagnostics": {"mcp_tool": "novostroym/get_flat_info", "requested_field_priorities": [], "relaxation_audit": []}}, ensure_ascii=False), {"ok": True}
 
         app["overmind_client"] = FakeClient()
         result = await mod.run_chat(app, user_id="u-budget", message="до 200к", channel="jivo")
@@ -1379,12 +1379,12 @@ def test_run_chat_budget_like_short_digits_reaches_overmind(monkeypatch) -> None
         assert result["ok"] is True
         assert result["intent"] == "main_search"
         assert len(planner_calls) == 1
-        assert [item.get("_payload_stage") for item in seen] == ["main_search", "main_search", "main_search"]
+        assert [item.get("_payload_stage") for item in seen] == ["main_search", "main_search", "main_search", "main_search"]
         assert "до 200к" in seen[0]["query"]
-        assert '"count": 2' in seen[1]["query"]
-        assert '"excluded_names": ["Лучи"]' in seen[1]["query"]
-        third_envelope = json.loads(seen[2]["query"].split("SEARCH_CONTRACT_ENVELOPE=", 1)[1].split("\n", 1)[0])
-        third_params = json.loads(seen[2]["query"].split("Текущие параметры: ", 1)[1].split("\n", 1)[0])
+        assert '"count": 3' in seen[2]["query"]
+        assert '"excluded_names": ["Лучи"]' in seen[2]["query"]
+        third_envelope = json.loads(seen[3]["query"].split("SEARCH_CONTRACT_ENVELOPE=", 1)[1].split("\n", 1)[0])
+        third_params = json.loads(seen[3]["query"].split("Текущие параметры: ", 1)[1].split("\n", 1)[0])
         assert third_envelope["count"] == 1
         assert third_params["preferences"] == {"format": "full_card"}
 
@@ -1427,7 +1427,7 @@ def test_run_chat_room_check_offer_does_not_start_phone_collection(monkeypatch) 
         assert result["awaiting_phone"] is False
         assert result["handoff_to_operator"] is False
         assert calls
-        assert [payload.get("_payload_stage") for payload in gateway_payloads] == ["main_search"]
+        assert [payload.get("_payload_stage") for payload in gateway_payloads] == ["main_search", "main_search"]
         assert "двушка" in gateway_payloads[0]["query"]
         assert result["answer"].strip()
         assert "телефон" not in result["answer"].lower()
@@ -1534,7 +1534,7 @@ def test_recover_dialogue_increments_repeats_and_resets_after_success(tmp_path, 
                 gateway_calls.append(request_data)
                 if request_data.get("_payload_stage") == "conversation_answer":
                     return json.dumps({"intro": "Вот подборка.", "options": [{"name": "Лучи", "facts": "двухкомнатная."}], "missing_note": "", "final_question": "Показать подробнее?"}, ensure_ascii=False), {"ok": True}
-                return json.dumps({"facts": [{"name": "Лучи", "rooms": 2, "min_price": 12_000_000}], "near": [], "missing": [], "params": {"rooms": 2}, "diagnostics": {"mcp_tool": "novostroym/get_flat_info", "requested_field_priorities": [], "relaxation_audit": []}}, ensure_ascii=False), {"ok": True}
+                return json.dumps({"facts": [{"name": "Лучи", "rooms": 2, "min_price": 12_000_000}], "ads": [{"id": 1, "state": 2, "status": 2}], "near": [], "missing": [], "params": {"rooms": 2}, "diagnostics": {"mcp_tool": "novostroym/get_flat_info", "requested_field_priorities": [], "relaxation_audit": []}}, ensure_ascii=False), {"ok": True}
 
         app["overmind_client"] = FakeClient()
         first = await mod.run_chat(app, user_id="u-recover", message="не понял", channel="jivo")
@@ -1545,11 +1545,11 @@ def test_recover_dialogue_increments_repeats_and_resets_after_success(tmp_path, 
         assert second["intent"] == "freeform"
         assert third["intent"] == "main_search"
         assert len(planner_calls) == 3
-        assert [payload.get("_payload_stage") for payload in gateway_calls] == ["main_search", "main_search", "main_search"]
-        assert '"count": 2' in gateway_calls[1]["query"]
-        assert '"excluded_names": ["Лучи"]' in gateway_calls[1]["query"]
-        third_envelope = json.loads(gateway_calls[2]["query"].split("SEARCH_CONTRACT_ENVELOPE=", 1)[1].split("\n", 1)[0])
-        third_params = json.loads(gateway_calls[2]["query"].split("Текущие параметры: ", 1)[1].split("\n", 1)[0])
+        assert [payload.get("_payload_stage") for payload in gateway_calls] == ["main_search", "main_search", "main_search", "main_search"]
+        assert '"count": 3' in gateway_calls[2]["query"]
+        assert '"excluded_names": ["Лучи"]' in gateway_calls[2]["query"]
+        third_envelope = json.loads(gateway_calls[3]["query"].split("SEARCH_CONTRACT_ENVELOPE=", 1)[1].split("\n", 1)[0])
+        third_params = json.loads(gateway_calls[3]["query"].split("Текущие параметры: ", 1)[1].split("\n", 1)[0])
         assert third_envelope["count"] == 1
         assert third_params["preferences"] == {"format": "full_card"}
         saved = app["state_store"].states["u-recover"]
@@ -2095,6 +2095,7 @@ class TestCanonicalPlannerContract:
                     return json.dumps(
                         {
                             "facts": [{"name": "ЖК Сокол", "location": "Сокол", "rooms": 2, "price_min": 17_000_000, "max_price": 17_000_000}],
+                            "ads": [{"id": 1, "state": 2, "status": 2}],
                             "near": [],
                             "missing": [],
                             "params": {"purpose": "family", "rooms": 2, "location": ["Сокол"], "max_price": 18_000_000},
@@ -2106,7 +2107,7 @@ class TestCanonicalPlannerContract:
             app["overmind_client"] = FakeClient()
             result = await mod.run_chat(app, user_id="u-canonical-search", message="на Соколе до 18", channel="jivo")
             assert result["intent"] in {"main_search", "near_results"}
-            assert len(seen) == 3
+            assert len(seen) == 4
             def search_payload(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
                 query = request["query"]
                 envelope = json.loads(query.split("SEARCH_CONTRACT_ENVELOPE=", 1)[1].split("\n", 1)[0])
@@ -2123,14 +2124,14 @@ class TestCanonicalPlannerContract:
             assert first_params["relaxation_audit"] == [{"field": "location", "mode": "internal_candidate_retrieval", "client_relaxation": False}]
             assert first_envelope["response_viewpoint"] == "family"
             assert seen[1]["_payload_stage"] == "main_search"
-            second_envelope, second_params = search_payload(seen[1])
-            assert second_envelope["count"] == 2
+            second_envelope, second_params = search_payload(seen[2])
+            assert second_envelope["count"] == 3
             assert second_params["excluded_names"] == ["ЖК Сокол"]
-            # The third request is family-card enrichment after the search and
-            # supplemental search complete. It is an exact-card lookup, not a
-            # relaxation of the original user search.
-            assert seen[2]["_payload_stage"] == "main_search"
-            third_envelope, third_params = search_payload(seen[2])
+            # The final request is family-card enrichment after the broad search,
+            # its exact inventory enrichment, and supplemental search complete.
+            # It is an exact-card lookup, not a relaxation of the original user search.
+            assert seen[3]["_payload_stage"] == "main_search"
+            third_envelope, third_params = search_payload(seen[3])
             assert third_envelope["count"] == 1
             assert third_params["excluded_names"] == []
             assert third_params["requested_hard"] == {}
@@ -2678,7 +2679,16 @@ class TestCanonicalPlannerContract:
     def test_canonical_semantic_pair_mismatch_fails_closed(self, tmp_path, monkeypatch) -> None:
         async def scenario() -> None:
             app = make_app(tmp_path)
-            patch_planner(monkeypatch, self.canonical_plan(action="search", target="current_options", search_policy="forbidden"))
+            patch_planner(
+                monkeypatch,
+                self.canonical_plan(
+                    action="search",
+                    target="current_options",
+                    search_policy="forbidden",
+                    canonical_valid=False,
+                    canonical_errors=["semantic_pair_mismatch"],
+                ),
+            )
 
             class FakeClient:
                 async def ensure_session(self) -> None:
@@ -2709,6 +2719,7 @@ class TestCanonicalPlannerContract:
                     return json.dumps(
                         {
                             "facts": [{"name": "ЖК Legacy", "location": "Москва", "min_price": 12_000_000}],
+                            "ads": [{"id": 1, "state": 2, "status": 2}],
                             "near": [],
                             "missing": [],
                             "params": {},
@@ -2720,11 +2731,11 @@ class TestCanonicalPlannerContract:
             app["overmind_client"] = FakeClient()
             result = await mod.run_chat(app, user_id="u-legacy-search", message="подбери", channel="jivo")
             assert result["intent"] == "main_search"
-            assert [item.get("_payload_stage") for item in seen] == ["main_search", "main_search", "main_search"]
-            assert '"count": 2' in seen[1]["query"]
-            assert '"excluded_names": ["ЖК Legacy"]' in seen[1]["query"]
-            third_envelope = json.loads(seen[2]["query"].split("SEARCH_CONTRACT_ENVELOPE=", 1)[1].split("\n", 1)[0])
-            third_params = json.loads(seen[2]["query"].split("Текущие параметры: ", 1)[1].split("\n", 1)[0])
+            assert [item.get("_payload_stage") for item in seen] == ["main_search", "main_search", "main_search", "main_search"]
+            assert '"count": 3' in seen[2]["query"]
+            assert '"excluded_names": ["ЖК Legacy"]' in seen[2]["query"]
+            third_envelope = json.loads(seen[3]["query"].split("SEARCH_CONTRACT_ENVELOPE=", 1)[1].split("\n", 1)[0])
+            third_params = json.loads(seen[3]["query"].split("Текущие параметры: ", 1)[1].split("\n", 1)[0])
             assert third_envelope["count"] == 1
             assert third_params["preferences"] == {"format": "full_card"}
 

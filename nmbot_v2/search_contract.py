@@ -74,7 +74,7 @@ COMMON_FACT_FIELDS = {
     "utility_fee", "park_near", "water_near", "trade_in", "is_investment", "school", "kindergarten",
     "ddu_escrow", "ads_type_list", "total_area", "property_metro", "metro", "metro_line",
     "property_railway", "highway_name", "location_2.ecology_rating", "ecology_rating", "house", "ads", "ads.fullprice",
-    "ads.price", "ads.area", "ads.rooms", "ads.floor", "ads.floors_total", "ads.renovation", "ads.status", "ads.apart", "ads.house_id",
+    "ads.id", "ads.price", "ads.area", "ads.rooms", "ads.floor", "ads.floors_total", "ads.renovation", "ads.state", "ads.status", "ads.apart", "ads.house_id",
     "ads_add.stat_price", "apartment_types", "mortgage_calc", "mortgage", "discount",
     "payment_by_installments", "apartment_inventory", "available_apartments", "flats_available", "egrn_top_novos", "egrn_contracts", "counter_novos",
     "novos.min_price", "novos.max_price", "infrastructure", "shops", "services", "retail", "clinic", "clinics", "pharmacy", "pharmacies", "house.finishing_list", "parking_price", "parking_inventory", "parking_count", "garage_price", "garage_count", "ceiling_height",
@@ -106,7 +106,7 @@ FACT_FIELD_MAP: dict[str, tuple[str, ...]] = {
     "purchase_terms": ("trade_in", "ddu_escrow", "fz214"),
     "building_profile": ("floors_total", "house", "elevator", "ceiling_height", "building_type"),
     "property_formats": ("apartments", "taunhouse", "ads_type_list"),
-    "lot_examples": ("ads", "ads.fullprice", "ads.area", "ads.rooms", "ads.floor", "ads.floors_total", "ads.renovation", "ads.status", "ads.apart", "ads.house_id", "house", "house.finishing_list", "apartment_types"),
+    "lot_examples": ("ads", "ads.id", "ads.fullprice", "ads.area", "ads.rooms", "ads.floor", "ads.floors_total", "ads.renovation", "ads.state", "ads.status", "ads.apart", "ads.house_id", "house", "house.finishing_list", "apartment_types"),
 }
 
 MISSING_REASON_CODES = {

@@ -61,7 +61,7 @@ n.price_mod="def" and (n.price1>0 or n.price2>0 or n.price3>0 or n.price4>0 or n
 - благоустройство: `ipoteka`, `fz214`, `parking`, `elevator`, `concierge`, `garage`, `balcony`, `loggia`, `territory`, `security`, `yard_without_cars`, `children_ground`, `sports_ground`, `heating_type`, `conditioning_type`, `finishing`, `apartments`, `taunhouse`;
 - `novos_add`: `site_url`, `utility_fee`, `park_near`, `water_near`, `trade_in`, `is_investment`, `school`, `kindergarten`, `ddu_escrow`, `ads_type_list`, `total_area`;
 - транспорт и локация: `property_metro`, `metro`, `metro_line`, `property_railway`, `highway_name`, `location_2.ecology_rating`; MCP может вернуть тот же показатель плоским wire-алиасом `ecology_rating` — сохрани его как факт, не превращая в рекламное обещание;
-- корпуса и лоты: `house`, `ads`, `ads.fullprice`, `ads.price`, `ads.area`, `ads.rooms`, `ads.renovation`, `ads.status`, `ads.apart`, `ads_add.stat_price`, `apartment_types`;
+- корпуса и лоты: `house`, `ads`, `ads.id`, `ads.fullprice`, `ads.price`, `ads.area`, `ads.rooms`, `ads.renovation`, `ads.state`, `ads.status`, `ads.apart`, `ads_add.stat_price`, `apartment_types`;
 - финансы: `mortgage_calc`, `mortgage`, `discount`, `payment_by_installments`;
 - ЕГРН/счётчики: `egrn_top_novos`, `egrn_contracts` aggregates only, `counter_novos`.
 

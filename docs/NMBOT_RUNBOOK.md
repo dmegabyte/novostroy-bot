@@ -88,6 +88,54 @@ python scripts/nmbot_check.py docs --dry-run
 
 Then run the relevant local scope only: `docs`, `contracts`, `v0`, `v2`, `runtime` or `audit`. Expected evidence is printed as run/skipped/passed/failed. This does not prove production behavior.
 
+## Broad inventory gate
+
+Фильтр не показывает ЖК без подтверждённого продаваемого лота. Подтверждение
+требует структурированных `ads.id`, `ads.state=2` и `ads.status=2`. Управление
+вынесено в отдельный CLI:
+
+```bash
+python3 scripts/nmbot_inventory_gate.py status
+python3 scripts/nmbot_inventory_gate.py enable
+python3 scripts/nmbot_inventory_gate.py disable
+```
+
+CLI меняет только `NMBOT_BROAD_INVENTORY_GATE_ENABLED` в `.env`; по умолчанию
+фильтр включён. Для проверки без записи используйте `--dry-run`, для другого
+dotenv-файла — `--env-file PATH`.
+
+При включённом фильтре runtime пишет в безопасный `runtime_summary.inventory_gate`
+только агрегаты: `source_count`, `visible_count` и
+`excluded_unqualified_count`, а также `enabled/status`. Названия ЖК, телефоны,
+payload и секреты в этом событии не сохраняются.
+
+## TEST feature flags
+
+Для TEST-контура три часто меняемых флага переключаются штатным скриптом;
+ручное редактирование удалённого `.env` запрещено:
+
+```bash
+python3 scripts/nmbot_test_feature_flags.py --status
+python3 scripts/nmbot_test_feature_flags.py \
+  --set NMBOT_BROAD_INVENTORY_GATE_ENABLED=off \
+  --set NMBOT_MAIN_SEARCH_FALLBACK_ENABLED=on \
+  --set NMBOT_OPENROUTER_EXCLUDE_REASONING=off \
+  --confirm
+```
+
+Разрешённый allowlist скрипта:
+
+- `NMBOT_BROAD_INVENTORY_GATE_ENABLED` — фильтр ЖК без подтверждённого лота;
+- `NMBOT_MAIN_SEARCH_FALLBACK_ENABLED` — fallback основного поиска;
+- `NMBOT_OPENROUTER_EXCLUDE_REASONING` — исключение reasoning из OpenRouter.
+
+Значения задаются только как `on|off`. Скрипт делает backup TEST `.env`,
+использует удалённый безопасный env-helper, перезапускает только
+`novostroy-bot-api.service` и проверяет health, активность сервиса и runtime V5.
+`--dry-run` не меняет конфигурацию. После изменения скриптом проверяется статус;
+Jivo smoke выполняется отдельно и автоматически этим инструментом не запускается.
+Скрипт фиксирован на TEST-контуре и не предназначен для production.
+
 For source-only simplification mapping, use:
 
 ```bash

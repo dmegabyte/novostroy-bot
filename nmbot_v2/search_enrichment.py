@@ -79,6 +79,8 @@ def build_option_enrichment_request(base: OptionCard, viewpoint: str | None, *, 
         available_fact_fields=fields,
         count=1,
         ignored_preferences=[],
+        search_mode="named_object",
+        facts_needed=safe_facts,
     )
 
 

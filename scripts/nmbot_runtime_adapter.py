@@ -20,11 +20,12 @@ from nmbot_v2.contracts import ExecutableTurn, ExecutionResult, IntentGoal, Inte
 from nmbot_v2.conversation import build_native_conversation_answer
 from nmbot_v2.execution_path import sanitize_execution_path
 from nmbot_v2.fact_context import ALLOWED_FACTS, ALLOWED_SUBJECTS, SUBJECT_FACT_MAP, answered_facts, present_fact_names, split_requested_facts
+from nmbot_v2.inventory_gate import project_broad_inventory
 from nmbot_v2.runtime import TurnProcessor
 from nmbot_v2.manager_rewriter import load_prompt as load_manager_rewriter_prompt, manager_rewriter_request_payload as build_manager_rewriter_payload, parse_manager_rewriter_text
 from nmbot_v2.pair_comparison import execute_pair_comparison
 from nmbot_v2.response_composer import compose_response_writer_formatter_async, formatter_request_payload as build_response_formatter_payload, v3_answer_writer_prompt_identity, v3_answer_writer_request_payload as build_v3_answer_writer_payload, writer_request_payload as build_response_writer_payload
-from nmbot_v2.pending import is_pending_contact_name, is_pending_contact_phone
+from nmbot_v2.pending import is_pending_contact_name, is_pending_contact_phone, pending_delta_for_action
 from nmbot_v2.prompt_provenance import build_prompt_provenance, identity_from_text, merge_prompt_provenance, sanitize_prompt_provenance
 from nmbot_v2.scenario_recipes import FINANCING_CONSENT_FOLLOWUP, OPERATOR_CONSENT_FOLLOWUP, SELECTED_LIVE_FACT_CONSENT_FOLLOWUP, reply_contract_for_pending
 from nmbot_v2.search_enrichment import _filter_option_lot_examples, enrich_search_result_top_options, fetch_enriched_option_v2, merge_option_cards
@@ -1562,7 +1563,7 @@ class _OvermindSearchAdapter:
         self.last_attempts = primary_attempts
         self.last_shortlist_cache_entries = ()
         filled = result.shortlist(limit=contract.count)
-        if contract.count > 1 and 0 < len(filled) < contract.count:
+        if contract.search_mode != "broad" and contract.count > 1 and 0 < len(filled) < contract.count:
             remaining = int(contract.count) - len(filled)
             supplemental_contract = replace(
                 contract,
@@ -1580,10 +1581,60 @@ class _OvermindSearchAdapter:
             except Exception as exc:
                 self.last_attempts = (*primary_attempts, _underfilled_attempt(status="failed", requested=remaining, added=0, error_code=_safe_supplemental_error_code(exc)))
         if contract.search_mode == "broad":
-            result = await self._enrich_shortlist_top_options(client, result, contract)
+            checked_names = tuple(card.name for card in (*result.facts, *result.near))
+            result = await self._enrich_shortlist_top_options(
+                client,
+                result,
+                contract,
+                facts_needed=("lot_examples",),
+            )
+            eligible = result.shortlist(limit=contract.count)
+            if len(eligible) < contract.count:
+                remaining = int(contract.count) - len(eligible)
+                supplemental_contract = replace(
+                    contract,
+                    count=remaining,
+                    excluded_names=(*checked_names, *contract.excluded_names),
+                )
+                supplemental_retrieval_contract = build_candidate_retrieval_request(supplemental_contract)
+                try:
+                    supplemental, supplemental_attempts = await self._search_once(
+                        client,
+                        supplemental_retrieval_contract,
+                        prompt=prompt,
+                        validation_contract=supplemental_contract,
+                    )
+                    supplemental = await self._enrich_shortlist_top_options(
+                        client,
+                        supplemental,
+                        supplemental_contract,
+                        facts_needed=("lot_examples",),
+                    )
+                    merged = _merge_underfilled_search_result(result, supplemental, limit=int(contract.count))
+                    added = max(0, len(merged.shortlist(limit=contract.count)) - len(eligible))
+                    result = merged if added else result
+                    self.last_attempts = (*self.last_attempts, *supplemental_attempts, _inventory_backfill_attempt(
+                        status="filled" if added else "unchanged",
+                        requested=remaining,
+                        added=added,
+                    ))
+                except Exception as exc:
+                    self.last_attempts = (*self.last_attempts, _inventory_backfill_attempt(
+                        status="failed",
+                        requested=remaining,
+                        added=0,
+                        error_code=_safe_supplemental_error_code(exc),
+                    ))
         return result
 
-    async def _enrich_shortlist_top_options(self, client: Any, result: SearchResult, contract: Any) -> SearchResult:
+    async def _enrich_shortlist_top_options(
+        self,
+        client: Any,
+        result: SearchResult,
+        contract: Any,
+        *,
+        facts_needed: tuple[str, ...] | None = None,
+    ) -> SearchResult:
         """Fetch exact full cards for up to three visible shortlist options.
 
         The enriched result still keeps base cards if any lookup is unavailable;
@@ -1605,7 +1656,7 @@ class _OvermindSearchAdapter:
                 base_viewpoint=contract.base_viewpoint,
                 max_options=len(cards),
                 timeout=max(0.2, _safe_float_env("NMBOT_V2_ENRICHMENT_ITEM_TIMEOUT", 20.0)),
-                facts_needed=_shortlist_enrichment_facts(contract.response_viewpoint),
+                facts_needed=facts_needed if facts_needed is not None else _shortlist_enrichment_facts(contract.response_viewpoint),
             )
             enriched_cards = enriched.shortlist(limit=len(cards))
             applied_indexes = {
@@ -1625,9 +1676,17 @@ class _OvermindSearchAdapter:
                 "count": int(meta.get("count") or len(cards)),
                 "applied_count": int(meta.get("applied_count") or 0),
             })
+            if contract.search_mode == "broad":
+                enriched = _retain_broad_enrichment_applied(
+                    enriched,
+                    result,
+                    applied_indexes,
+                    max_options=len(cards),
+                )
+                enriched, gate_attempt = _apply_broad_inventory_gate(enriched)
+                self.last_attempts = (*self.last_attempts, gate_attempt)
             return enriched
         except Exception as exc:
-            # The broad result is already valid; enrichment must never make it disappear.
             self.last_attempts = (*self.last_attempts, {
                 "stage": "shortlist_top_options_enrichment",
                 "enabled": True,
@@ -1636,6 +1695,8 @@ class _OvermindSearchAdapter:
                 "applied_count": 0,
                 "skipped": exc.__class__.__name__,
             })
+            if contract.search_mode == "broad":
+                return SearchResult(missing=result.missing, params=result.params, summary=result.summary)
             return result
 
     async def _search_once(self, client: Any, contract: Any, *, prompt: str, validation_contract: Any | None = None) -> tuple[SearchResult, tuple[dict[str, Any], ...]]:
@@ -1904,6 +1965,54 @@ def _enforce_exact_named_search_scope(result: SearchResult, contract: Any) -> Se
     return SearchResult(facts=facts, near=near, missing=result.missing, params=result.params, summary=result.summary)
 
 
+def _broad_inventory_gate_enabled(value: Any = None) -> bool:
+    raw = os.getenv("NMBOT_BROAD_INVENTORY_GATE_ENABLED", "1") if value is None else value
+    normalized = str(raw or "").strip().lower()
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return True
+
+
+def _apply_broad_inventory_gate(result: SearchResult) -> tuple[SearchResult, dict[str, Any]]:
+    enabled = _broad_inventory_gate_enabled()
+    source_count = len(result.facts) + len(result.near)
+    if not enabled:
+        return result, {
+            "stage": "broad_inventory_gate",
+            "enabled": False,
+            "status": "disabled",
+            "source_count": source_count,
+            "visible_count": source_count,
+            "excluded_unqualified_count": 0,
+        }
+    projected, counts = project_broad_inventory(result)
+    return projected, {
+        "stage": "broad_inventory_gate",
+        "enabled": True,
+        "status": "filtered" if counts["excluded_unqualified_count"] else "unchanged",
+        **counts,
+    }
+
+
+def _retain_broad_enrichment_applied(
+    enriched: SearchResult,
+    source: SearchResult,
+    applied_indexes: set[int],
+    *,
+    max_options: int,
+) -> SearchResult:
+    """Drop raw cards when their individual exact lookup did not apply."""
+    fact_count = min(len(source.facts), max_options)
+    near_count = max(0, max_options - fact_count)
+    facts = tuple(card for index, card in enumerate(enriched.facts[:fact_count], start=1) if index in applied_indexes)
+    near = tuple(
+        card
+        for index, card in enumerate(enriched.near[:near_count], start=fact_count + 1)
+        if index in applied_indexes
+    )
+    return SearchResult(facts=facts, near=near, missing=enriched.missing, params=enriched.params, summary=enriched.summary)
+
+
 def _merge_underfilled_search_result(primary: SearchResult, supplemental: SearchResult, *, limit: int) -> SearchResult:
     fact_keys: set[str] = set()
     facts: list[OptionCard] = []
@@ -1961,6 +2070,12 @@ def _underfilled_attempt(*, status: str, requested: int, added: int, error_code:
     }
     if error_code:
         marker["error_code"] = error_code
+    return marker
+
+
+def _inventory_backfill_attempt(*, status: str, requested: int, added: int, error_code: str | None = None) -> dict[str, Any]:
+    marker = _underfilled_attempt(status=status, requested=requested, added=added, error_code=error_code)
+    marker["stage"] = "inventory_post_enrichment_backfill"
     return marker
 
 
@@ -2720,6 +2835,25 @@ def _try_capture_contact(
         return {"state": next_state, "public": public}
 
     draft_phone = _load_v2_contact_draft(app, user_id=user_id)
+    waiting_for_v5_operator_consent = (
+        runtime_version.casefold() == "v5"
+        and pending_followup in {"contact_name", OPERATOR_CONSENT_FOLLOWUP}
+        and bool(getattr(state, "operator_offered", False))
+        and not contact_consent
+    )
+    if waiting_for_v5_operator_consent and _is_operator_consent_reply_v2(text, accepted=True):
+        if not isinstance(state, ConversationState):
+            return None
+        next_state = apply_state_delta(state, pending_delta_for_action(TurnAction.ACCEPT_OPERATOR, state))
+        public = _public_callback_result(
+            "На какой номер вам удобно позвонить?",
+            "collect_contact_phone",
+            True,
+            next_state,
+            runtime_version=runtime_version,
+            engine_version=engine_version,
+        )
+        return {"state": next_state, "public": public}
     pending_phone = is_pending_contact_phone(pending_followup, contact_consent=contact_consent) or pending_followup == "phone_capture" or pending_action == "contact_phone"
     pending_name = (bool(draft_phone) and not pending_phone) or is_pending_contact_name(pending_followup, contact_consent=contact_consent) or pending_followup == "contact_name" or pending_action == "contact_name"
     if not (pending_name or pending_phone):
@@ -3021,12 +3155,19 @@ def _is_proactive_phone_contact_message_v2(text: str, phone: str) -> bool:
     return False
 
 
-def _is_operator_consent_reply_v2(text: str) -> bool:
+def _is_operator_consent_reply_v2(text: str, *, accepted: bool | None = None) -> bool:
     normalized = re.sub(r"\s+", " ", str(text or "").casefold()).strip(" .,!?")
-    return normalized in {
+    positive = {
         "да", "давай", "давайте", "ок", "хорошо", "конечно", "согласен", "согласна",
+    }
+    negative = {
         "нет", "не", "не надо", "не нужно", "нет спасибо", "без оператора", "не хочу",
     }
+    if accepted is True:
+        return normalized in positive
+    if accepted is False:
+        return normalized in negative
+    return normalized in positive or normalized in negative
 
 
 def _is_v0_contact_phone_positive_consent(text: str) -> bool:
@@ -3983,6 +4124,9 @@ def _safe_runtime_summary_trace(value: Any) -> dict[str, Any]:
     gateway_attempt_details = _safe_gateway_attempt_details(value.get("gateway_attempt_details"))
     if gateway_attempt_details:
         summary["gateway_attempt_details"] = gateway_attempt_details
+    inventory_gate = _safe_inventory_gate_summary(value.get("inventory_gate"))
+    if inventory_gate:
+        summary["inventory_gate"] = inventory_gate
     option_enrichment = _safe_runtime_option_enrichment(value.get("option_enrichment"))
     if option_enrichment:
         summary["option_enrichment"] = option_enrichment
@@ -3996,6 +4140,21 @@ def _safe_runtime_summary_trace(value: Any) -> dict[str, Any]:
     if intent_transition:
         summary["intent_transition"] = intent_transition
     return summary
+
+
+def _safe_inventory_gate_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    status = str(value.get("status") or "").strip().lower()
+    if not isinstance(value.get("enabled"), bool) or status not in {"filtered", "unchanged", "disabled"}:
+        return {}
+    return {
+        "enabled": value["enabled"],
+        "status": status,
+        "source_count": _bounded_int(value.get("source_count"), 0, 1000),
+        "visible_count": _bounded_int(value.get("visible_count"), 0, 1000),
+        "excluded_unqualified_count": _bounded_int(value.get("excluded_unqualified_count"), 0, 1000),
+    }
 
 
 def _safe_pair_comparison_summary(value: Any) -> dict[str, Any] | None:

@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nmbot_v2.contracts import IntentGoal, OptionCard, SafeTurnContext, SemanticPlan, Stage, TurnAction, ExecutableTurn
@@ -979,6 +981,33 @@ def test_selected_lot_hard_rooms_rejects_missing_or_invalid_status_ads() -> None
 
     assert not validation["ok"]
     assert "fact_0_violates_lot_hard:rooms" in validation["errors"]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="Current contract gap: search_contract.validate_search_output has no inventory gate for lot-scoped price evidence.",
+)
+def test_inventory_gate_rejects_project_price_without_qualifying_ad() -> None:
+    # Future owner: nmbot_v2.search_contract.validate_search_output inventory gate.
+    # price_mod is project-level metadata, not evidence for a qualifying ad.
+    request = V2SearchRequest(
+        search_goal={"query_summary": "двушка до 10 млн"},
+        lot_hard={"rooms": 2, "max_price": 10_000_000},
+        available_fact_fields=["id", "name", "min_price", "price_mod", "ads"],
+    )
+    output = _output_for(request)
+    output["facts"] = [{
+        "id": "project-only-price",
+        "name": "ЖК с ценой проекта",
+        "min_price": 9_500_000,
+        "price_mod": 9_500_000,
+        "ads": [],
+    }]
+
+    validation = validate_search_output(output, request)
+
+    assert not validation["ok"]
+    assert "fact_0_violates_inventory_gate:max_price" in validation["errors"]
 
 
 def test_selected_followup_phrase_extracts_lot_scoped_rooms_constraint() -> None:

@@ -1,5 +1,14 @@
 # Changelog nmbot
 
+## 2026-08-07 — TEST feature flag switcher
+
+- Documented `scripts/nmbot_test_feature_flags.py` for the TEST contour.
+- The allowlist contains `NMBOT_BROAD_INVENTORY_GATE_ENABLED`,
+  `NMBOT_MAIN_SEARCH_FALLBACK_ENABLED` and
+  `NMBOT_OPENROUTER_EXCLUDE_REASONING`; the tool supports safe `on|off` changes,
+  backup, API-only restart and health/runtime verification.
+- Production is out of scope; Jivo smoke is a separate operation.
+
 ## 2026-07-23 — V2/V3 manager rewriter prepared locally
 
 - Added an optional final Gemini 2.5 Flash rewriter after the prepared V2/V3

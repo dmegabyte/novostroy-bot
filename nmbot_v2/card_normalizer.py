@@ -444,6 +444,7 @@ def _lot_example(ad: Mapping[str, Any], houses: Mapping[str, str]) -> LotExample
     house_name = houses.get(str(house_id)) if house_id is not None else None
     lot_id = ad.get("id") if ad.get("id") not in (None, "") else None
     status = ad.get("status") if ad.get("status") not in (None, "") else None
+    state = ad.get("state") if ad.get("state") not in (None, "") else None
     source = _text(ad.get("source")) or "ads"
     living_space = _positive_float(ad.get("living_space") or ad.get("life_area"))
     kitchen_area = _positive_float(ad.get("kitchen_area") or ad.get("kitchen_space"))
@@ -452,7 +453,7 @@ def _lot_example(ad: Mapping[str, Any], houses: Mapping[str, str]) -> LotExample
     ceiling_height = _safe_dynamic_text(ad.get("ceiling_height")) or _positive_float(ad.get("ceiling_height"))
     window_view = _safe_lot_feature(ad.get("window_view") or ad.get("view"))
     layout_features = _layout_features(ad)
-    if not any(value is not None and value != () for value in (lot_id, rooms, area, floor, floors_total, full_price, renovation, status, house_id, house_name, living_space, kitchen_area, balcony, bathroom, ceiling_height, window_view, layout_features)):
+    if not any(value is not None and value != () for value in (lot_id, rooms, area, floor, floors_total, full_price, renovation, status, state, house_id, house_name, living_space, kitchen_area, balcony, bathroom, ceiling_height, window_view, layout_features)):
         return None
     return LotExample(
         id=lot_id,
@@ -473,6 +474,7 @@ def _lot_example(ad: Mapping[str, Any], houses: Mapping[str, str]) -> LotExample
         ceiling_height=ceiling_height,
         window_view=window_view,
         layout_features=layout_features,
+        state=state,
     )
 
 

@@ -3344,6 +3344,9 @@ def _journal_runtime_summary(result: dict[str, Any]) -> dict[str, Any] | None:
     gateway_attempt_details = _journal_gateway_attempt_details(summary.get("gateway_attempt_details"))
     if gateway_attempt_details:
         out["gateway_attempt_details"] = gateway_attempt_details
+    inventory_gate = _journal_inventory_gate_summary(summary.get("inventory_gate"))
+    if inventory_gate:
+        out["inventory_gate"] = inventory_gate
     option_enrichment = _journal_option_enrichment(summary.get("option_enrichment"))
     if option_enrichment:
         out["option_enrichment"] = option_enrichment
@@ -3354,6 +3357,21 @@ def _journal_runtime_summary(result: dict[str, Any]) -> dict[str, Any] | None:
     if intent_transition:
         out["intent_transition"] = intent_transition
     return out
+
+
+def _journal_inventory_gate_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    status = str(value.get("status") or "").strip().lower()
+    if not isinstance(value.get("enabled"), bool) or status not in {"filtered", "unchanged", "disabled"}:
+        return {}
+    return {
+        "enabled": value["enabled"],
+        "status": status,
+        "source_count": _journal_int(value.get("source_count"), 0, 1000),
+        "visible_count": _journal_int(value.get("visible_count"), 0, 1000),
+        "excluded_unqualified_count": _journal_int(value.get("excluded_unqualified_count"), 0, 1000),
+    }
 
 
 _JOURNAL_INTENT_GOALS = {

@@ -59,6 +59,8 @@ may link or redirect here, but should not become duplicate owner docs.
 ## 3. Operate and release
 
 - `current` [`NMBOT_RUNBOOK.md`](NMBOT_RUNBOOK.md) — first operational commands, local gates, deploy/rollback boundaries.
+- `current` **Broad inventory gate** — быстрый маршрут управления фильтром ЖК без подтверждённого продаваемого лота: `scripts/nmbot_inventory_gate.py`; подробности и команды — в [NMBOT_RUNBOOK.md](NMBOT_RUNBOOK.md#broad-inventory-gate).
+- `current` **TEST feature flags** — безопасное переключение трёх TEST-флагов без ручного редактирования `.env`: `scripts/nmbot_test_feature_flags.py`; ключи и ограничения — в [NMBOT_RUNBOOK.md](NMBOT_RUNBOOK.md#test-feature-flags).
 - `current` [`JIVO_DIAGNOSTICS.md`](JIVO_DIAGNOSTICS.md) — Jivo/API trace, terminal delivery and diagnostics.
 - `current` [`NMBOT_RELEASE_IDENTITY.md`](NMBOT_RELEASE_IDENTITY.md) — release identity and source attribution.
 - `reference` [`NMBOT_ATOMIC_RELEASES.md`](NMBOT_ATOMIC_RELEASES.md) — atomic release procedure reference.

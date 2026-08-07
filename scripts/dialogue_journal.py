@@ -407,6 +407,9 @@ def _safe_runtime_summary(value: dict[str, Any] | None) -> dict[str, Any]:
     gateway_attempt_details = _safe_gateway_attempt_details(value.get("gateway_attempt_details"))
     if gateway_attempt_details:
         summary["gateway_attempt_details"] = gateway_attempt_details
+    inventory_gate = _safe_inventory_gate_summary(value.get("inventory_gate"))
+    if inventory_gate:
+        summary["inventory_gate"] = inventory_gate
     option_enrichment = _safe_option_enrichment(value.get("option_enrichment"))
     if option_enrichment:
         summary["option_enrichment"] = option_enrichment
@@ -431,6 +434,21 @@ def _safe_runtime_summary(value: dict[str, Any] | None) -> dict[str, Any]:
         if safe_cards:
             summary["card_reformatter_shadow"] = {"mode": "shadow", "card_count": min(len(safe_cards), 3), "cards": safe_cards[:3]}
     return summary
+
+
+def _safe_inventory_gate_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    status = str(value.get("status") or "").strip().lower()
+    if not isinstance(value.get("enabled"), bool) or status not in {"filtered", "unchanged", "disabled"}:
+        return {}
+    return {
+        "enabled": value["enabled"],
+        "status": status,
+        "source_count": _bounded_int(value.get("source_count"), 0, 1000),
+        "visible_count": _bounded_int(value.get("visible_count"), 0, 1000),
+        "excluded_unqualified_count": _bounded_int(value.get("excluded_unqualified_count"), 0, 1000),
+    }
 
 
 _SAFE_INTENT_GOALS = {

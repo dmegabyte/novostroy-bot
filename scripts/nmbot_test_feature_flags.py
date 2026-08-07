@@ -87,9 +87,10 @@ def validate_assignments(raw_assignments: list[str]) -> list[tuple[str, str]]:
     return assignments
 
 
-def _remote_status_script() -> str:
+def _remote_status_script(expected_assignments: list[tuple[str, str]] | None = None) -> str:
     keys = repr(sorted(ALLOWED_KEYS))
     defaults = repr(EFFECTIVE_DEFAULTS)
+    expected = repr(dict(expected_assignments or []))
     return f'''
 from pathlib import Path
 import json
@@ -129,13 +130,23 @@ test_identity_ok = (
     and identity.get("profile") == {TEST_PROFILE!r}
     and identity.get("release_marker") == {TEST_RELEASE_MARKER!r}
 )
-print(json.dumps({{
+payload = {{
     "feature_flags": {{key: (values[key].strip().lower() in {{"1", "true", "yes", "on"}}) if key in values else defaults[key] for key in {keys}}},
     "runtime_v5": get_json("http://127.0.0.1:{TEST_API_PORT}/api/runtime-version").get("runtime_version") == "V5",
     "health_ok": get_json("http://127.0.0.1:{TEST_API_PORT}/health").get("ok") is True,
     "service_active": service.returncode == 0 and service.stdout.strip() == "active",
     "test_identity_ok": test_identity_ok,
-}}, ensure_ascii=False))
+}}
+print(json.dumps(payload, ensure_ascii=False))
+expected = {expected}
+if expected and not (
+    payload["runtime_v5"]
+    and payload["health_ok"]
+    and payload["service_active"]
+    and payload["test_identity_ok"]
+    and all(payload["feature_flags"].get(key) is (value == "1") for key, value in expected.items())
+):
+    raise SystemExit("TEST post-change validation failed")
 '''
 
 
@@ -163,26 +174,13 @@ if not (
 '''
 
 
-def _remote_ownership_check_script(assignments: list[tuple[str, str]]) -> str:
-    """Return a silent verifier that rollback still owns each changed value."""
-    expected = dict(assignments)
-    return f'''
-from pathlib import Path
-
-expected = {expected!r}
-values = {{}}
-for raw in Path({f"{TEST_ROOT}/.env"!r}).read_text(encoding="utf-8").splitlines():
-    line = raw.strip()
-    if line and not line.startswith("#") and "=" in line:
-        key, value = line.split("=", 1)
-        values[key.strip()] = value.strip().strip('"').strip("'")
-if any(values.get(key) != value for key, value in expected.items()):
-    raise SystemExit("TEST feature-flag rollback ownership check failed")
-'''
-
-
 def _identity_check_command() -> str:
     return _encoded_remote_python(_remote_identity_check_script())
+
+
+def _remote_post_change_check_script(assignments: list[tuple[str, str]]) -> str:
+    """Return the remote status/contract check run inside the locked transaction."""
+    return _remote_status_script(assignments)
 
 
 def build_status_command() -> str:
@@ -202,43 +200,28 @@ def build_set_command(assignments: list[tuple[str, str]], backup_name: str) -> s
     env_file = shlex.quote(f"{TEST_ROOT}/.env")
     identity_check = _identity_check_command()
     updates = " ".join(
-        f"python3 {helper} --env {env_file} --key {shlex.quote(key)} --value {shlex.quote(value)};"
+        f"python3 {helper} --env {env_file} --key {shlex.quote(key)} --value {shlex.quote(value)} "
+        "|| { post_hash=$(sha256sum " + env_file + " | awk '{print $1}'); return 1; };"
         for key, value in assignments
     )
+    post_change_check = _encoded_remote_python(_remote_post_change_check_script(assignments))
     return (
-        "set -eu; "
+        "set -Eeuo pipefail; "
         f"mkdir -p {root}/backups; "
         f"exec 9>{root}/backups/.test-feature-flags.lock; flock -n 9; "
         f": test-identity-check; {identity_check}; "
         f"test ! -e {backup}; "
         f"cp -p {env_file} {backup}; "
-        f"rollback() {{ if : test-identity-check && {identity_check}; then cp -p {backup} {env_file}; systemctl --user restart {shlex.quote(TEST_SERVICE)} || true; fi; }}; "
+        "post_hash=''; "
+        f"rollback() {{ trap - ERR; if ! : test-identity-check || ! {identity_check} || ! test -n \"$post_hash\" || ! test \"$(sha256sum {env_file} | awk '{{print $1}}')\" = \"$post_hash\"; then printf '%s\\n' TEST_FEATURE_FLAGS_ROLLBACK_FAILED >&2; exit 70; fi; : test-identity-check; {identity_check}; cp -p {backup} {env_file}; systemctl --user restart {shlex.quote(TEST_SERVICE)}; systemctl --user is-active {shlex.quote(TEST_SERVICE)} >/dev/null; printf '%s\\n' TEST_FEATURE_FLAGS_ROLLED_BACK >&2; }}; "
         "trap rollback ERR; "
-        f"{updates} "
-        f"systemctl --user restart {shlex.quote(TEST_SERVICE)}; "
-        f"systemctl --user is-active {shlex.quote(TEST_SERVICE)}; "
-        "trap - ERR"
-    )
-
-
-def build_restore_command(backup_name: str, assignments: list[tuple[str, str]]) -> str:
-    validate_test_identity()
-    if not assignments:
-        raise FeatureFlagError("at least one rollback ownership assignment is required")
-    if any(key not in ALLOWED_KEYS or value not in {"0", "1"} for key, value in assignments):
-        raise FeatureFlagError("invalid TEST rollback ownership assignment")
-    root = shlex.quote(TEST_ROOT)
-    env_file = shlex.quote(f"{TEST_ROOT}/.env")
-    backup = shlex.quote(f"{TEST_ROOT}/backups/{backup_name}")
-    service = shlex.quote(TEST_SERVICE)
-    identity_check = _identity_check_command()
-    ownership_check = _encoded_remote_python(_remote_ownership_check_script(assignments))
-    return (
-        f"set -eu; exec 9>{root}/backups/.test-feature-flags.lock; flock -n 9; "
+        f"apply_updates() {{ {updates} post_hash=$(sha256sum {env_file} | awk '{{print $1}}'); }}; "
         f": test-identity-check; {identity_check}; "
-        f"test -f {backup}; "
-        f": rollback-ownership-check; {ownership_check}; "
-        f"cp -p {backup} {env_file}; systemctl --user restart {service}; systemctl --user is-active {service}"
+        "apply_updates; "
+        f"systemctl --user restart {shlex.quote(TEST_SERVICE)}; "
+        f"systemctl --user is-active {shlex.quote(TEST_SERVICE)} >/dev/null; "
+        f"{post_change_check}; "
+        "trap - ERR"
     )
 
 
@@ -296,24 +279,6 @@ def _post_change_is_valid(status: dict[str, Any], assignments: list[tuple[str, s
     )
 
 
-def _rollback_and_verify(before: dict[str, Any], backup_name: str, assignments: list[tuple[str, str]]) -> None:
-    restored = run_remote(build_restore_command(backup_name, assignments))
-    if restored.returncode != 0:
-        raise FeatureFlagError("TEST rollback command failed")
-    try:
-        after_restore = read_status()
-    except FeatureFlagError as exc:
-        raise FeatureFlagError("TEST rollback status check failed") from exc
-    if (
-        after_restore.get("runtime_v5") is not True
-        or after_restore.get("test_identity_ok") is not True
-        or after_restore.get("health_ok") is not True
-        or after_restore.get("service_active") is not True
-        or after_restore.get("feature_flags") != before.get("feature_flags")
-    ):
-        raise FeatureFlagError("TEST rollback verification failed")
-
-
 def _backup_name() -> str:
     return f"test-feature-flags-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex}.env"
 
@@ -347,18 +312,18 @@ def main() -> int:
             raise FeatureFlagError("TEST runtime is not V5; refusing feature-flag mutation")
         backup_name = _backup_name()
         result = run_remote(build_set_command(assignments, backup_name))
+        if result.returncode != 0:
+            if "TEST_FEATURE_FLAGS_ROLLBACK_FAILED" in result.stderr:
+                raise FeatureFlagError("remote TEST feature-flag transaction failed; rollback failed")
+            if "TEST_FEATURE_FLAGS_ROLLED_BACK" in result.stderr:
+                raise FeatureFlagError("remote TEST feature-flag transaction failed; rollback restored previous TEST state")
+            raise FeatureFlagError("remote TEST feature-flag transaction failed")
         try:
-            if result.returncode != 0:
-                raise FeatureFlagError("remote TEST feature-flag update/restart failed")
-            after = read_status()
-            if not _post_change_is_valid(after, assignments):
-                raise FeatureFlagError("post-change TEST status did not satisfy flag/health/service/runtime contract")
-        except FeatureFlagError as exc:
-            try:
-                _rollback_and_verify(before, backup_name, assignments)
-            except FeatureFlagError as rollback_exc:
-                raise FeatureFlagError(f"{exc}; rollback failed: {rollback_exc}") from rollback_exc
-            raise FeatureFlagError(f"{exc}; rollback restored previous TEST state") from exc
+            after = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise FeatureFlagError("remote TEST feature-flag transaction returned invalid JSON") from exc
+        if not isinstance(after, dict) or not _post_change_is_valid(after, assignments):
+            raise FeatureFlagError("remote TEST feature-flag transaction returned invalid post-change status")
         print(json.dumps({
             "status": "updated",
             "changed_keys": changed_keys,

@@ -144,6 +144,47 @@ def _encoded_remote_python(source: str) -> str:
     return "python3 -c " + shlex.quote("import base64; exec(base64.b64decode(" + repr(encoded) + ").decode('utf-8'))")
 
 
+def _remote_identity_check_script() -> str:
+    """Return a silent, fail-closed TEST identity verifier for locked writes."""
+    return f'''
+import json
+from pathlib import Path
+
+try:
+    identity = json.loads(Path({TEST_IDENTITY_FILE!r}).read_text(encoding="utf-8"))
+except Exception:
+    identity = {{}}
+if not (
+    isinstance(identity, dict)
+    and identity.get("profile") == {TEST_PROFILE!r}
+    and identity.get("release_marker") == {TEST_RELEASE_MARKER!r}
+):
+    raise SystemExit("TEST identity verification failed")
+'''
+
+
+def _remote_ownership_check_script(assignments: list[tuple[str, str]]) -> str:
+    """Return a silent verifier that rollback still owns each changed value."""
+    expected = dict(assignments)
+    return f'''
+from pathlib import Path
+
+expected = {expected!r}
+values = {{}}
+for raw in Path({f"{TEST_ROOT}/.env"!r}).read_text(encoding="utf-8").splitlines():
+    line = raw.strip()
+    if line and not line.startswith("#") and "=" in line:
+        key, value = line.split("=", 1)
+        values[key.strip()] = value.strip().strip('"').strip("'")
+if any(values.get(key) != value for key, value in expected.items()):
+    raise SystemExit("TEST feature-flag rollback ownership check failed")
+'''
+
+
+def _identity_check_command() -> str:
+    return _encoded_remote_python(_remote_identity_check_script())
+
+
 def build_status_command() -> str:
     validate_test_identity()
     return _encoded_remote_python(_remote_status_script())
@@ -159,6 +200,7 @@ def build_set_command(assignments: list[tuple[str, str]], backup_name: str) -> s
     backup = shlex.quote(f"{TEST_ROOT}/backups/{backup_name}")
     helper = shlex.quote(f"{TEST_ROOT}/scripts/nmbot_env_secrets.py")
     env_file = shlex.quote(f"{TEST_ROOT}/.env")
+    identity_check = _identity_check_command()
     updates = " ".join(
         f"python3 {helper} --env {env_file} --key {shlex.quote(key)} --value {shlex.quote(value)};"
         for key, value in assignments
@@ -167,9 +209,10 @@ def build_set_command(assignments: list[tuple[str, str]], backup_name: str) -> s
         "set -eu; "
         f"mkdir -p {root}/backups; "
         f"exec 9>{root}/backups/.test-feature-flags.lock; flock -n 9; "
+        f": test-identity-check; {identity_check}; "
         f"test ! -e {backup}; "
         f"cp -p {env_file} {backup}; "
-        f"rollback() {{ cp -p {backup} {env_file}; systemctl --user restart {shlex.quote(TEST_SERVICE)} || true; }}; "
+        f"rollback() {{ if : test-identity-check && {identity_check}; then cp -p {backup} {env_file}; systemctl --user restart {shlex.quote(TEST_SERVICE)} || true; fi; }}; "
         "trap rollback ERR; "
         f"{updates} "
         f"systemctl --user restart {shlex.quote(TEST_SERVICE)}; "
@@ -178,13 +221,25 @@ def build_set_command(assignments: list[tuple[str, str]], backup_name: str) -> s
     )
 
 
-def build_restore_command(backup_name: str) -> str:
+def build_restore_command(backup_name: str, assignments: list[tuple[str, str]]) -> str:
     validate_test_identity()
+    if not assignments:
+        raise FeatureFlagError("at least one rollback ownership assignment is required")
+    if any(key not in ALLOWED_KEYS or value not in {"0", "1"} for key, value in assignments):
+        raise FeatureFlagError("invalid TEST rollback ownership assignment")
     root = shlex.quote(TEST_ROOT)
     env_file = shlex.quote(f"{TEST_ROOT}/.env")
     backup = shlex.quote(f"{TEST_ROOT}/backups/{backup_name}")
     service = shlex.quote(TEST_SERVICE)
-    return f"set -eu; test -f {backup}; cp -p {backup} {env_file}; systemctl --user restart {service}; systemctl --user is-active {service}"
+    identity_check = _identity_check_command()
+    ownership_check = _encoded_remote_python(_remote_ownership_check_script(assignments))
+    return (
+        f"set -eu; exec 9>{root}/backups/.test-feature-flags.lock; flock -n 9; "
+        f": test-identity-check; {identity_check}; "
+        f"test -f {backup}; "
+        f": rollback-ownership-check; {ownership_check}; "
+        f"cp -p {backup} {env_file}; systemctl --user restart {service}; systemctl --user is-active {service}"
+    )
 
 
 def run_remote(command: str) -> subprocess.CompletedProcess[str]:
@@ -241,8 +296,8 @@ def _post_change_is_valid(status: dict[str, Any], assignments: list[tuple[str, s
     )
 
 
-def _rollback_and_verify(before: dict[str, Any], backup_name: str) -> None:
-    restored = run_remote(build_restore_command(backup_name))
+def _rollback_and_verify(before: dict[str, Any], backup_name: str, assignments: list[tuple[str, str]]) -> None:
+    restored = run_remote(build_restore_command(backup_name, assignments))
     if restored.returncode != 0:
         raise FeatureFlagError("TEST rollback command failed")
     try:
@@ -300,7 +355,7 @@ def main() -> int:
                 raise FeatureFlagError("post-change TEST status did not satisfy flag/health/service/runtime contract")
         except FeatureFlagError as exc:
             try:
-                _rollback_and_verify(before, backup_name)
+                _rollback_and_verify(before, backup_name, assignments)
             except FeatureFlagError as rollback_exc:
                 raise FeatureFlagError(f"{exc}; rollback failed: {rollback_exc}") from rollback_exc
             raise FeatureFlagError(f"{exc}; rollback restored previous TEST state") from exc

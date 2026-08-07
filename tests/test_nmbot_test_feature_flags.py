@@ -53,6 +53,8 @@ def test_set_command_requires_explicit_non_production_test_identity(monkeypatch)
     assert "client-production" not in command
     assert "flock -n 9" in command
     assert ".test-feature-flags.lock" in command
+    assert ": test-identity-check;" in command
+    assert "rollback() { if : test-identity-check &&" in command
     assert "test ! -e" in command
     for key in ALLOWED_KEYS:
         assert key in command
@@ -71,7 +73,8 @@ def test_backup_names_are_unique_and_restore_uses_only_test_api_service(monkeypa
     first = _backup_name()
     monkeypatch.setattr(flags_module.uuid, "uuid4", lambda: type("UUID", (), {"hex": "b"})())
     second = _backup_name()
-    restore = build_restore_command(first)
+    assignments = [("NMBOT_MAIN_SEARCH_FALLBACK_ENABLED", "0")]
+    restore = build_restore_command(first, assignments)
 
     assert first != second
     assert first.endswith("-a.env")
@@ -79,6 +82,29 @@ def test_backup_names_are_unique_and_restore_uses_only_test_api_service(monkeypa
     assert "test-feature-flags" in restore
     assert "nmbot-test-api.service" in restore
     assert "n8n-bridge" not in restore
+    assert "flock -n 9" in restore
+    assert ".test-feature-flags.lock" in restore
+    assert ": test-identity-check;" in restore
+    assert ": rollback-ownership-check;" in restore
+
+
+def test_locked_remote_guards_fail_closed_without_printing_identity_values(monkeypatch) -> None:
+    monkeypatch.setattr(flags_module, "TEST_ROOT", "/srv/nmbot-test")
+    monkeypatch.setattr(flags_module, "TEST_IDENTITY_FILE", "/srv/nmbot-test/test-identity.json")
+    monkeypatch.setattr(flags_module, "TEST_PROFILE", "hidden-profile")
+    monkeypatch.setattr(flags_module, "TEST_RELEASE_MARKER", "hidden-marker")
+
+    identity_script = flags_module._remote_identity_check_script()
+    ownership_script = flags_module._remote_ownership_check_script([
+        ("NMBOT_MAIN_SEARCH_FALLBACK_ENABLED", "1"),
+    ])
+
+    assert 'raise SystemExit("TEST identity verification failed")' in identity_script
+    assert "print(" not in identity_script
+    assert 'identity.get("profile")' in identity_script
+    assert 'identity.get("release_marker")' in identity_script
+    assert 'values.get(key) != value' in ownership_script
+    assert "print(" not in ownership_script
 
 
 def test_remote_status_script_checks_identity_file_without_rendering_identity_values(monkeypatch) -> None:
@@ -107,6 +133,12 @@ def test_missing_or_mismatched_test_identity_fails_before_remote_command(monkeyp
     monkeypatch.setattr(flags_module.subprocess, "run", lambda *args, **kwargs: calls.append("remote"))
 
     with pytest.raises(FeatureFlagError, match="not fully configured"):
+        flags_module.read_status()
+
+    assert calls == []
+
+    monkeypatch.setattr(flags_module, "TEST_HOST", flags_module.PRODUCTION_HOST)
+    with pytest.raises(FeatureFlagError, match="matches production contour"):
         flags_module.read_status()
 
     assert calls == []

@@ -220,10 +220,21 @@ smoke or production-health proof.
 
 Обязательный порядок для любого code/config/prompt release: сначала завершить
 проверки и зафиксировать одобренные изменения отдельным Git commit, затем собрать
-immutable artifact из commit, выполнить preflight и только после этого deploy.
+immutable artifact из commit, выполнить preflight, TEST envelope compatibility
+probe и только после этого deploy. После deploy обязательна строгая Jivo smoke,
+которая подтверждает принятый опубликованный результат, а не только HTTP 200 или
+доставленный fallback.
 Нельзя деплоить незакоммиченные изменения или собирать release из незафиксированного
 рабочего дерева. Rollback должен ссылаться на предыдущий commit и immutable
 artifact.
+
+HTTP 200, health, `systemd active` и terminal `BOT_MESSAGE` сами по себе не
+являются доказательством успешного поиска. Smoke обязан подтвердить
+`response_model.status=valid`, `published=true`, отсутствие validation/fallback
+ошибок и наличие проверяемого trusted provider envelope. Отсутствие producer-полей
+`mcp_call_count`, `mcp_tool_name`, `mcp_result_projection` или
+`effective_constraints` — release blocker; consumer нельзя ослаблять, чтобы
+скрыть несовместимость producer → schema → consumer.
 
 ### Обязательный simplicity gate перед commit
 
@@ -334,8 +345,16 @@ it does not weaken production, client-production or bridge routes and does not
 replace the lower-level subcommands for reviewed/manual operation.
 
 This command does **not** include Jivo smoke yet. The next explicit gate after a
-successful TEST candidate remains one authorized first Jivo request with
-correlated trace inspection, stopping immediately on the first error.
+successful TEST candidate is the existing smoke runner in strict mode:
+
+```bash
+python3 scripts/nmbot_v6_jivo_smoke.py --require-accepted
+```
+
+Strict mode reads only bounded, sanitized journal metadata and fails when the
+turn is a fallback, validation failure, composer failure, or quality-blocked
+result. A terminal `BOT_MESSAGE` with HTTP 200 is not sufficient. The first
+failure stops the release; keep the previous immutable artifact for rollback.
 
 ### Narrow live API helper overlay
 

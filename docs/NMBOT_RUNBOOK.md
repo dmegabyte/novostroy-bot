@@ -225,6 +225,28 @@ immutable artifact из commit, выполнить preflight и только п�
 рабочего дерева. Rollback должен ссылаться на предыдущий commit и immutable
 artifact.
 
+### Обязательный simplicity gate перед commit
+
+Перед каждой правкой и перед commit проверить весь impact chain:
+
+```text
+user input → owner/prompt → provider/MCP → validator → state → publication → Jivo
+```
+
+1. Сначала использовать существующий owner; не добавлять новый classifier, router,
+   prompt, adapter или fallback, если тот же контракт уже имеет владельца.
+2. Если ошибка повторяется, не добавлять очередную локальную заплатку: остановиться,
+   найти общий контракт и исправить границу ответственности.
+3. Для каждого нового слоя письменно указать: почему нельзя использовать текущий,
+   какую одну ответственность он получает, какие вызовы добавляет и как будет удалён.
+4. Проверить producer → schema → consumer: каждый обязательный результат должен
+   реально создаваться producer-ом и проходить тот же контрактный тест. Отсутствующий
+   producer — release blocker, а не повод ослабить consumer.
+5. Проверить, что решение не ломает соседние state, fallback, publication, rollback
+   и runtime-version paths. Если более простой вариант сохраняет контракт — выбрать его.
+
+Без положительного ответа на этот gate commit и release запрещены.
+
 Existing `scripts/nmbot_release.py status` uses SSH and `deploy` mutates remote state, so neither is part of local preflight. Post-deploy read-only verify needs separately authorized VPS/Jivo/direct-API route evidence. If Jivo smoke is missing, the release state is `incomplete`, never green. Backup, deploy, restart and live Jivo smoke require explicit release owner stop/go.
 
 Reference: `docs/NMBOT_OPERATIONS_MAP.md`; `scripts/nmbot_release.py`; `scripts/nmbot_release_preflight.py`; `scripts/nmbot.py preflight`.

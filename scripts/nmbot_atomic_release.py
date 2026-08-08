@@ -172,7 +172,7 @@ SECRET_ASSIGNMENT_LINE_RE = re.compile(
     r"(?im)^.*\b[A-Za-z0-9_]*(?:TOKEN|API_KEY|SECRET|PASSWORD)[A-Za-z0-9_]*\b\s*(?::|=).*$(?:\n)?"
 )
 SAFE_DIAGNOSTIC_LINE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.,:;@%+=/()\[\]{}!?\-]{0,300}$")
-RUNTIME_DIRS = {"nmbot_v0", "nmbot_v1", "nmbot_v2", "nmbot_v4", "scripts", "prompts", "schemas"}
+RUNTIME_DIRS = {"nmbot_v0", "nmbot_v1", "nmbot_v2", "nmbot_v4", "nmbot_v6", "scripts", "prompts", "schemas"}
 DEPLOY_RUNTIME_DIRS = {"deploy"}
 ROOT_RUNTIME_FILES = {
     "followup_intent_classifier.py",
@@ -204,6 +204,7 @@ API_RUNTIME_SCRIPT_FILES = frozenset({
     "scripts/nmbot_egress_policy.py",
     "scripts/nmbot_gateway_client.py",
     "scripts/nmbot_planner_context.py",
+    "scripts/nmbot_prompt_ledger.py",
     "scripts/nmbot_release_identity.py",
     "scripts/nmbot_runtime_adapter.py",
     "scripts/planner_trace.py",

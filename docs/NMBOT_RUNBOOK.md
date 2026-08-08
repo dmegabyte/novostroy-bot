@@ -218,6 +218,13 @@ deploy command requires `--release-id ID`; this records the ID with every Jivo
 journal turn after deployment. `release_id` is source attribution, not Jivo
 smoke or production-health proof.
 
+Обязательный порядок для любого code/config/prompt release: сначала завершить
+проверки и зафиксировать одобренные изменения отдельным Git commit, затем собрать
+immutable artifact из commit, выполнить preflight и только после этого deploy.
+Нельзя деплоить незакоммиченные изменения или собирать release из незафиксированного
+рабочего дерева. Rollback должен ссылаться на предыдущий commit и immutable
+artifact.
+
 Existing `scripts/nmbot_release.py status` uses SSH and `deploy` mutates remote state, so neither is part of local preflight. Post-deploy read-only verify needs separately authorized VPS/Jivo/direct-API route evidence. If Jivo smoke is missing, the release state is `incomplete`, never green. Backup, deploy, restart and live Jivo smoke require explicit release owner stop/go.
 
 Reference: `docs/NMBOT_OPERATIONS_MAP.md`; `scripts/nmbot_release.py`; `scripts/nmbot_release_preflight.py`; `scripts/nmbot.py preflight`.

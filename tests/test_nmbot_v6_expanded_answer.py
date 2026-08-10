@@ -6,12 +6,17 @@ from nmbot_v6.prompt1_contract import parse_prompt1
 from nmbot_v6.provider import TRUSTED_MCP_SERVER, build_trusted_envelope
 
 
-def _plan(*, search_mode=None, count=1, facts=1, near=0):
+def _plan(*, search_mode=None, count=1, facts=1, near=0, lot_evidence=False):
     params = {"count": count}
     if search_mode is not None:
         params["search_mode"] = search_mode
     fact_cards = [
-        {"name": f"ЖК {index}", "location": "Москва", "district": "msk"}
+        {
+            "name": f"ЖК {index}",
+            "location": "Москва",
+            "district": "msk",
+            **({"lot_examples": ("lot:1",)} if lot_evidence else {}),
+        }
         for index in range(facts)
     ]
     near_cards = [
@@ -46,11 +51,22 @@ def test_named_object_uses_expanded_answer_mode_on_first_turn():
     )
 
     assert policy == {
-        "question_goal": "offer_layouts_or_viewing",
+        "question_goal": "continue_search",
         "answer_mode": "expanded_detail",
         "cards_displayed": 1,
         "dialogue_step": 1,
     }
+
+
+def test_named_object_with_lot_evidence_offers_layouts_or_viewing():
+    policy = build_question_policy(
+        "Расскажи подробно про ЖК Люблинский парк",
+        {"revision": 0},
+        _plan(search_mode="named_object", lot_evidence=True),
+    )
+
+    assert policy["answer_mode"] == "expanded_detail"
+    assert policy["question_goal"] == "offer_layouts_or_viewing"
 
 
 def test_single_broad_card_keeps_existing_first_turn_goal():
@@ -100,7 +116,7 @@ def test_prompt2_gateway_sends_expanded_detail_contract_at_transport_boundary():
     assert payload["_payload_stage"] == "v6_answer_writer"
     query = json.loads(payload["query"].removeprefix("V6_ANSWER_INPUT="))
     assert query["question_policy"] == {
-        "question_goal": "offer_layouts_or_viewing", "answer_mode": "expanded_detail",
+        "question_goal": "continue_search", "answer_mode": "expanded_detail",
         "cards_displayed": 1, "dialogue_step": 1,
     }
     assert query["trusted_mcp"] == {

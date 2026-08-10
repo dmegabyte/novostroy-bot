@@ -197,7 +197,7 @@ class V6Runtime:
                 return _failure(state, "prompt1_contract_violation", RuntimeFailureStage.PROMPT1, gateway_attempts=gateway_attempts)
         plan = _repair_ambiguous_operator_contact(plan, user_text, flow_state)
         plan = _force_exact_detail_plan(plan, exact_detail)
-        plan = _force_ambiguous_consent_clarification(plan, resolution, state)
+        plan = _force_consent_clarification(plan, resolution, state, exact_detail)
         try:
             validate_prompt1_state(plan, model_state)
         except ContractError:
@@ -352,7 +352,7 @@ def run_v6(
         return _failure(state, "provider_failure", RuntimeFailureStage.PROMPT1)
     plan = _repair_ambiguous_operator_contact(plan, user_text, flow_state)
     plan = _force_exact_detail_plan(plan, exact_detail)
-    plan = _force_ambiguous_consent_clarification(plan, resolution, state)
+    plan = _force_consent_clarification(plan, resolution, state, exact_detail)
     try:
         validate_prompt1_state(plan, model_state)
     except ContractError:
@@ -490,53 +490,64 @@ def _followup_flow_state(
     resolution: Any,
     exact_detail: Mapping[str, Any] | None,
 ) -> V6State:
-    if exact_detail is None:
-        pending = state.pending_interaction
-        if resolution.kind is FollowupKind.ACCEPT and pending is not None \
-                and pending.kind == "selection" and len(pending.subject_refs) > 1:
-            context = dict(state.safe_context)
-            context["followup_clarification"] = {
-                "reason": "ambiguous_consent",
-                "subject_count": len(pending.subject_refs),
-            }
-            return replace(state, safe_context=context)
-        return state
-    subject_ref = exact_detail.get("subject_ref")
-    selected = subject_ref if subject_ref in state.option_refs else state.selected_option_ref
-    return replace(state, selected_option_ref=selected, pending_interaction=None)
+    if exact_detail is not None:
+        subject_ref = exact_detail.get("subject_ref")
+        selected = subject_ref if subject_ref in state.option_refs else state.selected_option_ref
+        return replace(state, selected_option_ref=selected, pending_interaction=None)
+    pending = state.pending_interaction
+    if resolution.kind is FollowupKind.ACCEPT and pending is not None \
+            and pending.kind == "selection" and len(pending.subject_refs) > 1:
+        context = dict(state.safe_context)
+        context["followup_clarification"] = {
+            "reason": "ambiguous_consent",
+            "subject_count": len(pending.subject_refs),
+        }
+        return replace(state, safe_context=context)
+    return state
 
 
 def _force_exact_detail_plan(
     plan: Prompt1Result,
     exact_detail: Mapping[str, Any] | None,
 ) -> Prompt1Result:
+    """Retain named-object mode for a typed exact follow-up omitted by Prompt 1."""
     if exact_detail is None:
         return plan
-    params = dict(plan.params)
+    constraints = exact_detail.get("lot_constraints")
+    params = dict(constraints) if isinstance(constraints, Mapping) else {}
+    params.update(plan.params)
     params.update({"search_mode": "named_object", "count": 1})
     return replace(plan, params=params)
 
 
-def _force_ambiguous_consent_clarification(
+def _force_consent_clarification(
     plan: Prompt1Result,
     resolution: Any,
     state: V6State,
+    exact_detail: Mapping[str, Any] | None,
 ) -> Prompt1Result:
+    """Recover when accepted consent has no bounded actionable subject."""
     pending = state.pending_interaction
-    if resolution.kind is not FollowupKind.ACCEPT or pending is None \
-            or pending.kind != "selection" or len(pending.subject_refs) < 2:
+    if resolution.kind is not FollowupKind.ACCEPT or pending is None or exact_detail is not None:
+        return plan
+    if pending.kind == "selection" and len(pending.subject_refs) > 1:
+        question = "Какой из вариантов хотите рассмотреть подробнее?"
+    elif pending.kind == "offer" and len(pending.subject_refs) == 1 \
+            and pending.accept_action == "normal_prompt1":
+        question = "Что именно хотите уточнить по этому ЖК?"
+    else:
         return plan
     return replace(
         plan,
-        action=SearchAction.CLARIFY,
+        action=SearchAction.RECOVER_DIALOGUE,
         target=SearchTarget.NONE,
-        search_policy=SearchPolicy.REQUIRED,
-        clarification_question="Какой из вариантов хотите рассмотреть подробнее?",
+        search_policy=SearchPolicy.FORBIDDEN,
+        clarification_question=question,
         response="",
         facts=(),
         near=(),
-        missing=plan.missing,
-        params=dict(plan.params),
+        missing=(),
+        params={},
     )
 
 

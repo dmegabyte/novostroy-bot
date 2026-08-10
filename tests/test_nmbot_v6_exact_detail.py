@@ -236,7 +236,7 @@ def test_select_second_of_three_binds_second_canonical_card_and_runs_detail_pipe
     assert len(prompt2.calls) == 1
 
 
-def test_unresolved_and_compound_followups_remain_normal_prompt1_input():
+def test_only_unresolved_followups_remain_normal_prompt1_input():
     card = _card("Люблинский парк", "complex:lp")
     state = V6State(
         revision=1,
@@ -247,11 +247,16 @@ def test_unresolved_and_compound_followups_remain_normal_prompt1_input():
             ("complex:lp",), 1,
         ),
     )
-    for text in ("что именно?", "да, но до 18 млн"):
+    for text in ("что именно?",):
         prompt1 = Prompt1Stub([_output(action="answer_current_options", response="По карточке")])
         result, _ = _run(prompt1, state, text)
         assert result.status is RuntimeStatus.COMPLETED
         assert "exact_detail" not in prompt1.states[0]["safe_context"]
+
+    prompt1 = Prompt1Stub([_output(facts=[card], params={"count": 1})])
+    result, _ = _run(prompt1, state, "да, но до 18 млн")
+    assert result.status is RuntimeStatus.COMPLETED
+    assert prompt1.states[0]["safe_context"]["exact_detail"]["subject_ref"] == "complex:lp"
 
 
 def test_answer_current_options_is_allowed_with_nonempty_cards():

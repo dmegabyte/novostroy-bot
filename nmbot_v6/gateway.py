@@ -464,8 +464,15 @@ def build_question_policy(
         and len(plan.facts) == 1
         and not plan.near
     )
-    if expanded_detail:
+    lot_evidence = any(
+        _nonempty_lot_container(card.get(key))
+        for card in plan.facts
+        for key in ("ads", "lot_examples")
+    )
+    if expanded_detail and lot_evidence:
         goal = "offer_layouts_or_viewing"
+    elif expanded_detail:
+        goal = "continue_search"
     elif any(word in lowered for word in ("просмотр", "посмотреть квартиру", "планировк")):
         goal = "answer_viewing_request"
     elif cards_displayed == 0:
@@ -482,3 +489,7 @@ def build_question_policy(
         "cards_displayed": cards_displayed,
         "dialogue_step": dialogue_step,
     })
+
+
+def _nonempty_lot_container(value: Any) -> bool:
+    return isinstance(value, (Mapping, list, tuple)) and bool(value)

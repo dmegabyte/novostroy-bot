@@ -55,13 +55,14 @@ def test_cta_accept_projects_exact_context_and_forces_expanded_detail():
     assert build_question_policy("да", prompt2.calls[0][0], result.plan)["answer_mode"] == "expanded_detail"
 
 
-def test_offer_layouts_accept_uses_exact_pipeline():
+def test_normal_prompt1_offer_accept_recovers_without_exact_pipeline():
     card = _card("Саларьево парк", "complex:sp")
     state = _offer_state(card, goal="offer_layouts_or_viewing", action="normal_prompt1")
     result, prompt1, prompt2 = _run(state, "да", _output(facts=[card], params={"count": 1, "rooms": 2}))
     assert result.status is RuntimeStatus.COMPLETED
-    assert prompt1.states[0]["safe_context"]["exact_detail"]["pending_action"] == "show_layouts"
-    assert result.plan.params["search_mode"] == "named_object"
+    assert "exact_detail" not in prompt1.states[0]["safe_context"]
+    assert result.plan.action.value == "recover_dialogue"
+    assert result.plan.search_policy.value == "forbidden"
     assert len(prompt2.calls) == 1
 
 
@@ -113,15 +114,17 @@ def test_multiple_cards_bare_consent_clarifies():
     result, prompt1, prompt2 = _run(state, "да", _output(facts=list(cards), params={"count": 2, "search_mode": "broad"}))
     assert result.status is RuntimeStatus.COMPLETED
     assert prompt1.states[0]["safe_context"]["followup_clarification"]["reason"] == "ambiguous_consent"
-    assert result.plan.action.value == "clarify" and not result.plan.facts and not result.plan.near
+    assert result.plan.action.value == "recover_dialogue" and not result.plan.facts and not result.plan.near
+    assert result.plan.search_policy.value == "forbidden"
+    assert result.evidence.call_count == 0
     assert len(prompt2.calls) == 1
 
 
-def test_compound_consent_is_not_bare_accept():
+def test_compound_consent_binds_actionable_offer():
     card = _card("Люблинский парк", "complex:lp")
     state = _offer_state(card)
     result, prompt1, _ = _run(state, "да, но до 18 млн", _output(facts=[card], params={"max_price": 18_000_000, "count": 1, "search_mode": "broad"}))
-    assert PendingInteractionResolver().resolve("да, но до 18 млн", state).kind.value == "unresolved"
+    assert PendingInteractionResolver().resolve("да, но до 18 млн", state).kind.value == "accept"
     assert result.status is RuntimeStatus.COMPLETED
-    assert "exact_detail" not in prompt1.states[0]["safe_context"]
+    assert prompt1.states[0]["safe_context"]["exact_detail"]["subject_ref"] == "complex:lp"
     assert result.plan.params["max_price"] == 18_000_000

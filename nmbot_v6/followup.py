@@ -38,6 +38,9 @@ _EDGE_PUNCTUATION = re.compile(r"^[\s.,!?;:…—–-]+|[\s.,!?;:…—–-]+$")
 _INDEX = re.compile(r"(?:вариант\s*)?([1-9]|1\d|20)")
 _CARD_SLOT = re.compile(r"card:([0-2])\Z")
 _DETAIL_ACCEPT = re.compile(r"да[,]?\s+расскаж(?:и|ите)\s+(?:всё|все)\Z")
+_COMPOUND_ACCEPT = re.compile(
+    r"(?:да|ага|угу|хорошо|конечно|давай)[,]?\s+(?:но|только|и)\s+\S.+\Z"
+)
 
 
 class PendingInteractionResolver:
@@ -48,7 +51,9 @@ class PendingInteractionResolver:
         if pending is None or not self._is_current(pending, state):
             return FollowupResolution(FollowupKind.UNRESOLVED)
         normalized = _normalize(user_text)
-        if normalized in _ACCEPT or _DETAIL_ACCEPT.fullmatch(normalized):
+        if normalized in _ACCEPT or normalized == "подробнее" \
+                or _DETAIL_ACCEPT.fullmatch(normalized) \
+                or (len(normalized) <= 200 and _COMPOUND_ACCEPT.fullmatch(normalized)):
             return FollowupResolution(FollowupKind.ACCEPT)
         if normalized in _REJECT:
             return FollowupResolution(FollowupKind.REJECT)
@@ -113,6 +118,7 @@ def exact_detail_context(
         return None
     subject_ref = None
     if resolution.kind is FollowupKind.ACCEPT and pending.kind == "offer" \
+            and pending.accept_action in {"show_stored_details", "show_layouts"} \
             and len(pending.subject_refs) == 1:
         subject_ref = pending.subject_refs[0]
     elif resolution.kind is FollowupKind.SELECT and pending.kind == "selection" \

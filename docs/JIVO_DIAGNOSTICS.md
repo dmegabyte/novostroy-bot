@@ -525,6 +525,40 @@ Bridge/audit diagnoser принимает из входных событий т�
 `trace_[0-9a-f]{12}`. Любой произвольный `trace_ref` отбрасывается; safe ref
 заново вычисляется из внутреннего raw bridge trace ID и сам raw ID не печатается.
 
+### V6 stage receipt в локальной диагностике
+
+Если `runtime_summary.gateway_attempt_details` содержит V6 gateway evidence,
+`scripts/nmbot_jivo_dialogue_diagnose.py` добавляет в `actual` компактный
+`runtime_v6_stage_receipt`. Это local/historical evidence, не доказательство
+текущего production-состояния. Receipt содержит только:
+
+- boolean-признаки наличия payload stage и gateway task;
+- ограниченный HTTP `provider_status_code`, если он был в sanitized input;
+- `parse_status` (`ok|invalid_json|missing`) и `validator_status`
+  (`ok|contract_violation|missing`);
+- `next_owner`: `provider` для HTTP-ошибки, иначе точный V6 prompt-contract
+  owner при parse/validator violation, либо `v6_runtime`.
+
+Task ID, payload, prompt, текст клиента, ответ модели и provider body намеренно
+не попадают в receipt. Он нужен, чтобы отличить contract/parse failure от
+transport/provider failure до следующей локальной правки.
+
+Проверка этого диагностического контракта и V6 exact-detail replay выполняется
+полностью offline:
+
+```bash
+PYTHONPATH=. pytest -q \
+  tests/test_nmbot_jivo_dialogue_diagnose.py \
+  tests/test_nmbot_v6_exact_detail.py \
+  tests/test_nmbot_v6_expanded_answer.py
+python3 scripts/nmbot_jivo_dialogue_diagnose.py --self-test
+```
+
+Тест `test_nmbot_v6_expanded_answer.py` проверяет сформированный Prompt2 payload
+для `answer_mode=expanded_detail` через fake transport. Он подтверждает, что
+policy и запрет повторного «Хотите узнать подробнее?» дошли до model-facing
+input, но не заменяет проверку фактического model output.
+
 ### V0 diagnostics
 
 V0 диагностируется отдельно: сначала подтвердите активную версию через `GET /api/runtime-version`, затем используйте V0 harness и первый Jivo trace. Не интерпретируйте V2 `runtime_summary` как V0 contract.

@@ -452,7 +452,17 @@ def build_question_policy(
         raise ContractError("state revision is invalid")
     dialogue_step = revision + 1
     lowered = user_text.casefold()
-    if any(word in lowered for word in ("просмотр", "посмотреть квартиру", "планировк")):
+    expanded_detail = (
+        plan.action.value == "search"
+        and plan.search_policy.value == "required"
+        and plan.params.get("search_mode") == "named_object"
+        and plan.params.get("count") == 1
+        and len(plan.facts) == 1
+        and not plan.near
+    )
+    if expanded_detail:
+        goal = "offer_layouts_or_viewing"
+    elif any(word in lowered for word in ("просмотр", "посмотреть квартиру", "планировк")):
         goal = "answer_viewing_request"
     elif cards_displayed == 0:
         goal = "continue_search"
@@ -464,6 +474,7 @@ def build_question_policy(
         goal = "choose_complex"
     return MappingProxyType({
         "question_goal": goal,
+        "answer_mode": "expanded_detail" if expanded_detail else "standard",
         "cards_displayed": cards_displayed,
         "dialogue_step": dialogue_step,
     })

@@ -9,9 +9,11 @@ import json
 import os
 import re
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 from typing import Any
 
+import pytest
 from aiohttp import web
 from nmbot_v0.contracts import V0Answer, V0State, V0TurnResult
 from nmbot_v0.field_contract import v0_presentation_search_fields
@@ -20,6 +22,7 @@ from nmbot_v2.semantic_planner import derive_runtime_decision, normalize_semanti
 from nmbot_v2.pending import PendingKind
 from nmbot_v2.state import ConversationState, EnrichedCardCacheEntry, apply_state_delta, enriched_card_identity
 from nmbot_v2.runtime import TurnProcessor, _last_offer_for_response
+from nmbot_v6.phone import PrivatePhone
 import nmbot_v2.manager_rewriter as manager_rewriter_mod
 import scripts.nmbot_runtime_adapter as runtime_adapter_mod
 from scripts.nmbot_runtime_adapter import _OvermindSearchAdapter, _SemanticPlannerAdapter, _canonical_v0_envelope, _inherit_selected_scope, _legacy_to_v2_state, _pending_scenario_for_planner, _queue_v2_callback_result, _safe_response_composer_trace, _semantic_plan_from_planner, _semantic_plan_from_semantic_result, _v2_to_planner_legacy_state, run_runtime_turn
@@ -254,6 +257,264 @@ def test_safe_runtime_summary_trace_preserves_gateway_attempt_details_only() -> 
 
     assert summary["gateway_attempt_details"] == [{"stage": "gateway_attempt", "model": "google_gemini", "ok": True, "gateway_task_id": "task-1", "duration_ms": 55, "parse_status": "ok"}]
     assert "secret" not in json.dumps(summary, ensure_ascii=False)
+
+
+def test_safe_runtime_summary_trace_redacts_v6_task_ids_but_keeps_legacy_ids() -> None:
+    summary = runtime_adapter_mod._safe_runtime_summary_trace({
+        "stage": "first_list",
+        "action": "search",
+        "gateway_attempt_details": [
+            {"_payload_stage": "v6_search_agent", "gateway_task_id": "raw-v6-task", "provider_status_code": 200, "parse_status": "ok", "validator_status": "ok", "payload": "secret"},
+            {"gateway_task_id": "legacy/task", "provider_status_code": 503, "parse_status": "missing", "validator_status": "contract_violation", "query": "secret"},
+        ],
+    })
+
+    assert summary["gateway_attempt_details"] == [
+        {"stage": "gateway_attempt", "_payload_stage": "v6_search_agent", "gateway_task_id_present": True, "duration_ms": 0, "provider_status_code": 200, "parse_status": "ok", "validator_status": "ok"},
+        {"stage": "gateway_attempt", "gateway_task_id": "legacy_task", "duration_ms": 0, "provider_status_code": 503, "parse_status": "missing", "validator_status": "contract_violation"},
+    ]
+    assert "raw-v6-task" not in json.dumps(summary)
+
+
+def test_v6_runtime_adapter_persists_only_safe_namespace_and_public_summary(monkeypatch) -> None:
+    class V6Client:
+        def __init__(self) -> None:
+            self.payloads: list[dict[str, Any]] = []
+
+        async def _run_gateway_request_once(self, request_data, _headers, _timeout):
+            self.payloads.append(request_data)
+            if request_data["_payload_stage"] == "v6_search_agent":
+                return json.dumps({
+                    "action": "search", "target": "new_search", "search_policy": "required",
+                    "clarification_question": "", "response": "",
+                    "facts": [{"name": "Локальный ЖК", "ref": "complex:local", "location": "Москва", "district": "msk"}],
+                    "near": [], "missing": [], "params": {"count": 1, "search_mode": "broad"},
+                }, ensure_ascii=False), {"_gateway_task_id": "raw-v6-task-ref"}
+            return json.dumps({"intro": "", "cards": [{"index": 0, "text": "Подтверждённые детали."}], "question": "Что уточнить?"}, ensure_ascii=False), {"ok": True}
+
+    async def scenario() -> None:
+        from nmbot_v6.phone import PhoneParseResult
+
+        monkeypatch.delenv("NMBOT_CONTOUR_PROFILE", raising=False)
+        client = V6Client()
+        app = make_app({"runtime_version_override": "V6"}, client=client)
+        app["v6_phone_parser"] = lambda _text, _backend=None: PhoneParseResult(False)
+        result = await run_runtime_turn(app, user_id="u", message="Подберите вариант", channel="local")
+        saved = app["state_store"].states["u"]
+
+        assert result["ok"] is True
+        assert result["meta"]["runtime"] == "v6"
+        assert result["meta"]["trace"]["runtime_summary"]["gateway_attempt_details"][0]["gateway_task_id_present"] is True
+        assert "nmbot_v6" in saved
+        dumped = json.dumps({"public": result, "saved": saved}, ensure_ascii=False)
+        assert "raw-v6-task-ref" not in dumped
+        assert [payload["_payload_stage"] for payload in client.payloads] == ["v6_search_agent", "v6_answer_writer"]
+
+    asyncio.run(scenario())
+
+
+def test_v6_task_ref_echo_fails_closed_without_mutating_safe_state(monkeypatch) -> None:
+    task_ref = "v6-private-task-ref"
+
+    class V6Client:
+        async def _run_gateway_request_once(self, request_data, _headers, _timeout):
+            if request_data["_payload_stage"] == "v6_search_agent":
+                return json.dumps({
+                    "action": "search", "target": "new_search", "search_policy": "required",
+                    "clarification_question": "", "response": "",
+                    "facts": [{"name": "Локальный ЖК", "ref": "complex:local", "location": "Москва", "district": "msk"}],
+                    "near": [], "missing": [], "params": {"count": 1, "search_mode": "broad"},
+                }, ensure_ascii=False), {"_gateway_task_id": task_ref}
+            return json.dumps({"intro": "", "cards": [{"index": 0, "text": task_ref}], "question": "Что уточнить?"}, ensure_ascii=False), {"ok": True}
+
+    async def scenario() -> None:
+        from nmbot_v6.phone import PhoneParseResult
+
+        original_v6_namespace = {
+            "revision": 4,
+            "safe_context": {"last_action": "answer_current_options"},
+            "option_refs": ["complex:existing"],
+        }
+        app = make_app({"runtime_version_override": "V6", "nmbot_v6": original_v6_namespace}, client=V6Client())
+        app["v6_phone_parser"] = lambda _text, _backend=None: PhoneParseResult(False)
+        result = await run_runtime_turn(app, user_id="u", message="Подберите вариант", channel="local")
+
+        assert result["ok"] is False
+        assert result["error_type"] == "task_ref_echo"
+        assert task_ref not in json.dumps({"public": result, "saved": app["state_store"].states["u"]}, ensure_ascii=False)
+        assert app["state_store"].states["u"]["nmbot_v6"] == original_v6_namespace
+
+    asyncio.run(scenario())
+
+
+def test_v6_phone_bypass_queues_anonymous_callback_without_phone_in_safe_surfaces(tmp_path, monkeypatch) -> None:
+    class PhoneBypassRuntime:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def run(self, _message, _state):
+            return SimpleNamespace(
+                status=runtime_adapter_mod.V6RuntimeStatus.PHONE_BYPASS,
+                state=runtime_adapter_mod.V6State(),
+                private_phone=PrivatePhone("+79991234567"),
+            )
+
+    async def scenario() -> None:
+        app = make_app({"runtime_version_override": "V6"})
+        app["crm_callback_outbox"] = mod.LocalCallbackOutbox(tmp_path / "outbox")
+        monkeypatch.setattr(runtime_adapter_mod, "V6Runtime", PhoneBypassRuntime)
+
+        phone_like_channel = "+7 999 000-11-22"
+        result = await run_runtime_turn(app, user_id="u", message="Мой номер +7 999 123-45-67", channel=phone_like_channel, meta={"event_id": "event-1"})
+        record = _callback_records(tmp_path / "outbox")[0]
+
+        assert result["ok"] is True
+        assert result["intent"] == "callback_queued"
+        assert result["handoff_to_operator"] is False
+        assert result["meta"]["runtime"] == "v6"
+        assert record["contact"]["name"] == "Без имени"
+        assert "channel" not in result["meta"]
+        assert "channel" not in record["context"]
+        assert phone_like_channel not in json.dumps({"public": result, "context": record["context"]}, ensure_ascii=False)
+        assert "+79991234567" not in json.dumps({"public": result, "saved": app["state_store"].states["u"], "context": record["context"]}, ensure_ascii=False)
+
+    asyncio.run(scenario())
+
+
+def test_v6_phone_bypass_fails_closed_when_outbox_persistence_raises(monkeypatch) -> None:
+    class PhoneBypassRuntime:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def run(self, _message, _state):
+            return SimpleNamespace(
+                status=runtime_adapter_mod.V6RuntimeStatus.PHONE_BYPASS,
+                state=runtime_adapter_mod.V6State(),
+                private_phone=PrivatePhone("+79991234567"),
+            )
+
+    class FailingOutbox:
+        def enqueue_callback(self, **_kwargs: Any) -> Any:
+            raise OSError("local outbox unavailable")
+
+    async def scenario() -> None:
+        app = make_app({"runtime_version_override": "V6"})
+        app["crm_callback_outbox"] = FailingOutbox()
+        monkeypatch.setattr(runtime_adapter_mod, "V6Runtime", PhoneBypassRuntime)
+
+        result = await run_runtime_turn(
+            app, user_id="u", message="Мой номер +7 999 123-45-67", channel="local", meta={"event_id": "event-1"}
+        )
+
+        dumped = json.dumps({"public": result, "saved": app["state_store"].states["u"]}, ensure_ascii=False)
+        assert result["ok"] is False
+        assert result["error_type"] == "callback_outbox_unavailable"
+        assert "+79991234567" not in dumped
+        assert "79991234567" not in dumped
+
+    asyncio.run(scenario())
+
+
+def test_v6_phone_bypass_does_not_reveal_phone_without_private_outbox(monkeypatch) -> None:
+    class PhoneBypassRuntime:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def run(self, _message, _state):
+            return SimpleNamespace(
+                status=runtime_adapter_mod.V6RuntimeStatus.PHONE_BYPASS,
+                state=runtime_adapter_mod.V6State(),
+                private_phone=PrivatePhone("+79991234567"),
+            )
+
+    async def scenario() -> None:
+        app = make_app({"runtime_version_override": "V6"})
+        app.pop("crm_callback_outbox", None)
+        monkeypatch.setattr(runtime_adapter_mod, "V6Runtime", PhoneBypassRuntime)
+
+        def fail_if_revealed(_self: PrivatePhone) -> str:
+            raise AssertionError("phone must not be revealed without private outbox")
+
+        monkeypatch.setattr(PrivatePhone, "reveal_for_private_storage", fail_if_revealed)
+        result = await run_runtime_turn(
+            app, user_id="u", message="Мой номер +7 999 123-45-67", channel="local", meta={}
+        )
+
+        assert result["ok"] is False
+        assert result["error_type"] == "callback_outbox_unavailable"
+
+    asyncio.run(scenario())
+
+
+def test_v6_phone_bypass_does_not_reveal_phone_with_noncallable_outbox(monkeypatch) -> None:
+    class PhoneBypassRuntime:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def run(self, _message, _state):
+            return SimpleNamespace(
+                status=runtime_adapter_mod.V6RuntimeStatus.PHONE_BYPASS,
+                state=runtime_adapter_mod.V6State(),
+                private_phone=PrivatePhone("+79991234567"),
+            )
+
+    class NoncallableOutbox:
+        enqueue_callback = None
+
+    async def scenario() -> None:
+        app = make_app({"runtime_version_override": "V6"})
+        app["crm_callback_outbox"] = NoncallableOutbox()
+        monkeypatch.setattr(runtime_adapter_mod, "V6Runtime", PhoneBypassRuntime)
+
+        def fail_if_revealed(_self: PrivatePhone) -> str:
+            raise AssertionError("phone must not be revealed without callable private outbox")
+
+        monkeypatch.setattr(PrivatePhone, "reveal_for_private_storage", fail_if_revealed)
+        result = await run_runtime_turn(
+            app, user_id="u", message="Мой номер +7 999 123-45-67", channel="local", meta={}
+        )
+
+        assert result["ok"] is False
+        assert result["error_type"] == "callback_outbox_unavailable"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("forbidden_key", ["task_ref", "TASK__REF", "raw", "RAW_payload", "payload"])
+def test_v6_state_rejects_private_provenance_keys(forbidden_key: str) -> None:
+    from nmbot_v6.contracts import ContractError
+    from nmbot_v6.state import V6State
+
+    with pytest.raises(ContractError):
+        V6State(safe_context={forbidden_key: "value"})
+    with pytest.raises(ContractError):
+        V6State.from_mapping({"safe_context": {forbidden_key: "value"}})
+
+
+def test_v6_state_rejects_nested_private_provenance_keys_in_context_and_cards() -> None:
+    from nmbot_v6.contracts import ContractError
+    from nmbot_v6.state import V6State
+
+    with pytest.raises(ContractError):
+        V6State(safe_context={"nested": [{"task-ref": "value"}]})
+    with pytest.raises(ContractError):
+        V6State(current_cards=({"name": "ЖК", "infrastructure": {"raw": "value"}},))
+
+
+def test_transport_evidence_allows_payload_key_outside_v6_state_boundary() -> None:
+    from nmbot_v6.provider import TrustedMcpEnvelope
+
+    envelope = TrustedMcpEnvelope(
+        task_ref="task:1",
+        actual_server="novostroym",
+        actual_tool="get_flat_info",
+        call_count=1,
+        safe_facts={"payload": {"facts": []}},
+        effective_constraints={"payload": {"count": 1}},
+    )
+
+    assert envelope.safe_facts["payload"] == {"facts": ()}
+    assert envelope.effective_constraints["payload"] == {"count": 1}
 
 
 def test_safe_runtime_summary_trace_preserves_only_availability_evidence_allowlist() -> None:

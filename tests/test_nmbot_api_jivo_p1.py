@@ -582,6 +582,53 @@ def test_jivo_bot_journal_persists_safe_v4_gateway_trace_without_raw_sensitive_f
     asyncio.run(scenario())
 
 
+def test_api_gateway_attempt_sanitizer_preserves_legacy_task_id_and_v6_marker() -> None:
+    attempts = mod._journal_gateway_attempt_details([
+        {"stage": "gateway_attempt", "gateway_task_id": "legacy/task"},
+        {"_payload_stage": "v6_search_agent", "gateway_task_id_present": True},
+    ])
+
+    assert attempts == [
+        {"stage": "gateway_attempt", "gateway_task_id": "legacy_task", "duration_ms": 0},
+        {"_payload_stage": "v6_search_agent", "gateway_task_id_present": True, "duration_ms": 0},
+    ]
+    assert "gateway_task_id" not in attempts[1]
+
+
+def test_api_journal_v6_summary_redacts_task_ref_idempotently() -> None:
+    result = {
+        "meta": {"runtime": "v6", "trace": {"runtime_summary": {
+            "stage": "v6_runtime", "action": "search", "call_counts": {"gateway_attempts": 1},
+            "gateway_attempt_details": [{"stage": "gateway_attempt", "_payload_stage": "v6_search_agent", "gateway_task_id": "raw-v6-task-ref", "gateway_task_id_present": True, "parse_status": "ok", "validator_status": "ok"}],
+        }}},
+    }
+
+    first = mod._journal_runtime_summary(result)
+    second = mod._journal_runtime_summary({"meta": {"runtime": "v6", "trace": {"runtime_summary": first}}})
+
+    assert first == second
+    assert first == {
+        "stage": "v6_runtime",
+        "action": "search",
+        "call_counts": {"gateway_attempts": 1},
+        "gateway_attempt_details": [{"stage": "gateway_attempt", "_payload_stage": "v6_search_agent", "gateway_task_id_present": True, "duration_ms": 0, "parse_status": "ok", "validator_status": "ok"}],
+    }
+    assert "raw-v6-task-ref" not in json.dumps(first)
+
+
+def test_api_gateway_attempt_sanitizer_rejects_malformed_provider_status_codes() -> None:
+    attempts = mod._journal_gateway_attempt_details([
+        {"provider_status_code": 200},
+        {"provider_status_code": True},
+        {"provider_status_code": "200"},
+        {"provider_status_code": 99},
+        {"provider_status_code": 600},
+    ])
+
+    assert attempts[0]["provider_status_code"] == 200
+    assert all("provider_status_code" not in attempt for attempt in attempts[1:])
+
+
 def test_jivo_bot_journal_persists_safe_v1_response_model_trace(tmp_path, monkeypatch):
     async def scenario() -> None:
         app = make_app(tmp_path)
@@ -999,6 +1046,33 @@ def test_api_reset_resets_only_active_namespace_and_preserves_inactive() -> None
     asyncio.run(scenario())
 
 
+def test_api_reset_v6_resets_only_v6_namespace_and_preserves_inactive() -> None:
+    async def scenario() -> None:
+        app = make_app()
+        user_id = "api:v6-preserve"
+        app["state_store"].states[user_id] = {
+            "nmbot_v2": {"params": {"rooms": 2}},
+            "nmbot_v6": {"unexpected": "old"},
+        }
+        await app["runtime_version_store"].set("V6")
+
+        class Request:
+            def __init__(self, app):
+                self.app = app
+
+            async def json(self):
+                return {"user_id": user_id}
+
+        response = await mod.handle_api_reset(Request(app))
+
+        assert response.status == 200
+        state = app["state_store"].states[user_id]
+        assert state["nmbot_v6"] == mod._canonical_v6_envelope()["nmbot_v6"]
+        assert state["nmbot_v2"] == {"params": {"rooms": 2}}
+
+    asyncio.run(scenario())
+
+
 def test_runtime_version_store_defaults_v2_and_persists_reload(tmp_path) -> None:
     async def scenario() -> None:
         path = tmp_path / "runtime-version.json"
@@ -1106,6 +1180,43 @@ def test_start_version_commands_override_only_current_jivo_session() -> None:
         response, status = await mod.process_jivo_client_message(app, payload(event_id="start-default", text="/start"))
         assert status == 200
         assert "runtime_version_override" not in app["state_store"].states[user_id]
+
+    asyncio.run(scenario())
+
+
+def test_start_6_uses_local_override_greeting_and_v6_namespace() -> None:
+    async def scenario() -> None:
+        app = make_app()
+        user_id = "jivo:site1:chat1:client-chat1"
+        app["state_store"].states[user_id] = {"nmbot_v2": {"params": {"rooms": 2}}}
+
+        response, status = await mod.process_jivo_client_message(app, payload(event_id="start-6", text="/start_6"))
+
+        assert status == 200
+        assert response["message"]["text"] == mod._jivo_start_greeting("V6")
+        state = app["state_store"].states[user_id]
+        assert state["runtime_version_override"] == "V6"
+        assert state["nmbot_v6"] == mod._canonical_v6_envelope()["nmbot_v6"]
+        assert state["nmbot_v2"] == {"params": {"rooms": 2}}
+
+    asyncio.run(scenario())
+
+
+def test_start_6_in_client_production_removes_session_override_and_uses_active_runtime(monkeypatch) -> None:
+    async def scenario() -> None:
+        app = make_app()
+        user_id = "jivo:site1:chat1:client-chat1"
+        app["state_store"].states[user_id] = {"runtime_version_override": "V6", "nmbot_v6": {"old": True}}
+        monkeypatch.setattr(mod, "is_client_production", lambda: True)
+
+        response, status = await mod.process_jivo_client_message(app, payload(event_id="start-6-production", text="/start_6"))
+
+        assert status == 200
+        assert response["message"]["text"] == mod.JIVO_START_GREETING
+        state = app["state_store"].states[user_id]
+        assert "runtime_version_override" not in state
+        assert state["nmbot_v2"] == mod.ConversationState().to_dict()
+        assert state["nmbot_v6"] == {"old": True}
 
     asyncio.run(scenario())
 

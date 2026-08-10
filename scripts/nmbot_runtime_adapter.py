@@ -46,6 +46,10 @@ from nmbot_v1.contracts import V1Action, V1Stage
 from nmbot_v4.contracts import V4_FAIL_CLOSED_OBJECT, V4State
 from nmbot_v4.response_validator import compact_json as compact_v4_json
 from nmbot_v4.runtime import run_turn as run_v4_turn
+from nmbot_v6.gateway import Prompt1Gateway, Prompt2Gateway, V6OvermindTransport
+from nmbot_v6.phone import PrivatePhone
+from nmbot_v6.runtime import RuntimeStatus as V6RuntimeStatus, V6Runtime
+from nmbot_v6.state import V6State
 from scripts.nmbot_card_reformatter import build_reformat_plan
 
 try:
@@ -92,7 +96,7 @@ except ImportError:  # pragma: no cover - package-style fallback
 SAFE_V2_ERROR_TEXT = "Сейчас не могу надёжно проверить нужную информацию, поэтому не буду гадать. Лучше передать вопрос специалисту, он сможет проверить актуальность вручную. Передать оператору запрос?"
 SCENARIO_NEED_FACETS = {"family", "rental", "investment", "life", "financing"}
 SCENARIO_NEED_ALIASES = {"mortgage": "financing", "finance": "financing"}
-SUPPORTED_RUNTIME_VERSIONS = frozenset({"V0", "V1", "V2", "V3", "V4", "V5"})
+SUPPORTED_RUNTIME_VERSIONS = frozenset({"V0", "V1", "V2", "V3", "V4", "V5", "V6"})
 MAX_V0_CONTEXT_TEXT_CHARS = 2000
 V0_CONTACT_PHONE_CONSENT_MESSAGE = V0_CONTACT_PHONE_DIGITS_REQUEST
 
@@ -337,12 +341,14 @@ async def run_runtime_turn(
     except (KeyError, TypeError, ValueError, RuntimeError) as exc:
         if version == "V4":
             return _v4_config_error(detail=exc.__class__.__name__)
-        return _config_error("v4_runtime_exception" if version == "V4" else "v1_runtime_exception" if version == "V1" else "v0_runtime_exception" if version == "V0" else "v2_runtime_exception", detail=exc.__class__.__name__, runtime=version.lower())
+        return _config_error("v6_runtime_exception" if version == "V6" else "v4_runtime_exception" if version == "V4" else "v1_runtime_exception" if version == "V1" else "v0_runtime_exception" if version == "V0" else "v2_runtime_exception", detail=exc.__class__.__name__, runtime=version.lower())
 
 
 def _normalize_runtime_version(value: Any) -> str:
     normalized = str(value or "").strip().upper()
     return normalized if normalized in SUPPORTED_RUNTIME_VERSIONS else "V2"
+        if version == "V6":
+            return await _run_v6_authoritative(app, user_id=user_id, message=message, channel=channel, meta=meta)
 
 
 def _decorate_v3_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -924,11 +930,11 @@ def _merge_runtime_namespace_envelope(existing: dict[str, Any] | None, active: d
 
     merged: dict[str, Any] = {}
     source = existing if isinstance(existing, dict) else {}
-    for key in ("nmbot_v0", "nmbot_v1", "nmbot_v2", "nmbot_v4"):
+    for key in ("nmbot_v0", "nmbot_v1", "nmbot_v2", "nmbot_v4", "nmbot_v6"):
         value = source.get(key)
         if isinstance(value, dict):
             merged[key] = copy.deepcopy(value)
-    for key in ("nmbot_v0", "nmbot_v1", "nmbot_v2", "nmbot_v4"):
+    for key in ("nmbot_v0", "nmbot_v1", "nmbot_v2", "nmbot_v4", "nmbot_v6"):
         value = active.get(key) if isinstance(active, dict) else None
         if isinstance(value, dict):
             merged[key] = copy.deepcopy(value)
@@ -978,6 +984,198 @@ def _envelope_to_v1_state(envelope: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return V1ConversationState.clean().to_dict()
     try:
+def _canonical_v6_envelope(state: V6State | None = None) -> dict[str, Any]:
+    return {"nmbot_v6": (state or V6State()).safe_projection()}
+
+
+def _envelope_to_v6_state(envelope: dict[str, Any] | None) -> V6State:
+    raw = envelope.get("nmbot_v6") if isinstance(envelope, dict) else None
+    try:
+        return V6State.from_mapping(raw) if isinstance(raw, Mapping) else V6State()
+    except Exception:
+        return V6State()
+
+
+def _v6_runtime_summary(result: Any) -> dict[str, Any]:
+    meta = getattr(result, "meta", {})
+    trace = meta.get("trace") if isinstance(meta, Mapping) else None
+    summary = trace.get("runtime_summary") if isinstance(trace, Mapping) else None
+    if not isinstance(summary, Mapping):
+        return {}
+    details = _safe_gateway_attempt_details(summary.get("gateway_attempt_details"))
+    return {
+        "stage": "v6_runtime",
+        "action": _bounded_token(summary.get("action")) or "unknown",
+        "call_counts": {"gateway_attempts": _bounded_int((summary.get("call_counts") or {}).get("gateway_attempts") if isinstance(summary.get("call_counts"), Mapping) else 0, 0, 5)},
+        **({"gateway_attempt_details": details} if details else {}),
+    }
+
+
+def _v6_public_result(result: Any, *, channel: str) -> dict[str, Any]:
+    raw_text = getattr(result, "text", None)
+    task_ref_echoed = _v6_task_ref_echoed(result)
+    completed = getattr(result, "status", None) is V6RuntimeStatus.COMPLETED and not task_ref_echoed
+    raw_text = raw_text if completed else None
+    answer = _redact(str(raw_text or "").strip())[:1200]
+    if not answer:
+        answer = SAFE_V2_ERROR_TEXT
+    plan = getattr(result, "plan", None)
+    action = str(getattr(getattr(plan, "action", None), "value", "") or "v6_turn")
+    return {
+        "ok": completed,
+        **({"error": "v6_runtime_error", "error_type": "task_ref_echo" if task_ref_echoed else str(getattr(result, "failure_code", "runtime_failure") or "runtime_failure")} if not completed else {}),
+        "answer": answer,
+        "client_answer": answer,
+        "intent": action,
+        "answer_kind": action,
+        "handoff_to_operator": False,
+        "buttons": [],
+        "meta": _v6_public_meta(channel=channel, runtime_summary=_v6_runtime_summary(result)),
+    }
+
+
+_V6_PUBLIC_CHANNELS = frozenset({"jivo", "local"})
+
+
+def _safe_v6_channel(channel: Any) -> str | None:
+    """Return only a known V6 transport token, never caller-controlled text."""
+    candidate = channel if isinstance(channel, str) else ""
+    normalized = candidate.strip().lower()
+    return normalized if normalized in _V6_PUBLIC_CHANNELS else None
+
+
+def _v6_public_meta(*, channel: Any, runtime_summary: dict[str, Any]) -> dict[str, Any]:
+    meta: dict[str, Any] = {"runtime": "v6", "trace": {"runtime_summary": runtime_summary}}
+    safe_channel = _safe_v6_channel(channel)
+    if safe_channel is not None:
+        meta["channel"] = safe_channel
+    return meta
+
+
+def _v6_task_ref_echoed(result: Any) -> bool:
+    evidence = getattr(result, "evidence", None)
+    task_ref = getattr(evidence, "task_ref", None)
+    return bool(
+        getattr(result, "status", None) is V6RuntimeStatus.COMPLETED
+        and isinstance(task_ref, str)
+        and task_ref
+        and task_ref in str(getattr(result, "text", None) or "")
+    )
+
+
+def _v6_callback_context_snapshot(state: V6State, *, channel: str) -> dict[str, Any]:
+    """Build a bounded outbox context without V6 private runtime material."""
+    forbidden = ("phone", "task", "payload", "raw", "contact", "client", "chat", "token", "secret")
+
+    def clean(value: Any, *, depth: int = 0) -> Any:
+        if depth >= 4:
+            return None
+        if isinstance(value, Mapping):
+            out: dict[str, Any] = {}
+            for key, item in list(value.items())[:12]:
+                name = str(key)
+                if any(word in name.lower() for word in forbidden):
+                    continue
+                cleaned = clean(item, depth=depth + 1)
+                if cleaned not in (None, "", [], {}):
+                    out[name[:80]] = cleaned
+            return out
+        if isinstance(value, (list, tuple)):
+            return [item for item in (clean(item, depth=depth + 1) for item in value[:5]) if item not in (None, "", [], {})]
+        if isinstance(value, str):
+            return _redact(value)[:160]
+        if isinstance(value, (bool, int, float)):
+            return value
+        return None
+
+    projection = state.safe_projection()
+    context = {
+        "runtime": "v6",
+        "state": clean(projection),
+    }
+    safe_channel = _safe_v6_channel(channel)
+    if safe_channel is not None:
+        context["channel"] = safe_channel
+    return context
+
+
+def _v6_phone_bypass_public_result(
+    app: Any,
+    *,
+    user_id: str,
+    channel: str,
+    meta: dict[str, Any] | None,
+    result: Any,
+    state: V6State,
+) -> dict[str, Any]:
+    private_phone = getattr(result, "private_phone", None)
+    outbox = _callback_outbox(app)
+    enqueue_callback = getattr(outbox, "enqueue_callback", None) if outbox is not None else None
+    if not callable(enqueue_callback):
+        return _v6_public_result(type("FailedV6", (), {"status": V6RuntimeStatus.FAILED, "text": None, "failure_code": "callback_outbox_unavailable", "plan": None, "meta": {}})(), channel=channel)
+    if type(private_phone) is not PrivatePhone:
+        return _v6_public_result(type("FailedV6", (), {"status": V6RuntimeStatus.FAILED, "text": None, "failure_code": "callback_outbox_unavailable", "plan": None, "meta": {}})(), channel=channel)
+    revealed_phone = private_phone.reveal_for_private_storage()
+    phone = _normalize_phone_v2(revealed_phone) if isinstance(revealed_phone, str) else None
+    if not phone:
+        return _v6_public_result(type("FailedV6", (), {"status": V6RuntimeStatus.FAILED, "text": None, "failure_code": "callback_outbox_unavailable", "plan": None, "meta": {}})(), channel=channel)
+    context = _v6_callback_context_snapshot(state, channel=channel)
+    try:
+        outbox_result = enqueue_callback(
+            session_key=user_id,
+            event_id=_v1_meta_event_id(meta),
+            contact_name="Без имени",
+            normalized_phone=phone,
+            context=context,
+            summary_input=context,
+        )
+    except OSError:
+        return _v6_public_result(type("FailedV6", (), {"status": V6RuntimeStatus.FAILED, "text": None, "failure_code": "callback_outbox_unavailable", "plan": None, "meta": {}})(), channel=channel)
+    if getattr(outbox_result, "status", None) not in {"queued", "duplicate"}:
+        return _v6_public_result(type("FailedV6", (), {"status": V6RuntimeStatus.FAILED, "text": None, "failure_code": "callback_outbox_not_queued", "plan": None, "meta": {}})(), channel=channel)
+    answer = "Спасибо. Заявку на обратный звонок сохранила — специалист свяжется с вами."
+    return {
+        "ok": True,
+        "answer": answer,
+        "client_answer": answer,
+        "intent": "callback_queued",
+        "answer_kind": "callback_queued",
+        "handoff_to_operator": False,
+        "buttons": [],
+        "crm_callback": outbox_result.public(),
+        "meta": _v6_public_meta(channel=channel, runtime_summary={"stage": "v6_runtime", "action": "callback_queued", "call_counts": {"gateway_attempts": 0}}),
+    }
+
+
+async def _run_v6_authoritative(
+    app: Any,
+    *,
+    user_id: str,
+    message: str,
+    channel: str,
+    meta: dict[str, Any] | None,
+    commit: bool = True,
+) -> dict[str, Any]:
+    store = app["state_store"]
+    envelope = copy.deepcopy(await store.get(user_id))
+    state_before = _envelope_to_v6_state(envelope)
+    client = app.get("overmind_client") if hasattr(app, "get") else None
+    if client is None:
+        return _v6_public_result(type("FailedV6", (), {"status": V6RuntimeStatus.FAILED, "text": None, "failure_code": "missing_overmind_client", "plan": None, "meta": {}})(), channel=channel)
+    transport = V6OvermindTransport(client)
+    phone_parser = app.get("v6_phone_parser") if hasattr(app, "get") else None
+    runtime_kwargs = {"phone_parser": phone_parser} if callable(phone_parser) else {}
+    result = await V6Runtime(Prompt1Gateway(transport), Prompt2Gateway(transport), **runtime_kwargs).run(str(message or ""), state_before)
+    state_after = getattr(result, "state", None)
+    if _v6_task_ref_echoed(result):
+        return _v6_public_result(result, channel=channel)
+    if commit and isinstance(state_after, V6State):
+        await store.save(user_id, _merge_runtime_namespace_envelope(envelope, _canonical_v6_envelope(state_after)))
+    if getattr(result, "status", None) is V6RuntimeStatus.PHONE_BYPASS:
+        return _v6_phone_bypass_public_result(app, user_id=user_id, channel=channel, meta=meta, result=result, state=state_after if isinstance(state_after, V6State) else state_before)
+    return _v6_public_result(result, channel=channel)
+
+
         return V1ConversationState.from_dict(raw).to_dict()
     except Exception:
         return V1ConversationState.clean().to_dict()
@@ -3501,9 +3699,16 @@ def _safe_gateway_attempt(value: Any) -> dict[str, Any] | None:
     for key in ("ok", "empty", "safe"):
         if isinstance(value.get(key), bool):
             out[key] = bool(value.get(key))
-    task_id = _bounded_token(value.get("gateway_task_id"))
-    if task_id:
-        out["gateway_task_id"] = task_id
+    if is_v6:
+        if value.get("gateway_task_id_present") is True or _bounded_token(value.get("gateway_task_id")):
+            out["gateway_task_id_present"] = True
+    else:
+        task_id = _bounded_token(value.get("gateway_task_id"))
+        if task_id:
+            out["gateway_task_id"] = task_id
+    provider_status = value.get("provider_status_code")
+    if isinstance(provider_status, int) and not isinstance(provider_status, bool) and 100 <= provider_status <= 599:
+        out["provider_status_code"] = provider_status
     out["duration_ms"] = _bounded_int(value.get("duration_ms"), 0, 10 * 60 * 1000)
     parse_status = str(value.get("parse_status") or "").strip()
     if parse_status in {"ok", "invalid_json", "missing"}:
@@ -3527,6 +3732,10 @@ def _safe_gateway_attempt(value: Any) -> dict[str, Any] | None:
         out["request_shape"] = safe_shape
     return out
 
+    payload_stage = str(value.get("_payload_stage") or "").strip()
+    is_v6 = payload_stage in {"v6_search_agent", "v6_answer_writer"}
+    if is_v6:
+        out["_payload_stage"] = payload_stage
 
 def _safe_model_usage(value: Any) -> dict[str, list[str]]:
     if not isinstance(value, dict):
@@ -3543,6 +3752,9 @@ def _safe_model_usage(value: Any) -> dict[str, list[str]]:
         models = [model for model in (_bounded_token(item) for item in raw_items) if model]
         if models:
             out[role] = list(dict.fromkeys(models))[:3]
+    validator_status = str(value.get("validator_status") or "").strip()
+    if validator_status in {"ok", "contract_violation", "missing"}:
+        out["validator_status"] = validator_status
     return out
 
 

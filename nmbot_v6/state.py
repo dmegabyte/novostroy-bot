@@ -16,6 +16,9 @@ _MAX_CARD_NODES = 300
 _MAX_CARD_BYTES = 20_000
 _SECRET_KEY = re.compile(r"token|secret|password|authorization|api[_-]?key|credential|prompt|metadata|mcp[_-]?servers", re.I)
 _SECRET_VALUE = re.compile(r"(?:bearer\s+\S+|(?:sk|pk|ghp|xox[baprs]?)[_-][A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{16,})", re.I)
+_STATE_PROVENANCE_KEY = re.compile(
+    r"(?:^|[_-])(?:task[_-]*ref|payload|raw)(?:$|[_-])", re.I
+)
 _CARD_KEYS = frozenset({
     "name", "ref", "id", "object_id", "option_ref", "district", "location", "price",
     "price_min", "price_max", "price_range", "finishing", "metro", "area", "rooms",
@@ -104,6 +107,18 @@ def _charge_card(budget: dict[str, int], amount: int) -> None:
         raise ContractError("current card aggregate budget exceeded")
 
 
+def _reject_state_provenance_keys(value: Any) -> None:
+    """Reject transport provenance only at the persisted V6 state boundary."""
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str) or _STATE_PROVENANCE_KEY.search(key):
+                raise ContractError("V6 state contains a forbidden provenance key")
+            _reject_state_provenance_keys(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _reject_state_provenance_keys(item)
+
+
 def _bounded_card(value: Mapping[str, Any], depth: int = 0, budget: dict[str, int] | None = None) -> Mapping[str, Any]:
     if budget is None:
         budget = {"nodes": 0, "bytes": 0}
@@ -179,6 +194,7 @@ class V6State:
             raise ContractError("pending_phone must be boolean")
         if not isinstance(self.safe_context, Mapping):
             raise ContractError("safe_context must be an object")
+        _reject_state_provenance_keys(self.safe_context)
         if type(self.option_refs) not in (list, tuple):
             raise ContractError("option_refs must be an array")
         for ref in self.option_refs:
@@ -189,6 +205,7 @@ class V6State:
                 raise ContractError("selected option ref must be present in option_refs")
         if type(self.current_cards) not in (list, tuple) or len(self.current_cards) > _MAX_CURRENT_CARDS:
             raise ContractError("current_cards must be a bounded array")
+        _reject_state_provenance_keys(self.current_cards)
         pending = self.pending_interaction
         if isinstance(pending, Mapping):
             pending = PendingInteraction.from_mapping(pending)

@@ -103,5 +103,14 @@ def test_prompt2_gateway_sends_expanded_detail_contract_at_transport_boundary():
         "question_goal": "offer_layouts_or_viewing", "answer_mode": "expanded_detail",
         "cards_displayed": 1, "dialogue_step": 1,
     }
+    assert query["trusted_mcp"] == {
+        "task_ref": "task-v6", "actual_server": TRUSTED_MCP_SERVER,
+        "actual_tool": MCP_TOOL, "call_count": 1,
+        "safe_facts": {"facts": [{"name": "ЖК 0", "ref": "complex:lp"}]},
+        "effective_constraints": {"rooms": 2}, "visible_refs": ["complex:lp"],
+        "evidence_source": "transport_trace",
+    }
+    assert "tools" not in payload
+    assert "mcp_servers" not in payload
     assert 'Если `answer_mode="expanded_detail"`' in payload["system_prompt"]
     assert "не спрашивай «Хотите узнать подробнее?»" in payload["system_prompt"]

@@ -4,7 +4,10 @@ import json
 import pytest
 
 from nmbot_v6.followup import PendingInteractionResolver
-from nmbot_v6.gateway import Prompt1GatewayResult, V6OvermindTransport
+from nmbot_v6.gateway import (
+    Prompt1Gateway, Prompt1GatewayResult, Prompt2Gateway, TransportResponse,
+    V6OvermindTransport,
+)
 from nmbot_v6.phone import PhoneParseResult
 from nmbot_v6.runtime import RuntimeFailureStage, RuntimeStatus, V6Runtime, run_v6
 from nmbot_v6.state import PendingInteraction, V6State
@@ -108,6 +111,68 @@ def test_second_invalid_prompt1_is_contract_violation_not_provider_failure():
     assert result.failure_code == "prompt1_contract_violation"
     assert prompt1.repair_codes == ["current_options_without_stored_cards"]
     assert not prompt2.calls
+    assert result.meta["trace"]["runtime_summary"]["gateway_attempt_details"] == [
+        {"stage": "gateway_attempt", "_payload_stage": "v6_search_agent", "call_attempted": True, "gateway_status": "completed", "parse_status": "ok", "validator_status": "contract_violation"},
+        {"stage": "gateway_attempt", "_payload_stage": "v6_search_agent", "call_attempted": True, "gateway_status": "completed", "parse_status": "ok", "validator_status": "contract_violation"},
+    ]
+
+
+def test_operator_contact_has_terminal_safe_gateway_summary():
+    prompt1 = Prompt1Stub([{
+        **_output(), "action": "operator_contact", "target": "none", "search_policy": "forbidden", "clarification_question": "Оставить номер для звонка?",
+    }])
+
+    result, prompt2 = _run(prompt1, V6State(), "Позовите оператора")
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert not prompt2.calls
+    assert result.meta["trace"]["runtime_summary"] == {
+        "stage": "v6_runtime",
+        "action": "operator_contact",
+        "call_counts": {"gateway_attempts": 1},
+        "gateway_attempt_details": [
+            {"stage": "gateway_attempt", "_payload_stage": "v6_search_agent", "call_attempted": True, "gateway_status": "completed", "parse_status": "ok", "validator_status": "ok"},
+        ],
+    }
+
+
+def test_async_runtime_retains_only_safe_v6_gateway_attempt_summary():
+    class FakeTransport:
+        def __init__(self, responses):
+            self.responses = list(responses)
+            self.payloads = []
+
+        async def complete(self, payload):
+            self.payloads.append(payload)
+            return self.responses.pop(0)
+
+    output = _output(facts=[_card("Локальный ЖК", "complex:local")])
+    trace = V6OvermindTransport._model_projection_trace(output, {"_gateway_task_id": "raw-task-id"})
+    assert trace is not None
+    prompt1_transport = FakeTransport([TransportResponse(output, trace)])
+    prompt2_transport = FakeTransport([TransportResponse(json.dumps({
+        "intro": "", "cards": [{"index": 0, "text": "Подробности подтверждены."}],
+        "question": "Что ещё уточнить?",
+    }))])
+
+    result = asyncio.run(V6Runtime(
+        Prompt1Gateway(prompt1_transport), Prompt2Gateway(prompt2_transport), phone_parser=_no_phone,
+    ).run("Покажите локальный ЖК", V6State()))
+
+    summary = result.meta["trace"]["runtime_summary"]
+    assert result.status is RuntimeStatus.COMPLETED
+    assert result.evidence.task_ref == "raw-task-id"
+    assert summary["call_counts"] == {"gateway_attempts": 2}
+    assert summary["gateway_attempt_details"] == [
+        {"stage": "gateway_attempt", "_payload_stage": "v6_search_agent", "call_attempted": True, "gateway_status": "completed", "gateway_task_id_present": True, "parse_status": "ok", "validator_status": "ok"},
+        {"stage": "gateway_attempt", "_payload_stage": "v6_answer_writer", "call_attempted": True, "gateway_status": "completed", "parse_status": "ok", "validator_status": "ok"},
+    ]
+    dumped = json.dumps(summary, ensure_ascii=False)
+    for forbidden in ("raw-task-id", "Покажите локальный ЖК", "V6_SEARCH_INPUT", "V6_ANSWER_INPUT", "Локальный ЖК"):
+        assert forbidden not in dumped
+    assert [payload["_payload_stage"] for payload in prompt1_transport.payloads + prompt2_transport.payloads] == [
+        "v6_search_agent", "v6_answer_writer",
+    ]
 
 
 def test_pending_accept_runs_exact_detail_pipeline_with_saved_constraints():

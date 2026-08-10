@@ -452,7 +452,10 @@ def build_question_policy(
         raise ContractError("state revision is invalid")
     dialogue_step = revision + 1
     lowered = user_text.casefold()
-    expanded_detail = (
+    exact_detail = isinstance(state.get("safe_context"), Mapping) and isinstance(
+        state["safe_context"].get("exact_detail"), Mapping
+    )
+    expanded_detail = exact_detail or (
         plan.action.value == "search"
         and plan.search_policy.value == "required"
         and plan.params.get("search_mode") == "named_object"

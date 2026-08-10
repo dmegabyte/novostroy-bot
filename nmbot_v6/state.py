@@ -311,7 +311,9 @@ def _pending_for_question(
             "selection", question_goal, "normal_prompt1", "clear_pending",
             option_refs, revision,
         )
-    refs = (selected_option_ref,) if selected_option_ref else ()
+    refs = (selected_option_ref,) if selected_option_ref else _single_card_subject_refs(
+        current_cards, option_refs
+    )
     return PendingInteraction(
         "offer", question_goal, "normal_prompt1", "clear_pending", refs, revision
     )

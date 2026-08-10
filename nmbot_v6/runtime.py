@@ -118,7 +118,7 @@ class V6Runtime:
                     return _checked(RuntimeResult(
                         RuntimeStatus.COMPLETED, execution.state, text=execution.text
                     ))
-        flow_state = _exact_detail_flow_state(state, exact_detail)
+        flow_state = _followup_flow_state(state, resolution, exact_detail)
         model_state = _model_state_projection(flow_state, exact_detail)
 
         try:
@@ -147,6 +147,8 @@ class V6Runtime:
                     state, "prompt1_contract_violation", RuntimeFailureStage.PROMPT1
                 )
         plan = _repair_ambiguous_operator_contact(plan, user_text, flow_state)
+        plan = _force_exact_detail_plan(plan, exact_detail)
+        plan = _force_ambiguous_consent_clarification(plan, resolution, state)
         try:
             validate_prompt1_state(plan, model_state)
         except ContractError:
@@ -263,7 +265,7 @@ def run_v6(
                 return _checked(RuntimeResult(
                     RuntimeStatus.COMPLETED, execution.state, text=execution.text
                 ))
-    flow_state = _exact_detail_flow_state(state, exact_detail)
+    flow_state = _followup_flow_state(state, resolution, exact_detail)
     model_state = _model_state_projection(flow_state, exact_detail)
 
     try:
@@ -274,6 +276,8 @@ def run_v6(
     except Exception:
         return _failure(state, "provider_failure", RuntimeFailureStage.PROMPT1)
     plan = _repair_ambiguous_operator_contact(plan, user_text, flow_state)
+    plan = _force_exact_detail_plan(plan, exact_detail)
+    plan = _force_ambiguous_consent_clarification(plan, resolution, state)
     try:
         validate_prompt1_state(plan, model_state)
     except ContractError:
@@ -406,15 +410,61 @@ def _model_state_projection(
     return projection
 
 
-def _exact_detail_flow_state(
+def _followup_flow_state(
     state: V6State,
+    resolution: Any,
     exact_detail: Mapping[str, Any] | None,
 ) -> V6State:
+    if exact_detail is not None:
+        subject_ref = exact_detail.get("subject_ref")
+        selected = subject_ref if subject_ref in state.option_refs else state.selected_option_ref
+        return replace(state, selected_option_ref=selected, pending_interaction=None)
+    pending = state.pending_interaction
+    if resolution.kind is FollowupKind.ACCEPT and pending is not None \
+            and pending.kind == "selection" and len(pending.subject_refs) > 1:
+        context = dict(state.safe_context)
+        context["followup_clarification"] = {
+            "reason": "ambiguous_consent",
+            "subject_count": len(pending.subject_refs),
+        }
+        return replace(state, safe_context=context)
+    return state
+
+
+def _force_exact_detail_plan(
+    plan: Prompt1Result,
+    exact_detail: Mapping[str, Any] | None,
+) -> Prompt1Result:
+    """Retain named-object mode for a typed exact follow-up omitted by Prompt 1."""
     if exact_detail is None:
-        return state
-    subject_ref = exact_detail.get("subject_ref")
-    selected = subject_ref if subject_ref in state.option_refs else state.selected_option_ref
-    return replace(state, selected_option_ref=selected, pending_interaction=None)
+        return plan
+    params = dict(plan.params)
+    params.update({"search_mode": "named_object", "count": 1})
+    return replace(plan, params=params)
+
+
+def _force_ambiguous_consent_clarification(
+    plan: Prompt1Result,
+    resolution: Any,
+    state: V6State,
+) -> Prompt1Result:
+    """A bare consent cannot choose one of several current complexes."""
+    pending = state.pending_interaction
+    if resolution.kind is not FollowupKind.ACCEPT or pending is None \
+            or pending.kind != "selection" or len(pending.subject_refs) < 2:
+        return plan
+    return replace(
+        plan,
+        action=SearchAction.CLARIFY,
+        target=SearchTarget.NONE,
+        search_policy=SearchPolicy.REQUIRED,
+        clarification_question="Какой из вариантов хотите рассмотреть подробнее?",
+        response="",
+        facts=(),
+        near=(),
+        missing=plan.missing,
+        params=dict(plan.params),
+    )
 
 
 def _prompt1_violation_code(exc: ContractError) -> str:

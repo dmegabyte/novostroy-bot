@@ -226,7 +226,7 @@ def test_invalid_named_object_shape_fails_after_one_bounded_repair(params, near)
     assert not prompt2.calls
 
 
-def test_exact_detail_without_named_object_is_mcp_contract_violation():
+def test_exact_detail_without_named_object_is_forced_to_exact_scope():
     card = _card("Люблинский парк", "complex:lp")
     state = V6State(
         revision=1,
@@ -241,10 +241,10 @@ def test_exact_detail_without_named_object_is_mcp_contract_violation():
 
     result, prompt2 = _run(prompt1, state, "да")
 
-    assert result.status is RuntimeStatus.FAILED
-    assert result.failure_stage is RuntimeFailureStage.MCP
-    assert result.failure_code == "mcp_contract_violation"
-    assert not prompt2.calls
+    assert result.status is RuntimeStatus.COMPLETED
+    assert result.plan.params["search_mode"] == "named_object"
+    assert result.plan.params["count"] == 1
+    assert len(prompt2.calls) == 1
 
 
 def test_broad_one_fact_with_near_remains_valid():

@@ -13,6 +13,10 @@ from .provider import (
     _contains_model_evidence_key,
 )
 
+_INTEGER_CONSTRAINT_KEYS = frozenset({
+    "rooms", "floor", "count", "min_price", "max_price",
+})
+
 
 def validate_trusted_envelope(
     envelope: TrustedMcpEnvelope,
@@ -111,8 +115,23 @@ def _validate_exact_detail(
     constraints = scope.get("lot_constraints")
     if isinstance(constraints, Mapping):
         for key, value in constraints.items():
-            if envelope.effective_constraints.get(key) != value:
+            actual = envelope.effective_constraints.get(key)
+            if _canonical_constraint_value(key, actual) != _canonical_constraint_value(key, value):
                 raise ContractError("exact detail lot constraints were not preserved")
+
+
+def _canonical_constraint_value(key: Any, value: Any) -> Any:
+    """Normalize bounded integer wire strings only for typed numeric constraints."""
+
+    if key not in _INTEGER_CONSTRAINT_KEYS or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.isascii() and text.isdigit() and 0 < len(text) <= 12:
+            return int(text)
+    return value
 
 
 def _validate_card_identities(plan: Any, envelope: TrustedMcpEnvelope) -> None:

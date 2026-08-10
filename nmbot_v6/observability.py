@@ -39,7 +39,7 @@ _SAFE_FAILURE_CODES = frozenset({
     "mode_off", "missing_v6_ports", "missing_state_store", "invalid_v6_state",
     "shadow_phone_bypass", "missing_callback_outbox", "callback_enqueue_failed",
     "callback_not_queued", "unexpected_phone_bypass", "v6_runtime_failed",
-    "state_save_failed", "shadow_only",
+    "state_save_failed", "shadow_only", "mcp_contract_violation",
 })
 _SAFE_FAILURE_STAGES = frozenset({"input", "phone", "prompt1", "mcp", "prompt2", "state", "unknown"})
 _SAFE_PROMPT_STATUSES = frozenset({"not_called", "accepted", "failed", "unknown"})

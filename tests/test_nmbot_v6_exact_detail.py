@@ -136,6 +136,8 @@ def test_pending_accept_runs_exact_detail_pipeline_with_saved_constraints():
     assert detail["canonical_name"] == "Люблинский парк"
     assert detail["subject_ref"] == "complex:lp"
     assert detail["lot_constraints"] == {"rooms": 2, "max_price": 18_000_000}
+    assert len(result.plan.facts) == 1
+    assert not result.plan.near
     assert result.text != "Выбрала этот вариант. Что хотите узнать о нём?"
     assert len(prompt2.calls) == 1
 
@@ -299,7 +301,18 @@ def test_true_prompt1_provider_exception_remains_provider_failure_without_retry(
 
 
 def test_old_state_without_pending_interaction_still_loads():
-    state = V6State.from_mapping({"revision": 3, "current_cards": []})
+    card = _card("Люблинский парк", "complex:lp")
+    state = V6State.from_mapping({
+        "revision": 3, "option_refs": ["complex:lp"], "current_cards": [card],
+    })
     assert state.revision == 3
     assert state.pending_interaction is None
     assert PendingInteractionResolver().resolve("да", state).kind.value == "unresolved"
+
+    prompt1 = Prompt1Stub([_output(action="answer_current_options", response="По сохранённой карточке")])
+    result, prompt2 = _run(prompt1, state, "да")
+
+    assert result.status is RuntimeStatus.COMPLETED
+    assert result.plan.action.value == "answer_current_options"
+    assert "exact_detail" not in prompt1.states[0]["safe_context"]
+    assert len(prompt2.calls) == 1

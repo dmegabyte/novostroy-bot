@@ -157,9 +157,48 @@ def test_runtime_gateway_attempts_are_exposed_safely_for_timeline_join(tmp_path:
     data = json.loads(out)
 
     attempts = data["traces"][0]["actual"]["runtime_gateway_attempts"]
-    assert attempts == [{"stage": "gateway_attempt", "model": "google_gemini", "ok": True, "gateway_task_id": "task-1", "duration_ms": 44, "parse_status": "ok"}]
+    assert attempts == [{"stage": "gateway_attempt", "model": "google_gemini", "ok": True, "gateway_task_id_present": True, "duration_ms": 44, "parse_status": "ok"}]
     assert "raw_response" not in out
     assert "secret" not in out
+
+
+def test_v6_receipt_distinguishes_prompt1_contract_from_provider_failure_without_sensitive_values(tmp_path: Path):
+    log = tmp_path / "bridge.jsonl"
+    audit = tmp_path / "audit.jsonl"
+    write_jsonl(log, [
+        {"trace_id": "raw-contract", "trace_ref": "trace_abcdef123457", "stage": "upstream_response", "http_status": 200},
+        {"trace_id": "raw-contract", "trace_ref": "trace_abcdef123457", "stage": "jivo_response_returned", "outcome": "sent", "http_status": 200},
+        {"trace_id": "raw-provider", "trace_ref": "trace_abcdef123458", "stage": "upstream_response", "http_status": 200},
+        {"trace_id": "raw-provider", "trace_ref": "trace_abcdef123458", "stage": "jivo_response_returned", "outcome": "sent", "http_status": 200},
+    ])
+    write_jsonl(audit, [
+        {"trace_ref": "trace_abcdef123457", "runtime_summary": {
+            "stage": "first_list", "action": "search", "gateway_attempt_details": [{
+                "_payload_stage": "v6_search_agent", "gateway_task_id": "secret-task-123",
+                "parse_status": "ok", "validator_status": "contract_violation",
+                "payload": "raw prompt and client message",
+            }],
+        }},
+        {"trace_ref": "trace_abcdef123458", "runtime_summary": {
+            "stage": "first_list", "action": "search", "gateway_attempt_details": [{
+                "_payload_stage": "v6_search_agent", "gateway_task_id": "secret-task-456",
+                "provider_status_code": 503, "parse_status": "missing",
+            }],
+        }},
+    ])
+
+    out = subprocess.run([sys.executable, str(SCRIPT), str(log), "--audit-log", str(audit), "--json"], text=True, capture_output=True, check=True).stdout
+    traces = {trace["trace_ref"]: trace["actual"]["runtime_v6_stage_receipt"] for trace in json.loads(out)["traces"]}
+
+    assert traces["trace_abcdef123457"] == {
+        "payload_stage_present": True, "gateway_task_id_present": True,
+        "parse_status": "ok", "validator_status": "contract_violation",
+        "next_owner": "prompt1_contract",
+    }
+    assert traces["trace_abcdef123458"]["provider_status_code"] == 503
+    assert traces["trace_abcdef123458"]["next_owner"] == "provider"
+    for forbidden in ["secret-task", "raw prompt", "client message"]:
+        assert forbidden not in out
 
 
 def test_arbitrary_trace_ref_is_rejected_and_derived_from_raw_trace_id(tmp_path: Path):

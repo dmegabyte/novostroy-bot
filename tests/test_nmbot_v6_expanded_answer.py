@@ -1,5 +1,9 @@
-from nmbot_v6.gateway import PROMPT2_PATH, build_question_policy
+import asyncio
+import json
+
+from nmbot_v6.gateway import MCP_TOOL, PROMPT2_PATH, Prompt2Gateway, TransportResponse, TransportToolTrace, _TRACE_TOKEN, build_question_policy
 from nmbot_v6.prompt1_contract import parse_prompt1
+from nmbot_v6.provider import TRUSTED_MCP_SERVER, build_trusted_envelope
 
 
 def _plan(*, search_mode=None, count=1, facts=1, near=0):
@@ -66,3 +70,38 @@ def test_answer_prompt_has_grounded_expanded_contract():
     assert 'answer_mode="expanded_detail"' in prompt
     assert "price_range" in prompt and "area" in prompt and "ready" in prompt
     assert "не спрашивай «Хотите узнать подробнее?»" in prompt
+
+
+def test_prompt2_gateway_sends_expanded_detail_contract_at_transport_boundary():
+    class FakeTransport:
+        def __init__(self):
+            self.payloads = []
+
+        async def complete(self, payload):
+            self.payloads.append(payload)
+            return TransportResponse('{"intro":"","cards":[],"question":"Показать планировки?"}')
+
+    plan = _plan(search_mode="named_object")
+    trace = TransportToolTrace(
+        task_ref="task-v6", actual_server=TRUSTED_MCP_SERVER, actual_tool=MCP_TOOL,
+        call_count=1, safe_facts={"facts": [{"name": "ЖК 0", "ref": "complex:lp"}]},
+        effective_constraints={"rooms": 2}, visible_refs=("complex:lp",), _token=_TRACE_TOKEN,
+    )
+    evidence = build_trusted_envelope(search_required=True, requested_tool=MCP_TOOL, trace=trace)
+    transport = FakeTransport()
+
+    output = asyncio.run(Prompt2Gateway(transport).run(
+        "Расскажи подробно про ЖК 0", {"revision": 0}, plan, evidence,
+    ))
+
+    assert json.loads(output)["question"] == "Показать планировки?"
+    assert len(transport.payloads) == 1
+    payload = transport.payloads[0]
+    assert payload["_payload_stage"] == "v6_answer_writer"
+    query = json.loads(payload["query"].removeprefix("V6_ANSWER_INPUT="))
+    assert query["question_policy"] == {
+        "question_goal": "offer_layouts_or_viewing", "answer_mode": "expanded_detail",
+        "cards_displayed": 1, "dialogue_step": 1,
+    }
+    assert 'Если `answer_mode="expanded_detail"`' in payload["system_prompt"]
+    assert "не спрашивай «Хотите узнать подробнее?»" in payload["system_prompt"]

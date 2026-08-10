@@ -129,7 +129,9 @@ def exact_detail_context(
         "canonical_name": card["name"],
         "canonical_card": card,
         "lot_constraints": constraints,
-        "pending_action": pending.accept_action,
+        "pending_action": (
+            "show_layouts" if pending.question_goal == "offer_layouts_or_viewing" else pending.accept_action
+        ),
         "pending_question_goal": pending.question_goal,
     })
 
@@ -186,6 +188,8 @@ def _saved_lot_constraints(
         "price_min": "min_price",
         "max_price": "max_price",
         "price_max": "max_price",
+        "floor": "floor",
+        "has_renovation": "has_renovation",
     }
     for source in sources:
         for source_key, target_key in aliases.items():

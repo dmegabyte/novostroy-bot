@@ -24,6 +24,7 @@ _CARD_KEYS = frozenset({
     "price_min", "price_max", "price_range", "finishing", "metro", "area", "rooms",
     "ready", "developer", "link", "infrastructure", "family_infrastructure", "schools",
     "kindergartens", "parks", "shops", "clinics", "yards", "transport", "why_family", "why_close",
+    "novos_id", "ads", "apartment_types", "house", "lot_examples", "ads_add",
 })
 
 _FIELDS = {
@@ -39,7 +40,7 @@ _QUESTION_GOALS = frozenset({
 })
 _INTERACTION_KINDS = frozenset({"offer", "selection"})
 _INTERACTION_ACTIONS = frozenset({
-    "show_stored_details", "select_subject", "normal_prompt1", "clear_pending",
+    "show_stored_details", "show_layouts", "select_subject", "normal_prompt1", "clear_pending",
 })
 
 
@@ -282,6 +283,8 @@ def evolve_completed_state(
         current_cards = state.current_cards[:_MAX_CURRENT_CARDS]
     selected = state.selected_option_ref if state.selected_option_ref in option_refs else None
     context = {"last_action": plan.action.value}
+    if isinstance(evidence.effective_constraints, Mapping) and evidence.effective_constraints:
+        context["effective_constraints"] = immutable_safe_copy(evidence.effective_constraints)
     if question_goal is not None:
         if question_goal not in _QUESTION_GOALS:
             raise ContractError("question_goal is invalid")
@@ -320,6 +323,13 @@ def _pending_for_question(
             return None
         return PendingInteraction(
             "offer", question_goal, "show_stored_details", "clear_pending", refs, revision
+        )
+    if question_goal == "offer_layouts_or_viewing":
+        refs = _single_card_subject_refs(current_cards, option_refs)
+        if not refs:
+            return None
+        return PendingInteraction(
+            "offer", question_goal, "show_layouts", "clear_pending", refs, revision
         )
     if question_goal == "choose_complex":
         if not option_refs:

@@ -58,11 +58,28 @@ def test_cta_accept_projects_exact_context_and_forces_expanded_detail():
 def test_offer_layouts_accept_uses_exact_pipeline():
     card = _card("Саларьево парк", "complex:sp")
     state = _offer_state(card, goal="offer_layouts_or_viewing", action="normal_prompt1")
-    result, prompt1, prompt2 = _run(state, "да", _output(facts=[card], params={"count": 1}))
+    result, prompt1, prompt2 = _run(state, "да", _output(facts=[card], params={"count": 1, "rooms": 2}))
     assert result.status is RuntimeStatus.COMPLETED
-    assert prompt1.states[0]["safe_context"]["exact_detail"]["pending_action"] == "normal_prompt1"
+    assert prompt1.states[0]["safe_context"]["exact_detail"]["pending_action"] == "show_layouts"
     assert result.plan.params["search_mode"] == "named_object"
     assert len(prompt2.calls) == 1
+
+
+def test_offer_layouts_preserves_rooms_and_selected_identity():
+    card = _card("Люблинский парк", "complex:lp", novos_id=2018, rooms=2)
+    state = V6State(
+        revision=7,
+        option_refs=(card["ref"],),
+        current_cards=(card,),
+        safe_context={"effective_constraints": {"rooms": 2}},
+        pending_interaction=PendingInteraction(
+            "offer", "offer_layouts_or_viewing", "show_layouts", "clear_pending", (card["ref"],), 7
+        ),
+    )
+    result, prompt1, _ = _run(state, "да", _output(facts=[card], params={"count": 1, "search_mode": "named_object", "rooms": 2}))
+    assert result.status is RuntimeStatus.COMPLETED
+    assert prompt1.states[0]["safe_context"]["effective_constraints"]["rooms"] == 2
+    assert prompt1.states[0]["current_cards"][0]["novos_id"] == 2018
 
 
 def test_multiple_cards_bare_consent_clarifies():

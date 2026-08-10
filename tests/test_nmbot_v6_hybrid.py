@@ -1,8 +1,8 @@
 import asyncio
 import json
 
-from nmbot_v6.followup import PendingInteractionResolver
-from nmbot_v6.gateway import Prompt1GatewayResult, V6OvermindTransport, build_question_policy
+from nmbot_v6.followup import PendingInteractionResolver, exact_detail_context
+from nmbot_v6.gateway import PROMPT2_PATH, Prompt1GatewayResult, V6OvermindTransport, build_question_policy
 from nmbot_v6.phone import PhoneParseResult
 from nmbot_v6.runtime import RuntimeStatus, V6Runtime
 from nmbot_v6.state import PendingInteraction, V6State
@@ -80,6 +80,31 @@ def test_offer_layouts_preserves_rooms_and_selected_identity():
     assert result.status is RuntimeStatus.COMPLETED
     assert prompt1.states[0]["safe_context"]["effective_constraints"]["rooms"] == 2
     assert prompt1.states[0]["current_cards"][0]["novos_id"] == 2018
+
+
+def test_offer_more_information_normalizes_string_rooms_for_exact_followup():
+    card = _card("Люблинский парк", "complex:lp", novos_id=2018)
+    state = V6State(
+        revision=7,
+        option_refs=(card["ref"],),
+        current_cards=(card,),
+        safe_context={"effective_constraints": {"rooms": "2", "count": 1}},
+        pending_interaction=PendingInteraction(
+            "offer", "offer_layouts_or_viewing", "show_layouts", "clear_pending", (card["ref"],), 7
+        ),
+    )
+    resolution = PendingInteractionResolver().resolve("да", state)
+    context = exact_detail_context(resolution, state)
+    assert context is not None
+    assert context["canonical_name"] == "Люблинский парк"
+    assert context["canonical_card"]["novos_id"] == 2018
+    assert context["lot_constraints"]["rooms"] == 2
+
+
+def test_expanded_writer_offers_more_information_without_layout_promise():
+    prompt = PROMPT2_PATH.read_text(encoding="utf-8")
+    assert "Показать больше информации?" in prompt
+    assert "если ads/lot evidence нет" in prompt
 
 
 def test_multiple_cards_bare_consent_clarifies():

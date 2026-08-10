@@ -52,7 +52,8 @@ EXPANDED_CARD_FIELDS = (
     "finishing", "ready", "metro", "metro_distance", "schools",
     "kindergartens", "parks", "infrastructure", "family_infrastructure",
     "yard_without_cars", "children_ground", "sports_ground", "clinics",
-    "shops", "transport", "link",
+    "shops", "transport", "link", "novos_id", "house", "ads",
+    "apartment_types", "lot_examples",
 )
 MCP_AUDIT_NOTE = """
 DIAGNOSTIC-ONLY ADDENDUM:

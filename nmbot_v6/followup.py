@@ -194,6 +194,10 @@ def _saved_lot_constraints(
     for source in sources:
         for source_key, target_key in aliases.items():
             value = source.get(source_key)
+            if source_key == "rooms" and isinstance(value, str):
+                normalized = value.strip()
+                if normalized.isdigit() and 0 < int(normalized) <= 20:
+                    value = int(normalized)
             if type(value) in (int, float) and value >= 0:
                 result[target_key] = value
     return MappingProxyType(result)

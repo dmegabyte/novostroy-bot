@@ -332,11 +332,12 @@ def _pending_for_question(
             "offer", question_goal, "show_layouts", "clear_pending", refs, revision
         )
     if question_goal == "choose_complex":
-        if not option_refs:
+        refs = _card_subject_refs(current_cards, option_refs)
+        if not refs:
             return None
         return PendingInteraction(
             "selection", question_goal, "normal_prompt1", "clear_pending",
-            option_refs, revision,
+            refs, revision,
         )
     refs = (selected_option_ref,) if selected_option_ref else _single_card_subject_refs(
         current_cards, option_refs
@@ -351,8 +352,22 @@ def _single_card_subject_refs(
 ) -> tuple[str, ...]:
     if len(cards) != 1:
         return ()
-    for key in ("ref", "id", "object_id", "option_ref"):
-        value = cards[0].get(key)
-        if isinstance(value, str) and value in option_refs:
-            return (value,)
-    return ("card:0",)
+    return _card_subject_refs(cards, option_refs)
+
+
+def _card_subject_refs(
+    cards: tuple[Mapping[str, Any], ...], option_refs: tuple[str, ...]
+) -> tuple[str, ...]:
+    refs = []
+    available = set(option_refs)
+    for index, card in enumerate(cards):
+        subject_ref = next(
+            (
+                value
+                for key in ("ref", "id", "object_id", "option_ref")
+                if isinstance((value := card.get(key)), str) and value in available
+            ),
+            None,
+        )
+        refs.append(subject_ref or f"card:{index}")
+    return tuple(refs)

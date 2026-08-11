@@ -4,16 +4,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from enum import Enum
+import json
+import math
 import re
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol
 
 from .contracts import ContractError
 from .phone import PhoneMetadataBackend, PhoneParseResult, PrivatePhone, parse_phone
-from .gateway import build_question_policy
+from .gateway import build_dialogue_context, build_question_policy
 from .privacy import NUMERIC_PARAM_FIELDS, immutable_safe_copy
 from .prompt1_contract import (
-    Prompt1Result, SearchAction, SearchPolicy, SearchTarget, parse_prompt1,
+    Prompt1Result, SearchAction, SearchPolicy, SearchTarget, overlay_explicit_request,
+    parse_prompt1,
 )
 from .prompt2_contract import parse_prompt2
 from .provider import TransportToolTrace, TrustedMcpEnvelope, build_trusted_envelope
@@ -133,7 +136,7 @@ class V6Runtime:
             prompt1_attempt["gateway_task_id_present"] = True
         gateway_attempts.append(prompt1_attempt)
         try:
-            plan = parse_prompt1(gateway_result.output)
+            plan = _parse_prompt1_with_constraint_overlay(gateway_result.output, model_state, user_text)
             prompt1_attempt["parse_status"] = "ok"
         except ContractError as first_violation:
             prompt1_attempt["parse_status"] = "invalid_json"
@@ -152,9 +155,9 @@ class V6Runtime:
                 prompt1_attempt["gateway_task_id_present"] = True
             gateway_attempts.append(prompt1_attempt)
             try:
-                plan = parse_prompt1(gateway_result.output)
+                plan = _parse_prompt1_with_constraint_overlay(gateway_result.output, model_state, user_text)
                 prompt1_attempt["parse_status"] = "ok"
-                validate_prompt1_state(plan, model_state)
+                validate_prompt1_state(plan, model_state, user_text)
                 prompt1_attempt["validator_status"] = "ok"
             except ContractError:
                 if prompt1_attempt.get("parse_status") != "ok":
@@ -163,7 +166,7 @@ class V6Runtime:
                     prompt1_attempt["validator_status"] = "contract_violation"
                 return _failure(state, "prompt1_contract_violation", RuntimeFailureStage.PROMPT1, gateway_attempts=gateway_attempts)
         try:
-            validate_prompt1_state(plan, model_state)
+            validate_prompt1_state(plan, model_state, user_text)
             prompt1_attempt["validator_status"] = "ok"
         except ContractError as first_violation:
             prompt1_attempt["validator_status"] = "contract_violation"
@@ -184,13 +187,13 @@ class V6Runtime:
                 prompt1_attempt["gateway_task_id_present"] = True
             gateway_attempts.append(prompt1_attempt)
             try:
-                plan = parse_prompt1(gateway_result.output)
+                plan = _parse_prompt1_with_constraint_overlay(gateway_result.output, model_state, user_text)
                 prompt1_attempt["parse_status"] = "ok"
             except ContractError:
                 prompt1_attempt.update(parse_status="invalid_json", validator_status="missing")
                 return _failure(state, "prompt1_contract_violation", RuntimeFailureStage.PROMPT1, gateway_attempts=gateway_attempts)
             try:
-                validate_prompt1_state(plan, model_state)
+                validate_prompt1_state(plan, model_state, user_text)
                 prompt1_attempt["validator_status"] = "ok"
             except ContractError:
                 prompt1_attempt["validator_status"] = "contract_violation"
@@ -199,7 +202,7 @@ class V6Runtime:
         plan = _force_exact_detail_plan(plan, exact_detail)
         plan = _force_consent_clarification(plan, resolution, state, exact_detail)
         try:
-            validate_prompt1_state(plan, model_state)
+            validate_prompt1_state(plan, model_state, user_text)
         except ContractError:
             return _failure(
                 state, "prompt1_contract_violation", RuntimeFailureStage.PROMPT1,
@@ -246,6 +249,12 @@ class V6Runtime:
                 state, "provider_failure", RuntimeFailureStage.MCP, plan=plan,
                 gateway_attempts=gateway_attempts,
             )
+        question_policy = build_question_policy(user_text, model_state, plan)
+        prompt2_mode = (
+            "operator_offer"
+            if question_policy.get("operator_escalation_required")
+            else "normal"
+        )
         prompt2_attempt = _gateway_attempt("v6_answer_writer", gateway_status="unknown", parse_status="missing", validator_status="missing")
         gateway_attempts.append(prompt2_attempt)
         try:
@@ -256,7 +265,7 @@ class V6Runtime:
             raw_prompt2 = None
         if raw_prompt2 is not None:
             try:
-                text = parse_prompt2(raw_prompt2, evidence)
+                text = parse_prompt2(raw_prompt2, evidence, expected_mode=prompt2_mode)
                 prompt2_attempt["parse_status"] = "ok"
                 prompt2_attempt["validator_status"] = "ok"
             except Exception:
@@ -276,7 +285,7 @@ class V6Runtime:
                     gateway_attempts=gateway_attempts,
                 )
             try:
-                text = parse_prompt2(raw_prompt2, evidence)
+                text = parse_prompt2(raw_prompt2, evidence, expected_mode=prompt2_mode)
                 retry_attempt["parse_status"] = "ok"
                 retry_attempt["validator_status"] = "ok"
             except Exception:
@@ -286,11 +295,16 @@ class V6Runtime:
                     plan=plan, evidence=evidence,
                     gateway_attempts=gateway_attempts,
                 )
+        operator_offer = bool(question_policy.get("operator_escalation_required"))
         try:
             next_state = evolve_completed_state(
                 flow_state, plan, evidence,
-                pending_phone=(plan.action.value == "operator_contact" or _question_requests_operator(text)),
-                question_goal=build_question_policy(user_text, model_state, plan)["question_goal"],
+                pending_phone=(plan.action.value == "operator_contact"),
+                question_goal=(
+                    "operator_contact"
+                    if operator_offer or _question_requests_operator(text)
+                    else question_policy["question_goal"]
+                ),
             )
         except Exception:
             return _failure(
@@ -344,8 +358,8 @@ def run_v6(
     model_state = _model_state_projection(flow_state, exact_detail)
 
     try:
-        plan = parse_prompt1(prompt1(user_text, model_state))
-        validate_prompt1_state(plan, model_state)
+        plan = _parse_prompt1_with_constraint_overlay(prompt1(user_text, model_state), model_state, user_text)
+        validate_prompt1_state(plan, model_state, user_text)
     except ContractError:
         return _failure(state, "prompt1_contract_violation", RuntimeFailureStage.PROMPT1)
     except Exception:
@@ -354,7 +368,7 @@ def run_v6(
     plan = _force_exact_detail_plan(plan, exact_detail)
     plan = _force_consent_clarification(plan, resolution, state, exact_detail)
     try:
-        validate_prompt1_state(plan, model_state)
+        validate_prompt1_state(plan, model_state, user_text)
     except ContractError:
         return _failure(state, "prompt1_contract_violation", RuntimeFailureStage.PROMPT1)
     try:
@@ -389,13 +403,20 @@ def run_v6(
         return _failure(
             state, "provider_failure", RuntimeFailureStage.MCP, plan=plan
         )
+    question_policy = build_question_policy(user_text, model_state, plan)
+    prompt2_mode = (
+        "operator_offer"
+        if question_policy.get("operator_escalation_required")
+        else "normal"
+    )
     try:
         raw_prompt2 = prompt2(user_text, model_state, plan, evidence)
-        text = parse_prompt2(raw_prompt2, evidence)
+        text = parse_prompt2(raw_prompt2, evidence, expected_mode=prompt2_mode)
     except Exception:
         try:
             text = parse_prompt2(
-                prompt2(user_text, model_state, plan, evidence), evidence
+                prompt2(user_text, model_state, plan, evidence), evidence,
+                expected_mode=prompt2_mode,
             )
         except Exception:
             return _failure(
@@ -405,8 +426,12 @@ def run_v6(
     try:
         next_state = evolve_completed_state(
             flow_state, plan, evidence,
-            pending_phone=(plan.action.value == "operator_contact" or _question_requests_operator(text)),
-            question_goal=build_question_policy(user_text, model_state, plan)["question_goal"],
+            pending_phone=(plan.action.value == "operator_contact"),
+            question_goal=(
+                "operator_contact"
+                if question_policy.get("operator_escalation_required")
+                else question_policy["question_goal"]
+            ),
         )
     except Exception:
         return _failure(
@@ -431,7 +456,10 @@ def _repair_ambiguous_operator_contact(
     if plan.action is not SearchAction.OPERATOR_CONTACT or not _is_short_consent(user_text):
         return plan
     context = state.safe_context if isinstance(state.safe_context, Mapping) else {}
-    if context.get("last_question_goal") == "operator_contact":
+    pending = state.pending_interaction
+    if context.get("last_question_goal") == "operator_contact" or (
+        pending is not None and pending.accept_action == "operator_contact"
+    ):
         return plan
     return replace(
         plan,
@@ -445,6 +473,84 @@ def _repair_ambiguous_operator_contact(
         missing=(),
         params={},
     )
+
+
+_OVERLAY_CONSTRAINTS = frozenset({
+    "rooms", "floor", "min_price", "max_price", "district",
+    "has_renovation", "purpose", "facets", "mortgage_type",
+})
+
+
+def _parse_prompt1_with_constraint_overlay(
+    raw: str | Mapping[str, Any],
+    state: Mapping[str, Any],
+    user_text: str,
+) -> Prompt1Result:
+    """Overlay only validated state-owned constraints before strict parsing."""
+
+    data: Any = raw
+    if isinstance(raw, str):
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return overlay_explicit_request(parse_prompt1(raw), user_text)
+    if not isinstance(data, Mapping) or data.get("action") != "search":
+        return overlay_explicit_request(parse_prompt1(raw), user_text)
+    params = data.get("params")
+    if not isinstance(params, Mapping):
+        return overlay_explicit_request(parse_prompt1(raw), user_text)
+    trusted = _trusted_dialogue_constraints(state)
+    if not trusted:
+        return overlay_explicit_request(parse_prompt1(raw), user_text)
+    overlaid = dict(params)
+    changed = False
+    for key, value in trusted.items():
+        if key not in overlaid or not _valid_typed_constraint(key, overlaid[key]):
+            overlaid[key] = value
+            changed = True
+    if not changed:
+        return overlay_explicit_request(parse_prompt1(raw), user_text)
+    candidate = dict(data)
+    candidate["params"] = overlaid
+    return overlay_explicit_request(parse_prompt1(candidate), user_text)
+
+
+def _trusted_dialogue_constraints(state: Mapping[str, Any]) -> dict[str, Any]:
+    dialogue = state.get("dialogue_context") if isinstance(state, Mapping) else None
+    if not isinstance(dialogue, Mapping):
+        return {}
+    sources = (
+        dialogue.get("constraints"),
+        dialogue.get("confirmed_constraints"),
+    )
+    result: dict[str, Any] = {}
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        for key, value in source.items():
+            if key in _OVERLAY_CONSTRAINTS and _valid_typed_constraint(key, value):
+                result[key] = value
+    return result
+
+
+def _valid_typed_constraint(key: str, value: Any) -> bool:
+    if key in {"rooms", "floor"}:
+        if isinstance(value, str) and value.strip().isascii() and value.strip().isdigit():
+            value = int(value.strip())
+        if type(value) is not int:
+            return False
+        return 0 <= value <= 20 if key == "rooms" else 1 <= value <= 300
+    if key in {"min_price", "max_price"}:
+        return type(value) in (int, float) and math.isfinite(value) and 0 <= value <= 1_000_000_000_000
+    if key == "district":
+        return value in {"msk", "mo", "newmsk"}
+    if key == "has_renovation":
+        return type(value) is bool
+    if key == "facets":
+        return type(value) is list and 1 <= len(value) <= 10 and all(
+            isinstance(item, str) and bool(item.strip()) and len(item) <= 100 for item in value
+        )
+    return isinstance(value, str) and bool(value.strip()) and len(value) <= 100
 
 
 def _is_short_consent(text: str) -> bool:
@@ -477,6 +583,7 @@ def _model_state_projection(
 ) -> dict[str, Any]:
     """Keep the pre-existing model payload shape; pending actions remain code-owned."""
     projection = state.safe_projection()
+    projection["dialogue_context"] = dict(build_dialogue_context(projection))
     projection.pop("pending_interaction", None)
     if exact_detail is not None:
         context = dict(projection.get("safe_context", {}))

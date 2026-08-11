@@ -38,6 +38,7 @@ _SAFE_ANSWER_CONTRACT_KEYS = frozenset({
     "operator_escalation_required", "project_name", "developer", "location",
     "district", "project_price", "project_completion", "project_finishing",
     "metro_name", "metro_distance", "lots", "installment_terms", "mortgage_terms",
+    "room_price", "availability", "lot_completion", "lot_finishing",
 })
 _SAFE_ACTIONS = frozenset({"search", "clarify", "operator_contact", "recover_dialogue", "answer_current_options"})
 _SAFE_TARGETS = frozenset({"new_search", "current_options", "none"})

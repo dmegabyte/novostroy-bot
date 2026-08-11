@@ -16,6 +16,18 @@ from .provider import (
 _INTEGER_CONSTRAINT_KEYS = frozenset({
     "rooms", "floor", "count", "min_price", "max_price",
 })
+_REQUESTED_SELECTED_FACTS = (
+    (("метро", "станци"), ("metro", "property_metro", "transport")),
+    (("застройщик", "девелопер"), ("developer",)),
+    (("отделк", "ремонт"), ("finishing",)),
+    (("срок", "сдач", "готов"), ("ready",)),
+    (("площад", "метраж"), ("area",)),
+    (("цен", "стоимост", "бюджет"), ("price", "price_range", "price_min", "price_max")),
+    (("район", "локаци", "где наход"), ("location", "district")),
+    (("инфраструктур", "школ", "садик", "детск", "парк"), (
+        "infrastructure", "family_infrastructure", "schools", "kindergartens", "parks",
+    )),
+)
 
 
 def validate_trusted_envelope(
@@ -77,7 +89,11 @@ def validate_publication_precondition(
         raise ContractError("publication evidence has the wrong type")
 
 
-def validate_prompt1_state(plan: Any, state: Mapping[str, Any]) -> None:
+def validate_prompt1_state(
+    plan: Any,
+    state: Mapping[str, Any],
+    user_text: str | None = None,
+) -> None:
     """Reject state-only answers that have no state-owned cards to answer from."""
 
     from .prompt1_contract import Prompt1Result, SearchAction
@@ -88,6 +104,43 @@ def validate_prompt1_state(plan: Any, state: Mapping[str, Any]) -> None:
     if plan.action is SearchAction.ANSWER_CURRENT_OPTIONS \
             and (not isinstance(cards, (list, tuple)) or not cards):
         raise ContractError("answer_current_options requires stored current cards")
+    if plan.action is SearchAction.ANSWER_CURRENT_OPTIONS:
+        _validate_selected_fact_answer(state, user_text)
+
+
+def _validate_selected_fact_answer(state: Mapping[str, Any], user_text: str | None) -> None:
+    """Require state-owned evidence for a factual selected-card answer."""
+
+    if not isinstance(user_text, str) or not user_text.strip():
+        return
+    dialogue = state.get("dialogue_context")
+    if not isinstance(dialogue, Mapping):
+        return
+    selected = dialogue.get("selected_subject_ref")
+    if selected is None:
+        selected = dialogue.get("selected_subject")
+    if selected in (None, "", {}):
+        return
+    selected_card = dialogue.get("selected_card")
+    confirmed = dialogue.get("confirmed_facts")
+    sources = tuple(
+        value for value in (selected_card, confirmed) if isinstance(value, Mapping)
+    )
+    lowered = user_text.casefold()
+    requested_groups = tuple(
+        fields
+        for terms, fields in _REQUESTED_SELECTED_FACTS
+        if any(term in lowered for term in terms)
+    )
+    if not requested_groups:
+        return
+    for fields in requested_groups:
+        if not any(_nonempty_fact(source.get(field)) for source in sources for field in fields):
+            raise ContractError("answer_current_options requested fact is absent from selected card")
+
+
+def _nonempty_fact(value: Any) -> bool:
+    return value not in (None, "", (), [], {})
 
 
 def _validate_exact_detail(

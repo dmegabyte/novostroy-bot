@@ -341,7 +341,9 @@ class Prompt2Gateway:
     ) -> str:
         safe_input = _safe_input(user_text, state)
         question_policy = build_question_policy(user_text, state, plan)
-        answer_contract = build_answer_contract(plan, evidence, question_policy=question_policy)
+        answer_contract = build_answer_contract(
+            plan, evidence, question_policy=question_policy,
+        )
         prompt_path = OPERATOR_PROMPT2_PATH if question_policy.get(
             "operator_escalation_required"
         ) is True else PROMPT2_PATH
@@ -352,8 +354,8 @@ class Prompt2Gateway:
             **safe_input,
             "search_result": _prompt1_projection(plan),
             "trusted_mcp": trusted_envelope_projection(evidence),
-            "question_policy": question_policy,
             "answer_contract": answer_contract,
+            "question_policy": question_policy,
             **({
                 "retry_contract": {
                     "retry_reason": "invalid_json",
@@ -531,7 +533,6 @@ def _prompt1_projection(plan: Prompt1Result) -> Mapping[str, Any]:
         "near": plan.near,
         "missing": plan.missing,
         "params": plan.params,
-        "requested_claims": plan.requested_claims,
     })
 
 

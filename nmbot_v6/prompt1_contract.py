@@ -6,7 +6,7 @@ import json
 import math
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Mapping
 
@@ -62,6 +62,35 @@ _MAX_PARAM_STRING = 100
 _MAX_FACETS = 10
 _AUDIT_PHONEISH = re.compile(r"(?<!\d)(?:\+?\d[\s().-]*){10,15}(?!\d)")
 _AUDIT_EMAIL = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+REQUESTED_CLAIMS = frozenset({
+    "installment_terms",
+    "room_price",
+    "availability",
+    "mortgage_terms",
+    "lot_completion",
+    "lot_finishing",
+    "metro_distance",
+})
+_CLAIM_ORDER = (
+    "installment_terms", "room_price", "availability", "mortgage_terms",
+    "lot_completion", "lot_finishing", "metro_distance",
+)
+_EXPLICIT_CLAIM_MARKERS = {
+    "installment_terms": re.compile(r"\bрассроч\w*", re.I),
+    "availability": re.compile(
+        r"\b(?:в\s+наличи\w*|доступн\w*\s+квартир\w*|есть\s+ли\s+(?:квартир\w*|двуш\w*|двухкомнатн\w*))",
+        re.I,
+    ),
+    "mortgage_terms": re.compile(r"\b(?:ипотек\w*|ипотечн\w*|первоначальн\w*\s+взнос\w*|ставк\w*\s+по\s+ипотек\w*)", re.I),
+    "lot_completion": re.compile(r"\b(?:срок\w*\s+сдач\w*|когда\s+сдад\w*|(?:дом|корпус)\s+сдан\w*|готовност\w*\s+(?:дома|корпуса|квартиры))", re.I),
+    "lot_finishing": re.compile(r"\b(?:отделк\w*|ремонт\w*)", re.I),
+    "metro_distance": re.compile(r"\b(?:расстояни\w*\s+до\s+метро|сколько\s+(?:идти|ехать|минут)\s+до\s+метро|\d+\s*минут\w*\s+до\s+метро)", re.I),
+}
+_TWO_ROOM_MARKER = re.compile(
+    r"\b(?:2\s*(?:-?\s*комнатн\w*|квартир\w*)|двухкомнатн\w*|двушк\w*)",
+    re.I,
+)
+_PRICE_MARKER = re.compile(r"\b(?:цен\w*|стоимост\w*|сколько\s+стоит)", re.I)
 
 
 class SearchAction(str, Enum):
@@ -126,7 +155,14 @@ def parse_prompt1(raw: str | Mapping[str, Any]) -> Prompt1Result:
     missing = _string_list(data["missing"], "missing")
     params = _params(data["params"])
     mcp_audit = _validate_audit(data.get("mcp_audit"))
-    requested_claims = tuple(_string_list(data.get("requested_claims", []), "requested_claims"))
+    claims_value = data.get("requested_claims")
+    requested_claims = tuple(
+        _string_list([] if claims_value is None else claims_value, "requested_claims")
+    )
+    if len(requested_claims) > len(REQUESTED_CLAIMS) or len(set(requested_claims)) != len(requested_claims):
+        raise ContractError("requested_claims must be a bounded unique list")
+    if any(claim not in REQUESTED_CLAIMS for claim in requested_claims):
+        raise ContractError("requested_claims contain an unknown claim")
 
     _validate_options(facts, near)
     _validate_consistency(action, target, policy, question, facts, near, missing, params)
@@ -143,6 +179,30 @@ def parse_prompt1(raw: str | Mapping[str, Any]) -> Prompt1Result:
         mcp_audit,
         requested_claims,
     )
+
+
+def overlay_explicit_request(plan: Prompt1Result, user_text: str) -> Prompt1Result:
+    """Merge only explicit Russian claim markers and a typed two-room constraint."""
+
+    if type(plan) is not Prompt1Result or not isinstance(user_text, str):
+        raise ContractError("explicit request overlay input is invalid")
+    explicit = {
+        claim for claim, marker in _EXPLICIT_CLAIM_MARKERS.items()
+        if marker.search(user_text)
+    }
+    two_rooms = bool(_TWO_ROOM_MARKER.search(user_text))
+    if two_rooms and _PRICE_MARKER.search(user_text):
+        explicit.add("room_price")
+    merged = tuple(
+        claim for claim in _CLAIM_ORDER
+        if claim in set(plan.requested_claims) | explicit
+    )
+    params = dict(plan.params)
+    if plan.action is SearchAction.SEARCH and two_rooms and "rooms" not in params:
+        params["rooms"] = 2
+    if merged == plan.requested_claims and params == dict(plan.params):
+        return plan
+    return replace(plan, requested_claims=merged, params=params)
 
 
 def _validate_audit(value: Any) -> Mapping[str, Any] | None:

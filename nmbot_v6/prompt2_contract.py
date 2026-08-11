@@ -22,7 +22,12 @@ def _plain_text(value: str) -> str:
     return re.sub(r"(?m)^\s*#{1,6}\s*", "", value).strip()
 
 
-def parse_prompt2(raw: str, evidence: TrustedMcpEnvelope | None = None) -> str:
+def parse_prompt2(
+    raw: str,
+    evidence: TrustedMcpEnvelope | None = None,
+    *,
+    expected_mode: str = "normal",
+) -> str:
     if not isinstance(raw, str):
         raise ContractError("Prompt 2 must return plain text")
     text = raw.strip()
@@ -63,6 +68,20 @@ def parse_prompt2(raw: str, evidence: TrustedMcpEnvelope | None = None) -> str:
         raise ContractError("phone numbers are forbidden")
     if (intro + " " + question).count("?") != 1:
         raise ContractError("Prompt 2 must contain exactly one follow-up question")
+    if expected_mode not in {"normal", "operator_offer"}:
+        raise ContractError("Prompt 2 expected mode is invalid")
+    if expected_mode == "operator_offer":
+        lowered = question.casefold()
+        if not re.search(r"\b(?:оператор\w*|специалист\w*)\b", lowered):
+            raise ContractError("operator offer question is missing")
+        if re.search(
+            r"друг(?:ой|ие)\s+район|продолж(?:ить|им)\s+поиск|"
+            r"расшир(?:ить|им)\s+географ|подобр(?:ать|ём)\s+вариант|"
+            r"альтернатив|ближайш|соседн|измен(?:ить|им)\s+услов|"
+            r"планиров|просмотр|телефон|номер",
+            lowered,
+        ):
+            raise ContractError("operator offer contains a forbidden CTA")
     rendered = [intro] if intro else []
     for index, card_text in zip(indices, card_texts):
         if index >= len(combined):

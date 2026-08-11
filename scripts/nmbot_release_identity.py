@@ -31,6 +31,7 @@ DEFAULT_TRACKED_FILES = tuple(sorted((
     "prompts/v2_response_formatter.txt",
     "prompts/v2_response_writer.txt",
     "prompts/v2_manager_rewriter.txt",
+    "prompts/v5_manager_rewriter.txt",
     "prompts/v2_search_mcp.txt",
     "search_profiles.py",
     "scripts/dialogue_journal.py",

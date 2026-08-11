@@ -156,8 +156,8 @@ def test_exact_selected_enrichment_preserves_lot_examples_base_identity_price_an
                     "location": "другая локация",
                     "min_price": 99_000_000,
                     "ads": [
-                        {"id": 6375479, "rooms": "s", "area": 19, "floor": 6, "floors_total": 25, "fullprice": 8_133_900, "renovation": "с отделкой", "status": 2},
-                        {"id": 5976219, "rooms": "1", "area": 32.8, "floor": 17, "floors_total": 25, "fullprice": 10_318_880, "renovation": "с отделкой", "status": 2},
+                        {"id": 6375479, "rooms": "s", "area": 19, "floor": 6, "floors_total": 25, "fullprice": 8_133_900, "renovation": "с отделкой", "state": 2, "status": 2},
+                        {"id": 5976219, "rooms": "1", "area": 32.8, "floor": 17, "floors_total": 25, "fullprice": 10_318_880, "renovation": "с отделкой", "state": 2, "status": 2},
                     ],
                     "house": [{"id": 5, "name": "5-8"}],
                 },
@@ -187,10 +187,10 @@ def test_exact_selected_lot_hard_rooms_filters_only_active_matching_lots() -> No
                 extra={
                     "rooms": "1,3",
                     "ads": [
-                        {"id": 101, "rooms": "2", "area": 54.2, "floor": 3, "floors_total": 17, "fullprice": 12_100_000, "status": "2"},
-                        {"id": 102, "rooms": 2, "area": 58, "floor": 9, "floors_total": 17, "fullprice": 12_900_000, "status": 2},
-                        {"id": 103, "rooms": "1", "area": 39, "fullprice": 9_900_000, "status": 2},
-                        {"id": 104, "rooms": "2", "area": 60, "fullprice": 13_500_000, "status": 1},
+                        {"id": 101, "rooms": "2", "area": 54.2, "floor": 3, "floors_total": 17, "fullprice": 12_100_000, "state": 2, "status": "2"},
+                        {"id": 102, "rooms": 2, "area": 58, "floor": 9, "floors_total": 17, "fullprice": 12_900_000, "state": 2, "status": 2},
+                        {"id": 103, "rooms": "1", "area": 39, "fullprice": 9_900_000, "state": 2, "status": 2},
+                        {"id": 104, "rooms": "2", "area": 60, "fullprice": 13_500_000, "state": 2, "status": 1},
                     ],
                 },
             ),
@@ -216,8 +216,8 @@ def test_exact_selected_lot_hard_without_matching_active_lot_falls_back_to_base(
                 name="Новое Видное",
                 extra={
                     "ads": [
-                        {"id": 201, "rooms": "1", "fullprice": 9_900_000, "status": 2},
-                        {"id": 202, "rooms": "2", "fullprice": 12_900_000, "status": 1},
+                        {"id": 201, "rooms": "1", "fullprice": 9_900_000, "state": 2, "status": 2},
+                        {"id": 202, "rooms": "2", "fullprice": 12_900_000, "state": 2, "status": 1},
                     ]
                 },
             ),
@@ -243,7 +243,7 @@ def test_selected_correctable_parse_failure_retries_once_exact_same_constraints(
             _output_for(
                 request_data,
                 name="Новое Видное",
-                extra={"ads": [{"id": 301, "rooms": "2", "fullprice": 12_900_000, "status": 2}]},
+                extra={"ads": [{"id": 301, "rooms": "2", "fullprice": 12_900_000, "state": 2, "status": 2}]},
             ),
             ensure_ascii=False,
         ), {"ok": True}

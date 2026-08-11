@@ -68,8 +68,15 @@ The visible tree below is the human source of truth. The fenced JSON block at th
     - Read first: `docs/CURRENT_ARCHITECTURE.md` — `# NMBot current architecture — compact entry`; `docs/RESPONSE_MODEL_EVAL.md` — `# Response model eval — сравнение моделей ответчика`.
     - Required docs: `docs/CURRENT_ARCHITECTURE.md`, `docs/BOT_ARCHITECTURE.md`, `docs/RESPONSE_MODEL_EVAL.md`, `docs/EXPERIMENTS.md`, `docs/NMBOT_RUNBOOK.md`.
     - Prompts/source files: `scripts/nmbot_runtime_adapter.py`, `nmbot_v2/response_composer.py`, `scripts/nmbot_response_path.py`, `prompts/v2_response_writer.txt`, `prompts/v2_response_formatter.txt`.
-    - Targeted local checks: `python3 scripts/nmbot_check.py runtime`, `python3 scripts/nmbot_check.py v2`.
-    - Boundary: first prove payload stage and Actual/Contract/Desired; legacy `prompts/v2_response_composer.txt` is legacy/alternative context, not active-route proof; no model/provider call, eval, selector/config change or production proof.
+     - Targeted local checks: `python3 scripts/nmbot_check.py runtime`, `python3 scripts/nmbot_check.py v2`.
+     - Boundary: first prove payload stage and Actual/Contract/Desired; legacy `prompts/v2_response_composer.txt` is legacy/alternative context, not active-route proof; no model/provider call, eval, selector/config change or production proof.
+- `experiment`
+  - `local` — Local declarative experiment workflow.
+    - Read first: `docs/EXPERIMENTS.md` — `## Локальный declarative experiment workflow`; `scripts/nmbot_experiment.py` — `def _parser()`.
+    - Required docs: `docs/EXPERIMENTS.md`, `docs/RESPONSE_MODEL_EVAL.md`.
+    - Prompts/source files: `scripts/nmbot_experiment.py`, `scripts/nmbot.py`, `config/nmbot_stage_map.json`, `tests/test_nmbot_experiment.py`.
+    - Targeted local checks: `python3 scripts/nmbot_check.py docs`, `python3 -m pytest -q tests/test_nmbot_experiment.py`.
+    - Boundary: local-only evidence; declared stages only; raw prompts remain in local artifacts/diff; receipt metadata-only; compare is not semantic evaluation; no production/Jivo proof.
 - `diagnostics`
   - `trace` — Jivo trace, terminal delivery and first-failure triage.
     - Read first: `docs/JIVO_DIAGNOSTICS.md` — `# Jivo/nmbot диагностика`; `config/nmbot_stage_map.json` — `"schema": "nmbot.stage_map.v1"`.
@@ -173,6 +180,16 @@ This block duplicates the tree mapping for the local `context` command. It conta
       "files": ["scripts/nmbot_runtime_adapter.py", "nmbot_v2/response_composer.py", "scripts/nmbot_response_path.py", "prompts/v2_response_writer.txt", "prompts/v2_response_formatter.txt"],
       "checks": ["python3 scripts/nmbot_check.py runtime", "python3 scripts/nmbot_check.py v2"],
       "boundaries": ["Prove payload stage and Actual Contract Desired before behavior changes", "Legacy prompts/v2_response_composer.txt is legacy alternative context, not live mode proof", "No model or provider call and no eval", "Must not change selector or production config", "Does not prove production"]
+    },
+    {
+      "id": "experiment/local",
+      "title": "Local declarative experiment workflow",
+      "read_first": ["docs/EXPERIMENTS.md", "scripts/nmbot_experiment.py"],
+      "read_first_anchors": [{"path": "docs/EXPERIMENTS.md", "anchor": "## Локальный declarative experiment workflow"}, {"path": "scripts/nmbot_experiment.py", "anchor": "def _parser()"}],
+      "docs": ["docs/EXPERIMENTS.md", "docs/RESPONSE_MODEL_EVAL.md"],
+      "files": ["scripts/nmbot_experiment.py", "scripts/nmbot.py", "config/nmbot_stage_map.json", "tests/test_nmbot_experiment.py"],
+      "checks": ["python3 scripts/nmbot_check.py docs", "python3 -m pytest -q tests/test_nmbot_experiment.py"],
+      "boundaries": ["Local-only evidence", "Declared stages only", "Raw prompts remain in local artifacts/diff", "Receipt metadata-only", "Compare is not semantic evaluation", "No production/Jivo proof"]
     },
     {
       "id": "diagnostics/trace",

@@ -4,6 +4,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nmbot_v2.card_normalizer import normalize_card, normalize_search_result
@@ -274,6 +276,15 @@ def test_ads_normalize_to_two_structured_lot_examples_with_fullprice() -> None:
     assert first.renovation == "с отделкой"
     assert second.rooms == "1"
     assert second.area_m2 == 32.8
+
+
+def test_lot_example_preserves_per_ad_state_when_identity_and_status_are_present() -> None:
+    card = normalize_card({
+        "name": "ЖК Статус лота",
+        "ads": [{"id": 6375479, "state": "available", "status": 2}],
+    })
+
+    assert card.lot_examples[0].state == "available"
 
 
 def test_lot_examples_are_bounded_to_two_and_do_not_use_ambiguous_price() -> None:

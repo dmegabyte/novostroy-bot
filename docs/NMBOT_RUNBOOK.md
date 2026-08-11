@@ -88,6 +88,54 @@ python scripts/nmbot_check.py docs --dry-run
 
 Then run the relevant local scope only: `docs`, `contracts`, `v0`, `v2`, `runtime` or `audit`. Expected evidence is printed as run/skipped/passed/failed. This does not prove production behavior.
 
+## Broad inventory gate
+
+Фильтр не показывает ЖК без подтверждённого продаваемого лота. Подтверждение
+требует структурированных `ads.id`, `ads.state=2` и `ads.status=2`. Управление
+вынесено в отдельный CLI:
+
+```bash
+python3 scripts/nmbot_inventory_gate.py status
+python3 scripts/nmbot_inventory_gate.py enable
+python3 scripts/nmbot_inventory_gate.py disable
+```
+
+CLI меняет только `NMBOT_BROAD_INVENTORY_GATE_ENABLED` в `.env`; по умолчанию
+фильтр включён. Для проверки без записи используйте `--dry-run`, для другого
+dotenv-файла — `--env-file PATH`.
+
+При включённом фильтре runtime пишет в безопасный `runtime_summary.inventory_gate`
+только агрегаты: `source_count`, `visible_count` и
+`excluded_unqualified_count`, а также `enabled/status`. Названия ЖК, телефоны,
+payload и секреты в этом событии не сохраняются.
+
+## TEST feature flags
+
+Для TEST-контура три часто меняемых флага переключаются штатным скриптом;
+ручное редактирование удалённого `.env` запрещено:
+
+```bash
+python3 scripts/nmbot_test_feature_flags.py --status
+python3 scripts/nmbot_test_feature_flags.py \
+  --set NMBOT_BROAD_INVENTORY_GATE_ENABLED=off \
+  --set NMBOT_MAIN_SEARCH_FALLBACK_ENABLED=on \
+  --set NMBOT_OPENROUTER_EXCLUDE_REASONING=off \
+  --confirm
+```
+
+Разрешённый allowlist скрипта:
+
+- `NMBOT_BROAD_INVENTORY_GATE_ENABLED` — фильтр ЖК без подтверждённого лота;
+- `NMBOT_MAIN_SEARCH_FALLBACK_ENABLED` — fallback основного поиска;
+- `NMBOT_OPENROUTER_EXCLUDE_REASONING` — исключение reasoning из OpenRouter.
+
+Значения задаются только как `on|off`. Скрипт делает backup TEST `.env`,
+использует удалённый безопасный env-helper, перезапускает только
+`novostroy-bot-api.service` и проверяет health, активность сервиса и runtime V5.
+`--dry-run` не меняет конфигурацию. После изменения скриптом проверяется статус;
+Jivo smoke выполняется отдельно и автоматически этим инструментом не запускается.
+Скрипт фиксирован на TEST-контуре и не предназначен для production.
+
 For source-only simplification mapping, use:
 
 ```bash
@@ -104,6 +152,21 @@ python scripts/nmbot.py context --pack prompt/rental --human
 ```
 
 This command reads `docs/NMBOT_CONTEXT_PACKS.md` and prints required docs/files/checks only. It does not execute checks, deploy, restart, call models/providers/VPS/API/Jivo, or prove production behavior.
+
+### Declarative prompt/model experiments
+
+For the local declarative experiment workflow, first load its context pack and
+inspect the registered stages:
+
+```bash
+python3 scripts/nmbot.py context --pack experiment/local --brief --human
+python3 scripts/nmbot.py experiment stages --json
+```
+
+Then follow `stages → start → diff → check → report → compare` in
+`docs/EXPERIMENTS.md`. This is a local bookkeeping/static-check route, not a
+model evaluation or production/Jivo gate. Candidate prompt/model overlays are not
+applied to registered focused/full checks.
 
 For a manual review of similar recipe semantics, run:
 
@@ -154,6 +217,46 @@ local manifest with `python3 scripts/nmbot_release_identity.py show`. The actual
 deploy command requires `--release-id ID`; this records the ID with every Jivo
 journal turn after deployment. `release_id` is source attribution, not Jivo
 smoke or production-health proof.
+
+Обязательный порядок для любого code/config/prompt release: сначала завершить
+проверки и зафиксировать одобренные изменения отдельным Git commit, затем собрать
+immutable artifact из commit, выполнить preflight, TEST envelope compatibility
+probe и только после этого deploy. После deploy обязательна строгая Jivo smoke,
+которая подтверждает принятый опубликованный результат, а не только HTTP 200 или
+доставленный fallback.
+Нельзя деплоить незакоммиченные изменения или собирать release из незафиксированного
+рабочего дерева. Rollback должен ссылаться на предыдущий commit и immutable
+artifact.
+
+HTTP 200, health, `systemd active` и terminal `BOT_MESSAGE` сами по себе не
+являются доказательством успешного поиска. Smoke обязан подтвердить
+`response_model.status=valid`, `published=true`, отсутствие validation/fallback
+ошибок и наличие проверяемого trusted provider envelope. Отсутствие producer-полей
+`mcp_call_count`, `mcp_tool_name`, `mcp_result_projection` или
+`effective_constraints` — release blocker; consumer нельзя ослаблять, чтобы
+скрыть несовместимость producer → schema → consumer.
+
+### Обязательный simplicity gate перед commit
+
+Перед каждой правкой и перед commit проверить весь impact chain:
+
+```text
+user input → owner/prompt → provider/MCP → validator → state → publication → Jivo
+```
+
+1. Сначала использовать существующий owner; не добавлять новый classifier, router,
+   prompt, adapter или fallback, если тот же контракт уже имеет владельца.
+2. Если ошибка повторяется, не добавлять очередную локальную заплатку: остановиться,
+   найти общий контракт и исправить границу ответственности.
+3. Для каждого нового слоя письменно указать: почему нельзя использовать текущий,
+   какую одну ответственность он получает, какие вызовы добавляет и как будет удалён.
+4. Проверить producer → schema → consumer: каждый обязательный результат должен
+   реально создаваться producer-ом и проходить тот же контрактный тест. Отсутствующий
+   producer — release blocker, а не повод ослабить consumer.
+5. Проверить, что решение не ломает соседние state, fallback, publication, rollback
+   и runtime-version paths. Если более простой вариант сохраняет контракт — выбрать его.
+
+Без положительного ответа на этот gate commit и release запрещены.
 
 Existing `scripts/nmbot_release.py status` uses SSH and `deploy` mutates remote state, so neither is part of local preflight. Post-deploy read-only verify needs separately authorized VPS/Jivo/direct-API route evidence. If Jivo smoke is missing, the release state is `incomplete`, never green. Backup, deploy, restart and live Jivo smoke require explicit release owner stop/go.
 
@@ -242,8 +345,16 @@ it does not weaken production, client-production or bridge routes and does not
 replace the lower-level subcommands for reviewed/manual operation.
 
 This command does **not** include Jivo smoke yet. The next explicit gate after a
-successful TEST candidate remains one authorized first Jivo request with
-correlated trace inspection, stopping immediately on the first error.
+successful TEST candidate is the existing smoke runner in strict mode:
+
+```bash
+python3 scripts/nmbot_v6_jivo_smoke.py --require-accepted
+```
+
+Strict mode reads only bounded, sanitized journal metadata and fails when the
+turn is a fallback, validation failure, composer failure, or quality-blocked
+result. A terminal `BOT_MESSAGE` with HTTP 200 is not sufficient. The first
+failure stops the release; keep the previous immutable artifact for rollback.
 
 ### Narrow live API helper overlay
 

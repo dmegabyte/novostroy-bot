@@ -4,6 +4,28 @@ Purpose: keep verified development failures and prevention rules separate from
 runtime contracts and release history. Each lesson records evidence, the proven
 cause, unknowns, and a reusable prevention checklist.
 
+## 2026-08-08 — Не добавлять второй model layer без доказанной необходимости
+
+### Урок
+
+Всегда сначала искать самое простое решение в существующем prompt и owner-
+контракте. Если уже есть единый search prompt, который определяет action,
+вызывает MCP и возвращает canonical `facts/near/missing/params`, нельзя добавлять
+перед ним отдельный V6 classifier только ради маршрутизации. Это создаёт второй
+модельный вызов, дублирующий semantic ownership и усложняющий provenance,
+fallback, latency и release audit.
+
+### Правило prevention
+
+- reuse существующий prompt и canonical MCP owner;
+- новый слой добавлять только после source-backed доказательства невозможности
+  выполнить контракт текущим owner-ом;
+- до реализации явно указать owner, новый контракт, стоимость и план удаления;
+- проверять, что одна пользовательская задача не запускает два конкурирующих
+  search/router контура;
+- V6 считать versioned runtime/enrichment boundary, а не дополнительным
+  classifier-ом.
+
 ## 2026-07-30 — Pair comparison executor must stay projection-free until presenter phase
 
 ### Evidence

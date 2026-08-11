@@ -99,6 +99,10 @@ RUNTIME_QUALITY_BLOCKERS = {
     "enrichment_error",
 }
 
+V6_PAYLOAD_STAGES = frozenset({"v6_search_agent", "v6_answer_writer"})
+V6_PARSE_STATUSES = frozenset({"ok", "invalid_json", "missing"})
+V6_VALIDATOR_STATUSES = frozenset({"ok", "contract_violation", "missing"})
+
 CANONICAL_TRACE_REF_RE = re.compile(r"^trace_[0-9a-f]{12}$")
 
 CONTRACTS = {
@@ -274,11 +278,23 @@ def _safe_gateway_attempt_details(value: Any) -> list[dict[str, Any]]:
                 attempt[key] = bool(item.get(key))
         task_id = _safe_token(item.get("gateway_task_id"))
         if task_id:
-            attempt["gateway_task_id"] = task_id
+            attempt["gateway_task_id_present"] = True
+        payload_stage = _safe_token(item.get("_payload_stage"))
+        if payload_stage in V6_PAYLOAD_STAGES:
+            attempt["payload_stage_present"] = True
+            attempt["stage_owner"] = (
+                "prompt1_contract" if payload_stage == "v6_search_agent" else "prompt2_contract"
+            )
+        provider_status = _bounded_optional_int(item.get("provider_status_code"), 100, 599)
+        if provider_status is not None:
+            attempt["provider_status_code"] = provider_status
         attempt["duration_ms"] = _bounded_int(item.get("duration_ms"), 0, 10 * 60 * 1000)
         parse_status = str(item.get("parse_status") or "").strip()
-        if parse_status in {"ok", "invalid_json", "missing"}:
+        if parse_status in V6_PARSE_STATUSES:
             attempt["parse_status"] = parse_status
+        validator_status = str(item.get("validator_status") or "").strip()
+        if validator_status in V6_VALIDATOR_STATUSES:
+            attempt["validator_status"] = validator_status
         if attempt:
             out.append(attempt)
     return out
@@ -298,6 +314,16 @@ def _bounded_int(value: Any, low: int, high: int) -> int:
     except (TypeError, ValueError):
         return low
     return max(low, min(number, high))
+
+
+def _bounded_optional_int(value: Any, low: int, high: int) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if low <= number <= high else None
 
 
 def _safe_timing(value: Any) -> dict[str, int]:
@@ -466,7 +492,8 @@ def _runtime_actual(audit_rows: list[dict[str, Any]]) -> dict[str, Any]:
     summary = next((row.get("runtime_summary") for row in audit_rows if isinstance(row.get("runtime_summary"), dict)), None)
     if not isinstance(summary, dict):
         return {}
-    return {
+    attempts = summary.get("gateway_attempt_details") if isinstance(summary.get("gateway_attempt_details"), list) else []
+    actual = {
         "runtime_stage": summary.get("stage"),
         "runtime_action": summary.get("action"),
         "runtime_answer_kind": summary.get("answer_kind"),
@@ -478,8 +505,37 @@ def _runtime_actual(audit_rows: list[dict[str, Any]]) -> dict[str, Any]:
         "runtime_final_question_at_end": summary.get("final_question_at_end"),
         "runtime_quality_blockers": summary.get("quality_blockers"),
         "runtime_grounding_scope": summary.get("grounding_scope"),
-        "runtime_gateway_attempts": summary.get("gateway_attempt_details") if isinstance(summary.get("gateway_attempt_details"), list) else [],
+        "runtime_gateway_attempts": attempts,
     }
+    receipt = _v6_stage_receipt(attempts)
+    if receipt:
+        actual["runtime_v6_stage_receipt"] = receipt
+    return actual
+
+
+def _v6_stage_receipt(attempts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Expose only bounded V6 ownership evidence, never payload or task contents."""
+    if not attempts:
+        return {}
+    latest = attempts[-1]
+    if not isinstance(latest, dict):
+        return {}
+    receipt: dict[str, Any] = {}
+    for key in ("payload_stage_present", "gateway_task_id_present"):
+        if latest.get(key) is True:
+            receipt[key] = True
+    if isinstance(latest.get("provider_status_code"), int):
+        receipt["provider_status_code"] = latest["provider_status_code"]
+    for key in ("parse_status", "validator_status"):
+        if latest.get(key) in (V6_PARSE_STATUSES if key == "parse_status" else V6_VALIDATOR_STATUSES):
+            receipt[key] = latest[key]
+    if latest.get("provider_status_code", 0) >= 400:
+        receipt["next_owner"] = "provider"
+    elif latest.get("parse_status") in {"invalid_json", "missing"} or latest.get("validator_status") == "contract_violation":
+        receipt["next_owner"] = latest.get("stage_owner", "v6_runtime")
+    elif receipt:
+        receipt["next_owner"] = "v6_runtime"
+    return receipt
 
 
 def _classify(events: list[dict[str, Any]], audit_rows: list[dict[str, Any]]) -> tuple[str, str, str, str, bool]:

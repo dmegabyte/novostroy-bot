@@ -4,11 +4,13 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from nmbot_v2.contracts import IntentGoal, OptionCard, SafeTurnContext, SemanticPlan, Stage, TurnAction, ExecutableTurn
 from nmbot_v2.constraints import normalize_constraints_delta
-from nmbot_v2.search_contract import HARD_EVIDENCE_MAP, V2SearchRequest, build_candidate_retrieval_request, build_current_options_fact_check_request, build_query, build_search_request, matches_hard_constraint, normalize_and_validate_search_output, normalize_search_output, validate_current_options_fact_check_result, validate_search_output
+from nmbot_v2.search_contract import HARD_EVIDENCE_MAP, V2SearchRequest, build_candidate_retrieval_request, build_current_options_fact_check_request, build_query, build_search_request, lot_hard_from_hard, lot_matches_hard_constraints, matches_hard_constraint, normalize_and_validate_search_output, normalize_search_output, validate_current_options_fact_check_result, validate_search_output
 from nmbot_v2.state import ConversationState
 from scripts import nmbot_runtime_adapter as runtime_adapter
 
@@ -253,6 +255,26 @@ def test_base_search_has_nonempty_goal_and_empty_hard_filters() -> None:
     assert request.effective_hard == {}
 
 
+def test_broad_request_derives_lot_hard_only_from_lot_supported_effective_hard() -> None:
+    request = build_search_request(
+        SemanticPlan(operation="search", constraints_delta={"hard": {"rooms": [2], "max_price": 18_000_000, "location": "Москва", "district": "msk"}}),
+        ConversationState(),
+        SafeTurnContext("u", "двушка в Москве до 18 млн"),
+    )
+    named = build_search_request(
+        SemanticPlan(operation="lookup_object", reference="ЖК Точный", constraints_delta={"hard": {"rooms": [2], "max_price": 18_000_000}}),
+        ConversationState(),
+        SafeTurnContext("u", "ЖК Точный"),
+    )
+
+    assert lot_hard_from_hard(request.effective_hard) == {"rooms": [2], "max_price": 18_000_000}
+    assert request.lot_hard == {"rooms": [2], "max_price": 18_000_000}
+    assert "location" not in request.lot_hard
+    assert "district" not in request.lot_hard
+    assert named.effective_hard == {}
+    assert named.lot_hard == {}
+
+
 def test_refinement_preserves_existing_constraints_and_applies_delta_only() -> None:
     state = ConversationState(params={"rooms": [2], "location": ["Сокол"]})
     request = build_search_request(SemanticPlan(operation="refine_search", constraints_delta={"hard": {"max_price": 18_000_000}}), state, SafeTurnContext("u", "до 18 млн"))
@@ -409,7 +431,7 @@ def test_normalize_search_output_repairs_family_financing_overlay_diagnostics_on
         SafeTurnContext("u", "а ипотека есть для семейного варианта?"),
     )
     raw = {
-        "facts": [{"id": "ok", "name": "Семейный ЖК", "rooms": [2], "mortgage_calc": {"payment": 100000}, "school": True}],
+        "facts": [{"id": "ok", "name": "Семейный ЖК", "rooms": [2], "ads": [{"id": "ok-lot", "rooms": 2, "state": 2, "status": 2}], "mortgage_calc": {"payment": 100000}, "school": True}],
         "near": [],
         "missing": [],
         "params": {"rooms": [2], "finance_preference": "mortgage_details"},
@@ -639,7 +661,11 @@ def _validate_single_room_fact(actual_rooms, expected_rooms=None):
     expected_rooms = [2] if expected_rooms is None else expected_rooms
     request = _rooms_request(expected_rooms)
     output = _output_for(request)
-    output["facts"] = [{"id": "rooms-evidence", "rooms": actual_rooms}]
+    output["facts"] = [{
+        "id": "rooms-evidence",
+        "rooms": actual_rooms,
+        "ads": [{"id": "rooms-lot", "rooms": actual_rooms, "state": 2, "status": 2}],
+    }]
     return validate_search_output(output, request)
 
 
@@ -713,7 +739,8 @@ def _ready_request(expected="delivered"):
 def _validate_single_ready_fact(fact: dict, expected="delivered"):
     request = _ready_request(expected)
     output = _output_for(request)
-    output["facts"] = [fact]
+    lot = {**fact, "id": "ready-lot", "state": 2, "status": 2}
+    output["facts"] = [{**fact, "ads": [lot]}]
     return validate_search_output(output, request)
 
 
@@ -725,8 +752,8 @@ def test_ready_delivered_hard_match_accepts_structured_strings_bool_state_and_st
         {"id": "en-delivered", "ready": "delivered"},
         {"id": "bool-delivered", "delivered": True},
         {"id": "numeric-delivered", "delivered": 1},
-        {"id": "state-delivered", "state": "сдано"},
-        {"id": "status-ready", "status": "ready"},
+        {"id": "state-delivered", "ready": "сдано"},
+        {"id": "status-ready", "ready": "ready"},
     ]
 
     for fact in facts:
@@ -961,7 +988,7 @@ def test_selected_lot_hard_rooms_accepts_mixed_complex_room_formats_with_matchin
         available_fact_fields=["id", "name", "rooms", "ads"],
     )
     output = _output_for(request)
-    output["facts"] = [{"id": "complex", "name": "Новое Видное", "rooms": "1,3", "ads": [{"id": 1, "rooms": "2", "status": "2"}]}]
+    output["facts"] = [{"id": "complex", "name": "Новое Видное", "rooms": "1,3", "ads": [{"id": 1, "rooms": "2", "state": "2", "status": "2"}]}]
 
     assert validate_search_output(output, request)["ok"]
 
@@ -979,6 +1006,75 @@ def test_selected_lot_hard_rooms_rejects_missing_or_invalid_status_ads() -> None
 
     assert not validation["ok"]
     assert "fact_0_violates_lot_hard:rooms" in validation["errors"]
+
+
+def test_inventory_gate_rejects_project_price_without_qualifying_ad() -> None:
+    # Future owner: nmbot_v2.search_contract.validate_search_output inventory gate.
+    # price_mod is project-level metadata, not evidence for a qualifying ad.
+    request = V2SearchRequest(
+        search_goal={"query_summary": "двушка до 10 млн"},
+        lot_hard={"rooms": 2, "max_price": 10_000_000},
+        available_fact_fields=["id", "name", "min_price", "price_mod", "ads"],
+    )
+    output = _output_for(request)
+    output["facts"] = [{
+        "id": "project-only-price",
+        "name": "ЖК с ценой проекта",
+        "min_price": 9_500_000,
+        "price_mod": 9_500_000,
+        "ads": [],
+    }]
+
+    validation = validate_search_output(output, request)
+
+    assert not validation["ok"]
+    assert "fact_0_violates_inventory_gate:max_price" in validation["errors"]
+
+
+def test_lot_hard_requires_one_same_ad_for_rooms_and_price() -> None:
+    ads = {
+        "ads": [
+            {"id": 1, "state": 2, "status": 2, "rooms": 2, "fullprice": 12_000_000},
+            {"id": 2, "state": 2, "status": 2, "rooms": 1, "fullprice": 9_000_000},
+        ]
+    }
+
+    assert not lot_matches_hard_constraints(ads, {"rooms": 2, "max_price": 10_000_000})
+    assert lot_matches_hard_constraints({"ads": [{"id": 3, "state": 2, "status": 2, "rooms": 2, "fullprice": 10_000_000}]}, {"rooms": 2, "max_price": 10_000_000})
+
+
+def test_lot_hard_accepts_canonical_normalized_area_ready_and_renovation() -> None:
+    canonical_ad = {
+        "id": 7,
+        "state": 2,
+        "status": 2,
+        "area_m2": 55,
+        "renovation": "с отделкой",
+        "ready": "сдан",
+        "delivered": True,
+    }
+
+    assert lot_matches_hard_constraints(
+        {"ads": [canonical_ad]},
+        {"area_min_m2": 50, "area_max_m2": 60, "ready": "delivered", "finishing": True},
+    )
+    assert not lot_matches_hard_constraints(
+        {"ads": [{**canonical_ad, "area_m2": 45}]},
+        {"area_min_m2": 50, "ready": "delivered", "finishing": True},
+    )
+    assert not lot_matches_hard_constraints(
+        {"ads": [{**canonical_ad, "renovation": "без отделки"}]},
+        {"finishing": True},
+    )
+
+
+@pytest.mark.parametrize("ad", [
+    {"id": "", "state": 2, "status": 2, "rooms": 2},
+    {"id": 1, "state": 1, "status": 2, "rooms": 2},
+    {"id": 1, "state": 2, "status": 1, "rooms": 2},
+])
+def test_lot_hard_requires_valid_id_active_state_and_status(ad) -> None:
+    assert not lot_matches_hard_constraints({"ads": [ad]}, {"rooms": 2})
 
 
 def test_selected_followup_phrase_extracts_lot_scoped_rooms_constraint() -> None:

@@ -139,6 +139,68 @@ def test_semantic_known_intent_delta_derives_update_keep() -> None:
     assert result["constraints_patch"]["hard"]["max_price"] == 40_000_000
 
 
+def test_operator_consent_semantic_payload_derives_canonical_operator_contact() -> None:
+    result = planner._with_canonical_fields({}, {
+        "goal": "operator",
+        "operator_consent": True,
+        "followup_outcome": "accept",
+        "confidence": 1.0,
+    }, state={"pending_followup": "contact_name", "contact_consent": False})
+
+    assert result["canonical_valid"] is True
+    assert result["action"] == "operator_contact"
+    assert result["target"] == "operator"
+    assert result["search_policy"] == "forbidden"
+    assert result["operator_contact"] == {"requested": True, "consent": "granted"}
+
+
+def test_operator_consent_without_pending_operator_flow_fails_closed() -> None:
+    result = planner._with_canonical_fields({}, {
+        "goal": "operator",
+        "operator_consent": True,
+        "followup_outcome": "accept",
+        "confidence": 1.0,
+    }, state={"pending_followup": None, "contact_consent": False})
+
+    assert result["canonical_valid"] is True
+    assert result["action"] == "recover_dialogue"
+    assert "invalid_operator_consent_scope" in result["derived_decision"]["errors"]
+
+
+def test_api_canonical_bridge_accepts_live_operator_consent_payload() -> None:
+    state = {"pending_followup": "contact_name", "contact_consent": False}
+    canonical = api._ensure_derived_canonical_plan({
+        "goal": "operator",
+        "operator_consent": True,
+        "followup_outcome": "accept",
+        "confidence": 1.0,
+    }, state)
+
+    decision = api._decision_from_planner(canonical, state)
+
+    assert canonical["action"] == "operator_contact"
+    assert canonical["operator_contact"] == {"requested": True, "consent": "granted"}
+    assert decision.action == "operator_contact"
+    assert decision.search_policy == "forbidden"
+
+
+def test_canonical_operator_contact_round_trip_preserves_consent() -> None:
+    semantic = normalize_semantic_planner_result({
+        "action": "operator_contact",
+        "dialog_action": "operator_live_check",
+        "operator_contact": {"requested": True, "consent": "granted"},
+        "confidence": 1.0,
+    })
+
+    decision = derive_runtime_decision(
+        semantic,
+        {"pending_followup": "contact_name", "contact_consent": False},
+    )
+
+    assert semantic.operator_consent is True
+    assert decision.action == "operator_contact"
+
+
 def test_semantic_chain_parking_followup_price_preserved() -> None:
     state = {
         "visible_options": [{"name": "Мичуринский парк"}],

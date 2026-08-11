@@ -582,6 +582,53 @@ def test_jivo_bot_journal_persists_safe_v4_gateway_trace_without_raw_sensitive_f
     asyncio.run(scenario())
 
 
+def test_api_gateway_attempt_sanitizer_preserves_legacy_task_id_and_v6_marker() -> None:
+    attempts = mod._journal_gateway_attempt_details([
+        {"stage": "gateway_attempt", "gateway_task_id": "legacy/task"},
+        {"_payload_stage": "v6_search_agent", "gateway_task_id_present": True},
+    ])
+
+    assert attempts == [
+        {"stage": "gateway_attempt", "gateway_task_id": "legacy_task", "duration_ms": 0},
+        {"_payload_stage": "v6_search_agent", "gateway_task_id_present": True, "duration_ms": 0},
+    ]
+    assert "gateway_task_id" not in attempts[1]
+
+
+def test_api_journal_v6_summary_redacts_task_ref_idempotently() -> None:
+    result = {
+        "meta": {"runtime": "v6", "trace": {"runtime_summary": {
+            "stage": "v6_runtime", "action": "search", "call_counts": {"gateway_attempts": 1},
+            "gateway_attempt_details": [{"stage": "gateway_attempt", "_payload_stage": "v6_search_agent", "gateway_task_id": "raw-v6-task-ref", "gateway_task_id_present": True, "parse_status": "ok", "validator_status": "ok"}],
+        }}},
+    }
+
+    first = mod._journal_runtime_summary(result)
+    second = mod._journal_runtime_summary({"meta": {"runtime": "v6", "trace": {"runtime_summary": first}}})
+
+    assert first == second
+    assert first == {
+        "stage": "v6_runtime",
+        "action": "search",
+        "call_counts": {"gateway_attempts": 1},
+        "gateway_attempt_details": [{"stage": "gateway_attempt", "_payload_stage": "v6_search_agent", "gateway_task_id_present": True, "duration_ms": 0, "parse_status": "ok", "validator_status": "ok"}],
+    }
+    assert "raw-v6-task-ref" not in json.dumps(first)
+
+
+def test_api_gateway_attempt_sanitizer_rejects_malformed_provider_status_codes() -> None:
+    attempts = mod._journal_gateway_attempt_details([
+        {"provider_status_code": 200},
+        {"provider_status_code": True},
+        {"provider_status_code": "200"},
+        {"provider_status_code": 99},
+        {"provider_status_code": 600},
+    ])
+
+    assert attempts[0]["provider_status_code"] == 200
+    assert all("provider_status_code" not in attempt for attempt in attempts[1:])
+
+
 def test_jivo_bot_journal_persists_safe_v1_response_model_trace(tmp_path, monkeypatch):
     async def scenario() -> None:
         app = make_app(tmp_path)
@@ -999,6 +1046,33 @@ def test_api_reset_resets_only_active_namespace_and_preserves_inactive() -> None
     asyncio.run(scenario())
 
 
+def test_api_reset_v6_resets_only_v6_namespace_and_preserves_inactive() -> None:
+    async def scenario() -> None:
+        app = make_app()
+        user_id = "api:v6-preserve"
+        app["state_store"].states[user_id] = {
+            "nmbot_v2": {"params": {"rooms": 2}},
+            "nmbot_v6": {"unexpected": "old"},
+        }
+        await app["runtime_version_store"].set("V6")
+
+        class Request:
+            def __init__(self, app):
+                self.app = app
+
+            async def json(self):
+                return {"user_id": user_id}
+
+        response = await mod.handle_api_reset(Request(app))
+
+        assert response.status == 200
+        state = app["state_store"].states[user_id]
+        assert state["nmbot_v6"] == mod._canonical_v6_envelope()["nmbot_v6"]
+        assert state["nmbot_v2"] == {"params": {"rooms": 2}}
+
+    asyncio.run(scenario())
+
+
 def test_runtime_version_store_defaults_v2_and_persists_reload(tmp_path) -> None:
     async def scenario() -> None:
         path = tmp_path / "runtime-version.json"
@@ -1106,6 +1180,43 @@ def test_start_version_commands_override_only_current_jivo_session() -> None:
         response, status = await mod.process_jivo_client_message(app, payload(event_id="start-default", text="/start"))
         assert status == 200
         assert "runtime_version_override" not in app["state_store"].states[user_id]
+
+    asyncio.run(scenario())
+
+
+def test_start_6_uses_local_override_greeting_and_v6_namespace() -> None:
+    async def scenario() -> None:
+        app = make_app()
+        user_id = "jivo:site1:chat1:client-chat1"
+        app["state_store"].states[user_id] = {"nmbot_v2": {"params": {"rooms": 2}}}
+
+        response, status = await mod.process_jivo_client_message(app, payload(event_id="start-6", text="/start_6"))
+
+        assert status == 200
+        assert response["message"]["text"] == mod._jivo_start_greeting("V6")
+        state = app["state_store"].states[user_id]
+        assert state["runtime_version_override"] == "V6"
+        assert state["nmbot_v6"] == mod._canonical_v6_envelope()["nmbot_v6"]
+        assert state["nmbot_v2"] == {"params": {"rooms": 2}}
+
+    asyncio.run(scenario())
+
+
+def test_start_6_in_client_production_removes_session_override_and_uses_active_runtime(monkeypatch) -> None:
+    async def scenario() -> None:
+        app = make_app()
+        user_id = "jivo:site1:chat1:client-chat1"
+        app["state_store"].states[user_id] = {"runtime_version_override": "V6", "nmbot_v6": {"old": True}}
+        monkeypatch.setattr(mod, "is_client_production", lambda: True)
+
+        response, status = await mod.process_jivo_client_message(app, payload(event_id="start-6-production", text="/start_6"))
+
+        assert status == 200
+        assert response["message"]["text"] == mod.JIVO_START_GREETING
+        state = app["state_store"].states[user_id]
+        assert "runtime_version_override" not in state
+        assert state["nmbot_v2"] == mod.ConversationState().to_dict()
+        assert state["nmbot_v6"] == {"old": True}
 
     asyncio.run(scenario())
 
@@ -1371,7 +1482,7 @@ def test_run_chat_budget_like_short_digits_reaches_overmind(monkeypatch) -> None
                 seen.append(request_data)
                 if request_data.get("_payload_stage") == "conversation_answer":
                     return json.dumps({"intro": "Вот подборка.", "options": [{"name": "Лучи", "facts": "до 200к."}], "missing_note": "", "final_question": "Показать подробнее?"}, ensure_ascii=False), {"ok": True}
-                return json.dumps({"facts": [{"name": "Лучи", "min_price": 200000}], "near": [], "missing": [], "params": {"max_price": 200000}, "diagnostics": {"mcp_tool": "novostroym/get_flat_info", "requested_field_priorities": [], "relaxation_audit": []}}, ensure_ascii=False), {"ok": True}
+                return json.dumps({"facts": [{"name": "Лучи", "min_price": 200000}], "ads": [{"id": 1, "state": 2, "status": 2}], "near": [], "missing": [], "params": {"max_price": 200000}, "diagnostics": {"mcp_tool": "novostroym/get_flat_info", "requested_field_priorities": [], "relaxation_audit": []}}, ensure_ascii=False), {"ok": True}
 
         app["overmind_client"] = FakeClient()
         result = await mod.run_chat(app, user_id="u-budget", message="до 200к", channel="jivo")
@@ -1379,12 +1490,12 @@ def test_run_chat_budget_like_short_digits_reaches_overmind(monkeypatch) -> None
         assert result["ok"] is True
         assert result["intent"] == "main_search"
         assert len(planner_calls) == 1
-        assert [item.get("_payload_stage") for item in seen] == ["main_search", "main_search", "main_search"]
+        assert [item.get("_payload_stage") for item in seen] == ["main_search", "main_search", "main_search", "main_search"]
         assert "до 200к" in seen[0]["query"]
-        assert '"count": 2' in seen[1]["query"]
-        assert '"excluded_names": ["Лучи"]' in seen[1]["query"]
-        third_envelope = json.loads(seen[2]["query"].split("SEARCH_CONTRACT_ENVELOPE=", 1)[1].split("\n", 1)[0])
-        third_params = json.loads(seen[2]["query"].split("Текущие параметры: ", 1)[1].split("\n", 1)[0])
+        assert '"count": 3' in seen[2]["query"]
+        assert '"excluded_names": ["Лучи"]' in seen[2]["query"]
+        third_envelope = json.loads(seen[3]["query"].split("SEARCH_CONTRACT_ENVELOPE=", 1)[1].split("\n", 1)[0])
+        third_params = json.loads(seen[3]["query"].split("Текущие параметры: ", 1)[1].split("\n", 1)[0])
         assert third_envelope["count"] == 1
         assert third_params["preferences"] == {"format": "full_card"}
 
@@ -1427,7 +1538,7 @@ def test_run_chat_room_check_offer_does_not_start_phone_collection(monkeypatch) 
         assert result["awaiting_phone"] is False
         assert result["handoff_to_operator"] is False
         assert calls
-        assert [payload.get("_payload_stage") for payload in gateway_payloads] == ["main_search"]
+        assert [payload.get("_payload_stage") for payload in gateway_payloads] == ["main_search", "main_search"]
         assert "двушка" in gateway_payloads[0]["query"]
         assert result["answer"].strip()
         assert "телефон" not in result["answer"].lower()
@@ -1534,7 +1645,7 @@ def test_recover_dialogue_increments_repeats_and_resets_after_success(tmp_path, 
                 gateway_calls.append(request_data)
                 if request_data.get("_payload_stage") == "conversation_answer":
                     return json.dumps({"intro": "Вот подборка.", "options": [{"name": "Лучи", "facts": "двухкомнатная."}], "missing_note": "", "final_question": "Показать подробнее?"}, ensure_ascii=False), {"ok": True}
-                return json.dumps({"facts": [{"name": "Лучи", "rooms": 2, "min_price": 12_000_000}], "near": [], "missing": [], "params": {"rooms": 2}, "diagnostics": {"mcp_tool": "novostroym/get_flat_info", "requested_field_priorities": [], "relaxation_audit": []}}, ensure_ascii=False), {"ok": True}
+                return json.dumps({"facts": [{"name": "Лучи", "rooms": 2, "min_price": 12_000_000}], "ads": [{"id": 1, "state": 2, "status": 2}], "near": [], "missing": [], "params": {"rooms": 2}, "diagnostics": {"mcp_tool": "novostroym/get_flat_info", "requested_field_priorities": [], "relaxation_audit": []}}, ensure_ascii=False), {"ok": True}
 
         app["overmind_client"] = FakeClient()
         first = await mod.run_chat(app, user_id="u-recover", message="не понял", channel="jivo")
@@ -1545,11 +1656,11 @@ def test_recover_dialogue_increments_repeats_and_resets_after_success(tmp_path, 
         assert second["intent"] == "freeform"
         assert third["intent"] == "main_search"
         assert len(planner_calls) == 3
-        assert [payload.get("_payload_stage") for payload in gateway_calls] == ["main_search", "main_search", "main_search"]
-        assert '"count": 2' in gateway_calls[1]["query"]
-        assert '"excluded_names": ["Лучи"]' in gateway_calls[1]["query"]
-        third_envelope = json.loads(gateway_calls[2]["query"].split("SEARCH_CONTRACT_ENVELOPE=", 1)[1].split("\n", 1)[0])
-        third_params = json.loads(gateway_calls[2]["query"].split("Текущие параметры: ", 1)[1].split("\n", 1)[0])
+        assert [payload.get("_payload_stage") for payload in gateway_calls] == ["main_search", "main_search", "main_search", "main_search"]
+        assert '"count": 3' in gateway_calls[2]["query"]
+        assert '"excluded_names": ["Лучи"]' in gateway_calls[2]["query"]
+        third_envelope = json.loads(gateway_calls[3]["query"].split("SEARCH_CONTRACT_ENVELOPE=", 1)[1].split("\n", 1)[0])
+        third_params = json.loads(gateway_calls[3]["query"].split("Текущие параметры: ", 1)[1].split("\n", 1)[0])
         assert third_envelope["count"] == 1
         assert third_params["preferences"] == {"format": "full_card"}
         saved = app["state_store"].states["u-recover"]
@@ -2095,6 +2206,7 @@ class TestCanonicalPlannerContract:
                     return json.dumps(
                         {
                             "facts": [{"name": "ЖК Сокол", "location": "Сокол", "rooms": 2, "price_min": 17_000_000, "max_price": 17_000_000}],
+                            "ads": [{"id": 1, "state": 2, "status": 2}],
                             "near": [],
                             "missing": [],
                             "params": {"purpose": "family", "rooms": 2, "location": ["Сокол"], "max_price": 18_000_000},
@@ -2106,7 +2218,7 @@ class TestCanonicalPlannerContract:
             app["overmind_client"] = FakeClient()
             result = await mod.run_chat(app, user_id="u-canonical-search", message="на Соколе до 18", channel="jivo")
             assert result["intent"] in {"main_search", "near_results"}
-            assert len(seen) == 3
+            assert len(seen) == 4
             def search_payload(request: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
                 query = request["query"]
                 envelope = json.loads(query.split("SEARCH_CONTRACT_ENVELOPE=", 1)[1].split("\n", 1)[0])
@@ -2123,14 +2235,14 @@ class TestCanonicalPlannerContract:
             assert first_params["relaxation_audit"] == [{"field": "location", "mode": "internal_candidate_retrieval", "client_relaxation": False}]
             assert first_envelope["response_viewpoint"] == "family"
             assert seen[1]["_payload_stage"] == "main_search"
-            second_envelope, second_params = search_payload(seen[1])
-            assert second_envelope["count"] == 2
+            second_envelope, second_params = search_payload(seen[2])
+            assert second_envelope["count"] == 3
             assert second_params["excluded_names"] == ["ЖК Сокол"]
-            # The third request is family-card enrichment after the search and
-            # supplemental search complete. It is an exact-card lookup, not a
-            # relaxation of the original user search.
-            assert seen[2]["_payload_stage"] == "main_search"
-            third_envelope, third_params = search_payload(seen[2])
+            # The final request is family-card enrichment after the broad search,
+            # its exact inventory enrichment, and supplemental search complete.
+            # It is an exact-card lookup, not a relaxation of the original user search.
+            assert seen[3]["_payload_stage"] == "main_search"
+            third_envelope, third_params = search_payload(seen[3])
             assert third_envelope["count"] == 1
             assert third_params["excluded_names"] == []
             assert third_params["requested_hard"] == {}
@@ -2678,7 +2790,16 @@ class TestCanonicalPlannerContract:
     def test_canonical_semantic_pair_mismatch_fails_closed(self, tmp_path, monkeypatch) -> None:
         async def scenario() -> None:
             app = make_app(tmp_path)
-            patch_planner(monkeypatch, self.canonical_plan(action="search", target="current_options", search_policy="forbidden"))
+            patch_planner(
+                monkeypatch,
+                self.canonical_plan(
+                    action="search",
+                    target="current_options",
+                    search_policy="forbidden",
+                    canonical_valid=False,
+                    canonical_errors=["semantic_pair_mismatch"],
+                ),
+            )
 
             class FakeClient:
                 async def ensure_session(self) -> None:
@@ -2709,6 +2830,7 @@ class TestCanonicalPlannerContract:
                     return json.dumps(
                         {
                             "facts": [{"name": "ЖК Legacy", "location": "Москва", "min_price": 12_000_000}],
+                            "ads": [{"id": 1, "state": 2, "status": 2}],
                             "near": [],
                             "missing": [],
                             "params": {},
@@ -2720,11 +2842,11 @@ class TestCanonicalPlannerContract:
             app["overmind_client"] = FakeClient()
             result = await mod.run_chat(app, user_id="u-legacy-search", message="подбери", channel="jivo")
             assert result["intent"] == "main_search"
-            assert [item.get("_payload_stage") for item in seen] == ["main_search", "main_search", "main_search"]
-            assert '"count": 2' in seen[1]["query"]
-            assert '"excluded_names": ["ЖК Legacy"]' in seen[1]["query"]
-            third_envelope = json.loads(seen[2]["query"].split("SEARCH_CONTRACT_ENVELOPE=", 1)[1].split("\n", 1)[0])
-            third_params = json.loads(seen[2]["query"].split("Текущие параметры: ", 1)[1].split("\n", 1)[0])
+            assert [item.get("_payload_stage") for item in seen] == ["main_search", "main_search", "main_search", "main_search"]
+            assert '"count": 3' in seen[2]["query"]
+            assert '"excluded_names": ["ЖК Legacy"]' in seen[2]["query"]
+            third_envelope = json.loads(seen[3]["query"].split("SEARCH_CONTRACT_ENVELOPE=", 1)[1].split("\n", 1)[0])
+            third_params = json.loads(seen[3]["query"].split("Текущие параметры: ", 1)[1].split("\n", 1)[0])
             assert third_envelope["count"] == 1
             assert third_params["preferences"] == {"format": "full_card"}
 

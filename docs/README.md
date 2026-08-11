@@ -59,6 +59,8 @@ may link or redirect here, but should not become duplicate owner docs.
 ## 3. Operate and release
 
 - `current` [`NMBOT_RUNBOOK.md`](NMBOT_RUNBOOK.md) — first operational commands, local gates, deploy/rollback boundaries.
+- `current` **Broad inventory gate** — быстрый маршрут управления фильтром ЖК без подтверждённого продаваемого лота: `scripts/nmbot_inventory_gate.py`; подробности и команды — в [NMBOT_RUNBOOK.md](NMBOT_RUNBOOK.md#broad-inventory-gate).
+- `current` **TEST feature flags** — безопасное переключение трёх TEST-флагов без ручного редактирования `.env`: `scripts/nmbot_test_feature_flags.py`; ключи и ограничения — в [NMBOT_RUNBOOK.md](NMBOT_RUNBOOK.md#test-feature-flags).
 - `current` [`JIVO_DIAGNOSTICS.md`](JIVO_DIAGNOSTICS.md) — Jivo/API trace, terminal delivery and diagnostics.
 - `current` [`NMBOT_RELEASE_IDENTITY.md`](NMBOT_RELEASE_IDENTITY.md) — release identity and source attribution.
 - `reference` [`NMBOT_ATOMIC_RELEASES.md`](NMBOT_ATOMIC_RELEASES.md) — atomic release procedure reference.
@@ -68,7 +70,7 @@ may link or redirect here, but should not become duplicate owner docs.
 
 ## 4. Decisions and history
 
-- `planning` [`EXPERIMENTS.md`](EXPERIMENTS.md) — experiment and prompt/model change log.
+- `reference` [`EXPERIMENTS.md`](EXPERIMENTS.md) — owner experiment workflow and prompt/model evidence.
 - `planning` [`NMBOT_PROJECT_SIMPLIFICATION_PLAN.md`](NMBOT_PROJECT_SIMPLIFICATION_PLAN.md) — project simplification plan.
 - `planning` [`MULTI_PROJECT_MEMORY_HARNESS_INTEGRATION_PLAN.md`](MULTI_PROJECT_MEMORY_HARNESS_INTEGRATION_PLAN.md) — multi-project memory/context harness plan.
 - `planning` [`NMBOT_CONTEXT_WORKFLOW_PRODUCTION_ROADMAP.md`](NMBOT_CONTEXT_WORKFLOW_PRODUCTION_ROADMAP.md) — context workflow production roadmap.

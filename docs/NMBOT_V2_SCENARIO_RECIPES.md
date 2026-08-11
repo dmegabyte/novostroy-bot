@@ -314,6 +314,21 @@ recipe не может расширить `scope=one`, запустить broad 
     `ask_or_clarify → financing_consent_clarification`,
     `unexpected → financing_consent_recovery`.
 
+### `operator_consent`
+
+- **when:** клиент отвечает на уже опубликованное предложение подключить
+  менеджера; это отдельный consent-turn, а не новый поиск и не выбор ЖК.
+- **planner context:** `offered_action=collect_contact_phone`; предметом
+  остаётся сохранённый текущий контекст, а не автоматически весь новый список.
+- **allowed_outcomes:** `accept`, `decline`, `ask_or_clarify`, `unexpected`.
+- **transitions:** `accept → operator_handoff_phone_capture`,
+  `decline → selected_live_fact_declined`,
+  `ask_or_clarify|unexpected → operator_handoff_name_capture` с сохранением
+  `operator_consent` pending.
+- **forbidden:** запуск нового поиска, молчаливый выбор ЖК, запрос телефона до
+  принятого согласия и подмена отсутствующего evidence утверждением об отсутствии
+  квартир.
+
 ### Продолжения `financing`-offer
 
 - **`operator_handoff_name_capture`:** только после planner outcome `accept`.
@@ -394,13 +409,14 @@ Executable resolver работает детерминированно и выз�
 `cta_template`, `composition_mode`, `reply_contract_id`. `ResponseBrief`
 переносит тот же contract в composer payload. Модель получает canonical cards
 и формулирует строгий JSON, но не меняет recipe, порядок карточек, scope, факты,
-anchors или CTA.
+anchors или CTA. Для следующего хода runtime сохраняет typed `last_offer`; модель
+разрешает короткий follow-up через его `subject_name` и `action`.
 
 ## 8. Исполняемая матрица
 
 Runtime registry в `nmbot_v2/scenario_recipes.py` сейчас содержит 30
-исполняемых recipe entries. В нём два закрытых reply contract:
-`financing_consent` и `selected_live_fact_consent`. Оба принимают только
+исполняемых recipe entries. В нём три закрытых reply contract:
+`financing_consent`, `selected_live_fact_consent` и `operator_consent`. Все три принимают только
 outcome `accept`, `decline`, `ask_or_clarify`, `unexpected`; invalid/missing
 не считается согласием и уходит в recovery.
 

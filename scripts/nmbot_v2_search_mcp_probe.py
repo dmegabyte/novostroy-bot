@@ -256,6 +256,40 @@ def _truncate_diagnostic_value(value: Any) -> Any:
     return rendered[:MAX_DIAGNOSTIC_VALUE_CHARS]
 
 
+def _inventory_evidence_summary(output: dict[str, Any]) -> dict[str, Any]:
+    """Summarize only bounded ads evidence; never expose raw lots or IDs."""
+    ads_records: list[dict[str, Any]] = []
+    for container in (output.get("facts"), output.get("near")):
+        if not isinstance(container, list):
+            continue
+        for item in container:
+            if not isinstance(item, dict):
+                continue
+            ads = item.get("ads")
+            if isinstance(ads, dict):
+                ads = [ads]
+            if isinstance(ads, list):
+                ads_records.extend(record for record in ads if isinstance(record, dict))
+
+    def is_value_two(value: Any) -> bool:
+        return value == 2 or (isinstance(value, str) and value.strip().lower() == "2")
+
+    state_2 = sum(1 for record in ads_records if is_value_two(record.get("state")))
+    status_2 = sum(1 for record in ads_records if is_value_two(record.get("status")))
+    active_for_sale = sum(
+        1
+        for record in ads_records
+        if is_value_two(record.get("state")) and is_value_two(record.get("status"))
+    )
+    return {
+        "ads_records": len(ads_records),
+        "ads_state_2": state_2,
+        "ads_status_2": status_2,
+        "ads_state_2_status_2": active_for_sale,
+        "structured_ads_evidence_present": bool(ads_records),
+    }
+
+
 def _ready_hard_failure_diagnostics(output: dict[str, Any], errors: list[str]) -> list[dict[str, Any]]:
     facts = output.get("facts") if isinstance(output.get("facts"), list) else []
     diagnostics: list[dict[str, Any]] = []
@@ -520,6 +554,8 @@ def _request_from_scenario(fixture: dict[str, Any], scenario: dict[str, Any]) ->
         available_fact_fields=available_fact_fields(fixture, scenario),
         count=int(scenario["count"]),
         ignored_preferences=sorted(_unknown_preference_keys(fixture, scenario)),
+        search_mode=str(scenario.get("search_mode") or "broad"),
+        facts_needed=tuple(scenario.get("facts_needed") or ()),
     )
 
 
@@ -612,8 +648,16 @@ async def run_live_case(case_id: str, *, timeout: int, gateway_func: Any = None,
     parsed, parse_errors = parse_strict_json(raw)
     if parsed is None:
         validation = {"ok": False, "errors": parse_errors, "counts": {"facts": 0, "near": 0, "missing": 0}}
+        inventory = {
+            "ads_records": 0,
+            "ads_state_2": 0,
+            "ads_status_2": 0,
+            "ads_state_2_status_2": 0,
+            "structured_ads_evidence_present": False,
+        }
     else:
         parsed = core_contract.normalize_search_output(parsed, _request_from_scenario(fixture, scenario))
+        inventory = _inventory_evidence_summary(parsed)
         validation = validate_output(parsed, fixture, scenario, diagnose=diagnose)
     gateway_meta: dict[str, Any] = {"ok": bool(meta.get("ok", False))}
     if isinstance(meta.get("diagnostics"), dict):
@@ -633,6 +677,8 @@ async def run_live_case(case_id: str, *, timeout: int, gateway_func: Any = None,
     }
     if diagnose and validation.get("hard_match_diagnostics"):
         result["hard_match_diagnostics"] = validation["hard_match_diagnostics"]
+    if diagnose:
+        result["inventory_evidence"] = inventory
     return result
 
 

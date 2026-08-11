@@ -80,6 +80,12 @@ def test_v2_planner_state_payload_keeps_safe_context_without_legacy_import() -> 
         "last_bot_question": "Хотите проверить условия покупки по ЖК Событие?",
         "last_offer_type": "selected_option_details",
         "last_answer_kind": "selected_option_financing_manager_offer",
+        "last_offer": {
+            "action": "verify_selected_live_facts",
+            "subject_type": "visible_option",
+            "subject_name": "ЖК Событие",
+            "requested_facts": ["mortgage_terms"],
+        },
         "active_task": {"type": "financing"},
         "active_scenario": {"key": "rental", "turn_count": 2},
         "numeric_choice_policy": "reject",
@@ -89,13 +95,15 @@ def test_v2_planner_state_payload_keeps_safe_context_without_legacy_import() -> 
     assert "_nmbot_legacy_chat_tester_bot" not in sys.modules
     assert set(payload) == {
         "params", "selected_option", "visible_options", "last_options", "rejected_option_names",
-        "last_bot_question", "last_offer_type", "last_answer_kind", "last_turn", "active_task",
+        "last_bot_question", "last_offer_type", "last_answer_kind", "last_offer", "last_turn", "active_task",
         "active_scenario", "scenario_context", "numeric_choice_policy", "conversation_followup",
     }
     assert payload["selected_option"] == {"name": "ЖК Событие", "price": "от 18 млн"}
     assert payload["visible_options"][0]["name"] == "ЖК Событие"
     assert "raw" not in payload["visible_options"][0]
     assert payload["last_turn"]["expected_action_class"] == "operator_live_check"
+    assert payload["last_offer"]["subject_name"] == "ЖК Событие"
+    assert payload["last_offer"]["action"] == "verify_selected_live_facts"
     assert payload["scenario_context"]["primary_scenario"] == "rental"
     assert payload["scenario_context"]["facet_request"]["type"] == "mortgage"
     assert payload["conversation_followup"]["mortgage_type"] == "family_mortgage"

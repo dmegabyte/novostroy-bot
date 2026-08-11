@@ -66,7 +66,7 @@ from nmbot_planner_context import (
     safe_planner_state as _neutral_safe_planner_state,
     safe_turn_context as _neutral_safe_turn_context,
 )
-from nmbot_runtime_adapter import _canonical_v0_envelope, _canonical_v1_envelope, _canonical_v4_envelope, _merge_runtime_namespace_envelope, run_runtime_turn
+from nmbot_runtime_adapter import _canonical_v0_envelope, _canonical_v1_envelope, _canonical_v4_envelope, _canonical_v6_envelope, _merge_runtime_namespace_envelope, run_runtime_turn
 from nmbot_v0.field_contract import V0_PRESENTATION_TRACE_FIELDS
 from nmbot_v1.state import V1ConversationState
 from nmbot_v2.contracts import OptionCard
@@ -180,6 +180,7 @@ def _default_state() -> dict[str, Any]:
         "last_bot_question": "",
         "last_offer_type": "",
         "last_answer_kind": "",
+        "last_offer": {},
         "active_task": {},
         "active_scenario": {},
         "selected_option_card_shown_count": 0,
@@ -199,6 +200,8 @@ def _canonical_reset_state_for_version(version: str) -> dict[str, Any]:
         return _canonical_v1_envelope(V1ConversationState.clean())
     if normalized == "V4":
         return _canonical_v4_envelope()
+    if normalized == "V6":
+        return _canonical_v6_envelope()
     return _canonical_reset_state()
 
 
@@ -667,6 +670,15 @@ RUNTIME_IDENTITIES = {
         ),
         "state_namespace": "nmbot_v2",
     },
+    "V5": {
+        "name": "Светлана",
+        "start_greeting": (
+            "Здравствуйте! Меня зовут Светлана, я помогаю подобрать квартиру в Москве и области — "
+            "для жизни, инвестиций или сдачи в аренду. Напишите, какой район или метро рассматриваете, "
+            "сколько комнат нужно и какой бюджет планируете — я сразу начну подбор."
+        ),
+        "state_namespace": "nmbot_v2",
+    },
     "V4": {
         "name": "Марина",
         "start_greeting": (
@@ -674,6 +686,14 @@ RUNTIME_IDENTITIES = {
             "Напишите район или ЖК, сколько комнат нужно и какой бюджет — я сразу предложу подходящие варианты."
         ),
         "state_namespace": "nmbot_v4",
+    },
+    "V6": {
+        "name": "V6",
+        "start_greeting": (
+            "Здравствуйте! Это локальный V6-адаптер для изолированной проверки. "
+            "Напишите, какой район или метро рассматриваете, сколько комнат нужно и какой бюджет планируете."
+        ),
+        "state_namespace": "nmbot_v6",
     },
 }
 SUPPORTED_RUNTIME_VERSIONS = frozenset(RUNTIME_IDENTITIES)
@@ -2334,12 +2354,12 @@ def build_jivo_invite_agent(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _is_start_command(text: str) -> bool:
     normalized = str(text or "").strip().lower()
-    return normalized in {"/start", "start", "/start_0", "/start_1", "/start_2", "/start_3", "/start_4"}
+    return normalized in {"/start", "start", "/start_0", "/start_1", "/start_2", "/start_3", "/start_4", "/start_5", "/start_6"}
 
 
 def _start_command_version(text: str) -> str | None:
     normalized = str(text or "").strip().lower()
-    return {"/start_0": "V0", "/start_1": "V1", "/start_2": "V2", "/start_3": "V3", "/start_4": "V4"}.get(normalized)
+    return {"/start_0": "V0", "/start_1": "V1", "/start_2": "V2", "/start_3": "V3", "/start_4": "V4", "/start_5": "V5", "/start_6": "V6"}.get(normalized)
 
 
 async def run_chat(app: web.Application, *, user_id: str, message: str, channel: str, meta: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -3315,6 +3335,16 @@ def _journal_runtime_summary(result: dict[str, Any]) -> dict[str, Any] | None:
     action = _journal_token(summary.get("action"))
     if not stage or not action:
         return None
+    if stage == "v6_runtime":
+        out = {
+            "stage": stage,
+            "action": action,
+            "call_counts": {"gateway_attempts": _journal_int((summary.get("call_counts") or {}).get("gateway_attempts") if isinstance(summary.get("call_counts"), dict) else 0, 0, 5)},
+        }
+        gateway_attempt_details = _journal_gateway_attempt_details(summary.get("gateway_attempt_details"))
+        if gateway_attempt_details:
+            out["gateway_attempt_details"] = gateway_attempt_details
+        return out
     out = {
         "stage": stage,
         "action": action,
@@ -3334,6 +3364,9 @@ def _journal_runtime_summary(result: dict[str, Any]) -> dict[str, Any] | None:
     gateway_attempt_details = _journal_gateway_attempt_details(summary.get("gateway_attempt_details"))
     if gateway_attempt_details:
         out["gateway_attempt_details"] = gateway_attempt_details
+    inventory_gate = _journal_inventory_gate_summary(summary.get("inventory_gate"))
+    if inventory_gate:
+        out["inventory_gate"] = inventory_gate
     option_enrichment = _journal_option_enrichment(summary.get("option_enrichment"))
     if option_enrichment:
         out["option_enrichment"] = option_enrichment
@@ -3344,6 +3377,21 @@ def _journal_runtime_summary(result: dict[str, Any]) -> dict[str, Any] | None:
     if intent_transition:
         out["intent_transition"] = intent_transition
     return out
+
+
+def _journal_inventory_gate_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    status = str(value.get("status") or "").strip().lower()
+    if not isinstance(value.get("enabled"), bool) or status not in {"filtered", "unchanged", "disabled"}:
+        return {}
+    return {
+        "enabled": value["enabled"],
+        "status": status,
+        "source_count": _journal_int(value.get("source_count"), 0, 1000),
+        "visible_count": _journal_int(value.get("visible_count"), 0, 1000),
+        "excluded_unqualified_count": _journal_int(value.get("excluded_unqualified_count"), 0, 1000),
+    }
 
 
 _JOURNAL_INTENT_GOALS = {
@@ -3472,13 +3520,25 @@ def _journal_gateway_attempt_details(value: Any) -> list[dict[str, Any]]:
         for key in ("ok", "empty", "safe"):
             if isinstance(item.get(key), bool):
                 attempt[key] = bool(item.get(key))
-        task_id = _journal_token(item.get("gateway_task_id"))
-        if task_id:
-            attempt["gateway_task_id"] = task_id
+        payload_stage = _journal_token(item.get("_payload_stage"))
+        if payload_stage in {"v6_search_agent", "v6_answer_writer"}:
+            attempt["_payload_stage"] = payload_stage
+            if item.get("gateway_task_id_present") is True or _journal_token(item.get("gateway_task_id")):
+                attempt["gateway_task_id_present"] = True
+        else:
+            task_id = _journal_token(item.get("gateway_task_id"))
+            if task_id:
+                attempt["gateway_task_id"] = task_id
+        provider_status = _journal_optional_int(item.get("provider_status_code"), 100, 599)
+        if provider_status is not None:
+            attempt["provider_status_code"] = provider_status
         attempt["duration_ms"] = _journal_int(item.get("duration_ms"), 0, 10 * 60 * 1000)
         parse_status = str(item.get("parse_status") or "").strip()
         if parse_status in {"ok", "invalid_json", "missing"}:
             attempt["parse_status"] = parse_status
+        validator_status = str(item.get("validator_status") or "").strip()
+        if validator_status in {"ok", "contract_violation", "missing"}:
+            attempt["validator_status"] = validator_status
         gateway_status = str(item.get("gateway_status") or "").strip()
         if gateway_status in {"completed", "timeout", "error", "unknown"}:
             attempt["gateway_status"] = gateway_status
@@ -3535,6 +3595,12 @@ def _journal_int(value: Any, low: int, high: int) -> int:
     except (TypeError, ValueError):
         return low
     return max(low, min(number, high))
+
+
+def _journal_optional_int(value: Any, low: int, high: int) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if low <= value <= high else None
 
 
 def _journal_timing(value: Any) -> dict[str, int]:

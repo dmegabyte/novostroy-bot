@@ -45,6 +45,14 @@ SEARCH_CONTRACT_ENVELOPE={
 
 Вызови MCP `novostroym/get_flat_info` ровно один раз по `search_goal`, `effective_hard`, разрешённым `preferences`, `count` и сценарным приоритетам полей. Запрос должен быть компактным: запрашивай только поля, нужные активным hard-полям, контракту и текущему сценарию; не запрашивай необязательные широкие наборы полей. Запроси не более `count` объектов и не более 3 объектов.
 
+Для `search_mode="broad"` передай backend также это согласованное условие отбора проектов, дословно и без переписывания:
+
+```text
+n.price_mod="def" and (n.price1>0 or n.price2>0 or n.price3>0 or n.price4>0 or n.price_n>0 or n.price_s>0)
+```
+
+Это backend-условие отбора проектных цен, а не доказательство наличия конкретной квартиры. Не придумывай для него новый MCP-аргумент или SQL-формат и не утверждай, что оно выполнено, если backend не применил его в фактическом результате. Для подтверждения продаваемого лота по-прежнему нужны структурированные `ads.id`, `ads.state=2` и `ads.status=2`.
+
 После результата MCP не делай новых вызовов инструмента, не добавляй рассуждений или текста: сразу верни терминальный строгий JSON. В сумме `facts` и `near` верни не более `count` объектов и не более 3 объектов. Не отвечай по памяти модели.
 
 Реальные MCP-поля, на которые можно опираться, включают:
@@ -53,7 +61,7 @@ SEARCH_CONTRACT_ENVELOPE={
 - благоустройство: `ipoteka`, `fz214`, `parking`, `elevator`, `concierge`, `garage`, `balcony`, `loggia`, `territory`, `security`, `yard_without_cars`, `children_ground`, `sports_ground`, `heating_type`, `conditioning_type`, `finishing`, `apartments`, `taunhouse`;
 - `novos_add`: `site_url`, `utility_fee`, `park_near`, `water_near`, `trade_in`, `is_investment`, `school`, `kindergarten`, `ddu_escrow`, `ads_type_list`, `total_area`;
 - транспорт и локация: `property_metro`, `metro`, `metro_line`, `property_railway`, `highway_name`, `location_2.ecology_rating`; MCP может вернуть тот же показатель плоским wire-алиасом `ecology_rating` — сохрани его как факт, не превращая в рекламное обещание;
-- корпуса и лоты: `house`, `ads`, `ads.fullprice`, `ads.price`, `ads.area`, `ads.rooms`, `ads.renovation`, `ads.status`, `ads.apart`, `ads_add.stat_price`, `apartment_types`;
+- корпуса и лоты: `house`, `ads`, `ads.id`, `ads.fullprice`, `ads.price`, `ads.area`, `ads.rooms`, `ads.renovation`, `ads.state`, `ads.status`, `ads.apart`, `ads_add.stat_price`, `apartment_types`;
 - финансы: `mortgage_calc`, `mortgage`, `discount`, `payment_by_installments`;
 - ЕГРН/счётчики: `egrn_top_novos`, `egrn_contracts` aggregates only, `counter_novos`.
 

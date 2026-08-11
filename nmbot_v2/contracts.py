@@ -218,6 +218,9 @@ class LotExample:
     ceiling_height: int | float | str | None = None
     window_view: str | None = None
     layout_features: tuple[str, ...] = ()
+    state: str | int | None = None
+    ready: str | int | bool | None = None
+    delivered: str | int | bool | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "LotExample":
@@ -513,6 +516,7 @@ class StateDelta:
     enriched_card_cache: tuple[Any, ...] | None = None
     last_assistant_question: str | None = None
     last_answer_kind: str | None = None
+    last_offer: JsonDict | None = None
     already_asked_add: tuple[str, ...] = ()
     answered_add: tuple[str, ...] = ()
     contact_name: str | None = None

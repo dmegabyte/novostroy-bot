@@ -92,6 +92,80 @@ def test_runtime_summary_sanitizer_drops_raw_nested_unknowns(tmp_path: Path, mon
         assert forbidden not in dumped
 
 
+def test_runtime_summary_inventory_gate_is_aggregate_only(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("NMBOT_READABLE_DIALOGUE_JOURNAL", str(tmp_path / "readable.log"))
+    journal = tmp_path / "dialogue_journal.jsonl"
+
+    event = mod.append_event(
+        session_key="inventory-gate",
+        role="bot",
+        text="Ответ",
+        runtime_summary={
+            "stage": "first_list",
+            "action": "search",
+            "inventory_gate": {
+                "enabled": True,
+                "status": "filtered",
+                "source_count": -10,
+                "visible_count": 9_999,
+                "excluded_unqualified_count": "2",
+                "names": ["Секретный ЖК"],
+                "raw": {"payload": "token=secret"},
+                "phone": "+7 999 123-45-67",
+            },
+        },
+        journal=journal,
+    )
+
+    assert event["runtime_summary"]["inventory_gate"] == {
+        "enabled": True,
+        "status": "filtered",
+        "source_count": 0,
+        "visible_count": 1000,
+        "excluded_unqualified_count": 2,
+    }
+    dumped = journal.read_text(encoding="utf-8")
+    for forbidden in ("Секретный ЖК", "payload", "token=secret", "+7 999", "names", "phone"):
+        assert forbidden not in dumped
+
+
+def test_runtime_summary_uses_one_coherent_last_inventory_gate_attempt() -> None:
+    from nmbot_v2.contracts import ExecutionResult, SemanticPlan, Stage, TurnAction
+    from nmbot_v2.runtime import _runtime_summary
+    from nmbot_v2.state import ConversationState
+
+    summary = _runtime_summary(
+        stage=Stage.FIRST_LIST,
+        action=TurnAction.SEARCH,
+        plan=SemanticPlan(operation="search"),
+        answer_kind="search_results",
+        timing_ms={},
+        state_before=ConversationState(),
+        state_after=ConversationState(),
+        execution=ExecutionResult(
+            ok=True,
+            attempts=(
+                {"stage": "broad_inventory_gate", "enabled": True, "status": "unchanged", "source_count": 9, "visible_count": 9, "excluded_unqualified_count": 0, "name": "Первый секрет"},
+                {"stage": "gateway_attempt", "payload": "secret"},
+                {"stage": "broad_inventory_gate", "enabled": True, "status": "filtered", "source_count": 3, "visible_count": 3, "excluded_unqualified_count": 0, "raw_payload": "secret"},
+            ),
+        ),
+        response_text="Какой вариант рассмотреть?",
+    )
+
+    assert summary["inventory_gate"] == {
+        "enabled": True,
+        "status": "filtered",
+        "source_count": 3,
+        "visible_count": 3,
+        "excluded_unqualified_count": 0,
+    }
+    assert "broad_inventory_gate" not in json.dumps(summary.get("gateway_attempt_details", []), ensure_ascii=False)
+    dumped = json.dumps(summary, ensure_ascii=False)
+    for forbidden in ("Первый секрет", "raw_payload", "payload", "secret"):
+        assert forbidden not in dumped
+
+
 def test_trace_ref_and_gateway_attempt_details_are_allowlisted(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("NMBOT_READABLE_DIALOGUE_JOURNAL", str(tmp_path / "readable.log"))
     journal = tmp_path / "dialogue_journal.jsonl"

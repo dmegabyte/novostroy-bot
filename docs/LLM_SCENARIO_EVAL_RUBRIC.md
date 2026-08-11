@@ -798,9 +798,11 @@ MCP/search отдаёт только подтверждённые факты:
 1. Сначала прогоняем лог через `scripts/live_run_table_validator.py`.
 2. Затем публикуем JSONL строками через `scripts/publish_live_run_rows_to_sheet.py`.
 3. **Каждый live/scenario/prod-smoke прогон, по которому делаем вывод или отчёт пользователю, обязан быть записан в Google Sheet.** Локальный/VPS лог без строки в таблице — это только черновик диагностики, а не завершённый прогон.
-4. Если прогон был перепроверкой старого лога после фикса валидатора, его тоже публикуем отдельной явной версией, например `prod-verify-echo-YYYYMMDD-HHMM`, чтобы было видно, чем новая интерпретация отличается от старых строк.
-5. Для удобства используем one-shot обёртку `scripts/live_quality_cycle.py`.
-6. Параллельно собираем promptfoo test set по версии через `eval/nmbot-answer-quality/scripts/build_cases.py`: он обновляет текущий `tests/live-run-cases.yaml` и сохраняет архив в `eval/nmbot-answer-quality/tests/versions/live-run-cases.vN.yaml`.
+4. **Не останавливаем диалог на промежуточном CTA.** Сначала доводим его до определённого сценарием terminal outcome, включая отправку синтетического/тестового телефона, если это предусмотрено сценарием, и оцениваем полный диалог вместе с коррелированным trace. Затем бот записывает строку в Google Sheet, а агент проверяет фактически записанную строку. Только после этой проверки прогон считается завершённым `scored result`.
+5. Если terminal outcome невозможно получить, прогон помечаем как `incomplete/diagnostic` и не считаем завершённым `scored result`.
+6. Если прогон был перепроверкой старого лога после фикса валидатора, его тоже публикуем отдельной явной версией, например `prod-verify-echo-YYYYMMDD-HHMM`, чтобы было видно, чем новая интерпретация отличается от старых строк.
+7. Для удобства используем one-shot обёртку `scripts/live_quality_cycle.py`.
+8. Параллельно собираем promptfoo test set по версии через `eval/nmbot-answer-quality/scripts/build_cases.py`: он обновляет текущий `tests/live-run-cases.yaml` и сохраняет архив в `eval/nmbot-answer-quality/tests/versions/live-run-cases.vN.yaml`.
 
 ### Критично про MCP-слой
 

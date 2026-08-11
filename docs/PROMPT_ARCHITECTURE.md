@@ -11,16 +11,57 @@
 5. `prompts/eval/prompt_master_v1.txt` — evaluator: оценивает результат, но не пишет клиентский ответ.
 6. `prompts/text_style_v1.txt` — style-only слой: может улучшать живость текста, но не добавляет факты и не меняет сценарный смысл.
 
-## Текущая four-layer схема
+## Архитектурное правило: сначала самое простое решение
 
-Целевая упрощённая цепочка ответа состоит из четырёх логических слоёв:
+Перед добавлением нового router, classifier, prompt, adapter или validator
+обязательно проверить, можно ли решить задачу уже существующим owner-слоем.
+Предпочтительный порядок:
 
-1. **Planner** — LLM определяет действие, intent, target и ограничения клиента.
-2. **MCP/Search** — получает структурированные факты; не пишет клиентский текст.
-3. **Deterministic Validator** — код классифицирует варианты как `matched`, `near`, `rejected` или `unknown` и формирует безопасный `DecisionContext`.
-4. **Presenter** — LLM пишет финальный ответ только из разрешённого `DecisionContext`.
+1. переиспользовать существующий контракт и prompt;
+2. добавить минимальное поле/правило в этот owner;
+3. только если это доказанно невозможно — создавать новый слой.
 
-В идеальном поисковом пути это два LLM-вызова (Planner и Presenter), один MCP-вызов и одна детерминированная проверка. Текущий production rollout работает в **shadow mode**: validator считает безопасные агрегированные diagnostics, но клиентский ответ пока проходит через legacy `main_answer`. Enforcement отключён до завершения регрессионной проверки.
+Новый слой запрещён, если он дублирует существующий prompt, MCP-вызов,
+маршрутизацию или state reducer. Для каждого исключения нужна запись в
+архитектурном документе: почему существующий owner не подходит, какой новый
+контракт появляется и как слой будет удалён.
+
+## Единый search prompt как owner маршрута и поиска
+
+Для обычного запроса о недвижимости используется один search prompt —
+`prompts/search_v1.txt` или его утверждённый versioned successor. Он одновременно
+определяет semantic `action/target/search_policy/params` и, когда нужен поиск,
+вызывает MCP `novostroym` и возвращает canonical `facts/near/missing/params`.
+
+Отдельный V6 classifier перед этим prompt не создаётся и не является частью
+основного runtime path. V6 — это runtime/release identity и набор bounded
+enrichment/evidence contracts, а не второй модельный router.
+
+Code-owned ingress по-прежнему может напрямую обработать `/start`, телефон,
+уже начатый operator flow и другие terminal safety paths. Это механические
+исключения, а не второй semantic model layer.
+
+Если нужен клиентский текст, отдельный presenter получает только validated
+canonical material; он не выполняет повторную классификацию и не запускает
+второй поиск.
+
+## Текущая схема
+
+Целевая упрощённая цепочка поиска состоит из следующих owner-слоёв:
+
+1. **Unified search prompt** — определяет действие и при `search_policy=required`
+   сам вызывает MCP/search в рамках одного prompt-контракта.
+2. **Deterministic Validator** — код проверяет JSON, hard-условия, evidence,
+   PII и формирует безопасный canonical material.
+3. **State reducer** — код применяет разрешённый переход и сохраняет только
+   опубликованный/подтверждённый список.
+4. **Presenter** — только если нужен отдельный текстовый ответ; получает
+   validated canonical material и не ищет заново.
+
+В обычном search-пути это один search prompt/MCP-контур и, при необходимости,
+один presenter. Отдельный Planner/V6 classifier перед search prompt запрещён.
+Текущие feature flags и legacy-контуры не меняют это правило и должны быть
+удалены при следующем versioned simplification release.
 
 Feature flags:
 

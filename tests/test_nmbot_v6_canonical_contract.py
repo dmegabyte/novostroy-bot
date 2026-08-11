@@ -37,7 +37,7 @@ def test_contract_excludes_unmapped_values_and_exposes_conflict():
     assert "backend_note" not in result["cards"][0]["canonical"]
     assert "backend_note" not in result
     assert tuple(result["missing_claims"]) == ("installment_terms",)
-    assert "project_price" in result["conflicts"]
+    assert "project_price" in result["conflicts"]["0"]
     assert "project_price" not in result["cards"][0]["canonical"]
 
 

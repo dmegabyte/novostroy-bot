@@ -125,10 +125,14 @@ def _evidence_cards(plan: Any, evidence: Any) -> tuple[Mapping[str, Any], ...]:
 
 
 def build_answer_contract(plan: Any, evidence: Any, *, question_policy: Mapping[str, Any]):
-    requested = tuple(
-        claim for claim in getattr(plan, "requested_claims", ())
+    requested = tuple(dict.fromkeys(
+        claim
+        for claim in (
+            *getattr(plan, "requested_claims", ()),
+            *getattr(plan, "missing", ()),
+        )
         if claim in REQUESTED_CLAIMS
-    )
+    ))
     rooms = getattr(plan, "params", {}).get("rooms")
     requested_rooms = rooms if type(rooms) is int else None
     cards: list[Mapping[str, Any]] = []

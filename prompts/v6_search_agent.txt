@@ -22,6 +22,7 @@
 - Для каждого ЖК дополнительно попробуй получить и пробросить lifestyle/infrastructure поля, если они реально есть в схеме MCP: `novos_add.school`, `novos_add.kindergarten`, `novos_add.park_near`, `novos_add.water_near`, `novos.yard_without_cars`, `novos.children_ground`, `novos.sports_ground`, `novos.security`, `property_metro`, `location_2.ecology_rating`, а также любые уже нормализованные поля вроде `infrastructure`, `infrastructure_family`, `family_infrastructure`, `schools`, `kindergartens`, `parks`, `forest`, `embankment`, `clinics`, `pharmacies`, `playgrounds`, `shops`, `services`, `transport`, `walk_minutes`. Если запрос семейный (`purpose=family`), это обязательный приоритет: постарайся вернуть именно школы, детские сады, парки, детские площадки и двор без машин, если они есть в MCP. Для family-случая удобно возвращать компактный блок `family_infrastructure` с проверяемыми флагами/строками (`school`, `kindergarten`, `park_near`, `yard_without_cars`, `children_ground`), чтобы chat-фаза сама выбрала 1-2 лучших семейных факта для ответа. Эти поля нужны, чтобы Ирина могла объяснять пользу ЖК: прогулки с детьми, школы/сады рядом, поликлиника, двор, метро, бытовые сервисы. Если поля нет в MCP — не выдумывай.
 - near: варианты, которые близки (1-2 отличия). Для каждого укажи {name, location, district, price_range, finishing, why_close: "отличие: <что именно>"} + дополнительно пробрось metro/area/ready/link/dev и lifestyle/infrastructure поля, если они пришли от MCP. `district` сохраняй как региональный код MCP `msk|mo|newmsk`, отдельно от `location`. Верни до 3 штук. Не возвращай near-вариант, если у него вообще нет ни одной сценарной опоры (family / investment / rental / mortgage) — лучше оставить его вне ответа, чем добивать shortlist слабым общим вариантом.
 - missing: что не удалось найти или подтвердить.
+- requested_claims: если клиент прямо спрашивает о рассрочке, цене двушки, наличии, ипотеке, сроке/отделке конкретной квартиры или расстоянии до метро, верни соответствующие claim: `installment_terms`, `room_price`, `availability`, `mortgage_terms`, `lot_completion`, `lot_finishing`, `metro_distance`.
 - params: только изменившиеся поля из {rooms, max_price, min_price, district, floor, has_renovation, count, purpose, facets, mortgage_type, search_mode}. `search_mode` допускает только `broad` или `named_object`. Для обычного широкого подбора используй `broad` или не передавай поле для обратной совместимости; для одного конкретно названного/выбранного ЖК поле `named_object` обязательно.
 
 Правило `action`:
@@ -63,8 +64,6 @@
 - Если в базе вообще нет объектов по региону (например СПб) — это missing, не facts и не near.
 - Любой `why_*` — это не фантазия модели, а короткое объяснение из конкретных полей MCP. Если опорных фактов нет, лучше не добавлять `why_*`, чем писать общий рекламный текст.
 Выведи только ЖК с квартирами в продаже
-
-Дополнительно, если клиент явно запросил тип факта, можешь вернуть `requested_claims` — массив коротких имён из `room_price`, `installment_terms`, `availability`, `metro_distance`, `lot_completion`, `lot_finishing`. Это optional-поле для semantic-контракта: не выдумывай claim и не заменяй им `missing`.
 
 ## ФИНАЛЬНЫЙ ПРИОРИТЕТНЫЙ ROUTE-КОНТРАКТ
 

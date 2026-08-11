@@ -13,7 +13,8 @@ from .phone import PhoneMetadataBackend, PhoneParseResult, PrivatePhone, parse_p
 from .gateway import build_question_policy
 from .privacy import NUMERIC_PARAM_FIELDS, immutable_safe_copy
 from .prompt1_contract import (
-    Prompt1Result, SearchAction, SearchPolicy, SearchTarget, parse_prompt1,
+    Prompt1Result, SearchAction, SearchPolicy, SearchTarget,
+    overlay_explicit_request, parse_prompt1,
 )
 from .prompt2_contract import parse_prompt2
 from .provider import TransportToolTrace, TrustedMcpEnvelope, build_trusted_envelope
@@ -133,7 +134,7 @@ class V6Runtime:
             prompt1_attempt["gateway_task_id_present"] = True
         gateway_attempts.append(prompt1_attempt)
         try:
-            plan = parse_prompt1(gateway_result.output)
+            plan = overlay_explicit_request(parse_prompt1(gateway_result.output), user_text)
             prompt1_attempt["parse_status"] = "ok"
         except ContractError as first_violation:
             prompt1_attempt["parse_status"] = "invalid_json"
@@ -152,7 +153,7 @@ class V6Runtime:
                 prompt1_attempt["gateway_task_id_present"] = True
             gateway_attempts.append(prompt1_attempt)
             try:
-                plan = parse_prompt1(gateway_result.output)
+                plan = overlay_explicit_request(parse_prompt1(gateway_result.output), user_text)
                 prompt1_attempt["parse_status"] = "ok"
                 validate_prompt1_state(plan, model_state)
                 prompt1_attempt["validator_status"] = "ok"
@@ -184,7 +185,7 @@ class V6Runtime:
                 prompt1_attempt["gateway_task_id_present"] = True
             gateway_attempts.append(prompt1_attempt)
             try:
-                plan = parse_prompt1(gateway_result.output)
+                plan = overlay_explicit_request(parse_prompt1(gateway_result.output), user_text)
                 prompt1_attempt["parse_status"] = "ok"
             except ContractError:
                 prompt1_attempt.update(parse_status="invalid_json", validator_status="missing")
@@ -344,7 +345,7 @@ def run_v6(
     model_state = _model_state_projection(flow_state, exact_detail)
 
     try:
-        plan = parse_prompt1(prompt1(user_text, model_state))
+        plan = overlay_explicit_request(parse_prompt1(prompt1(user_text, model_state)), user_text)
         validate_prompt1_state(plan, model_state)
     except ContractError:
         return _failure(state, "prompt1_contract_violation", RuntimeFailureStage.PROMPT1)

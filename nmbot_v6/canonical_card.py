@@ -1,4 +1,4 @@
-"""Code-owned semantic view of V6 search evidence for Prompt 2."""
+"""Code-owned semantic view used by the privacy-safe V6 trace."""
 
 from __future__ import annotations
 
@@ -17,28 +17,26 @@ _FIELD_MAP = {
 
 
 def _canonical_card(raw: Mapping[str, Any]):
-    canonical, conflicts, unmapped_keys = {}, {}, []
+    canonical, conflicts = {}, {}
     for source_name, value in raw.items():
         target = _FIELD_MAP.get(str(source_name))
         if target is None or (target == "lots" and not isinstance(value, (list, tuple))):
-            unmapped_keys.append(str(source_name))
             continue
         if target not in canonical:
             canonical[target] = immutable_safe_copy(value)
         elif canonical[target] != value:
             conflicts.setdefault(target, []).append({"source": str(source_name), "value": immutable_safe_copy(value)})
-    return canonical, conflicts, unmapped_keys
+    for key in conflicts:
+        canonical.pop(key, None)
+    return canonical, conflicts
 
 
 def build_answer_contract(plan: Any, evidence: Any, *, question_policy: Mapping[str, Any]):
-    """Build Prompt2's semantic view; unmapped values are not exposed."""
     cards, allowed, conflicts = [], [], {}
     for raw in getattr(plan, "facts", ()):
         if not isinstance(raw, Mapping):
             continue
-        canonical, card_conflicts, card_unmapped = _canonical_card(raw)
-        for conflicted_key in card_conflicts:
-            canonical.pop(conflicted_key, None)
+        canonical, card_conflicts = _canonical_card(raw)
         cards.append({"canonical": canonical, "conflicts": card_conflicts})
         for key, value in canonical.items():
             if value not in (None, "", [], ()) and key not in allowed:
@@ -49,7 +47,9 @@ def build_answer_contract(plan: Any, evidence: Any, *, question_policy: Mapping[
         "cards": cards,
         "allowed_claims": allowed,
         "requested_claims": [str(value) for value in getattr(plan, "requested_claims", ()) if value],
-        "missing_claims": [str(value) for value in getattr(plan, "missing", ()) if value],
+        "missing_claims": [str(value) for value in dict.fromkeys(
+            (*getattr(plan, "requested_claims", ()), *getattr(plan, "missing", ()))
+        ) if value],
         "conflicts": conflicts,
         "next_action": {
             "question_goal": question_policy.get("question_goal"),

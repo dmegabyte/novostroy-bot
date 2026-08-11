@@ -6,7 +6,7 @@ import json
 import math
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, Mapping
 
@@ -62,6 +62,14 @@ _MAX_PARAM_STRING = 100
 _MAX_FACETS = 10
 _AUDIT_PHONEISH = re.compile(r"(?<!\d)(?:\+?\d[\s().-]*){10,15}(?!\d)")
 _AUDIT_EMAIL = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
+REQUESTED_CLAIMS = frozenset({
+    "installment_terms", "room_price", "availability", "mortgage_terms",
+    "lot_completion", "lot_finishing", "metro_distance",
+})
+_CLAIM_ORDER = (
+    "installment_terms", "room_price", "availability", "mortgage_terms",
+    "lot_completion", "lot_finishing", "metro_distance",
+)
 
 
 class SearchAction(str, Enum):
@@ -143,6 +151,30 @@ def parse_prompt1(raw: str | Mapping[str, Any]) -> Prompt1Result:
         mcp_audit,
         requested_claims,
     )
+
+
+def overlay_explicit_request(plan: Prompt1Result, user_text: str) -> Prompt1Result:
+    """Add only explicit claim markers missing from a model plan."""
+    if type(plan) is not Prompt1Result or not isinstance(user_text, str):
+        raise ContractError("explicit request overlay input is invalid")
+    text = user_text.casefold()
+    claims = set(plan.requested_claims)
+    if "рассроч" in text:
+        claims.add("installment_terms")
+    if any(marker in text for marker in ("двушк", "двухкомнат", "2 квартиру", "2-комнат")):
+        if any(marker in text for marker in ("цен", "стоимост", "сколько стоит")):
+            claims.add("room_price")
+    if any(marker in text for marker in ("далеко от метро", "сколько до метро", "минут до метро")):
+        claims.add("metro_distance")
+    params = dict(plan.params)
+    if plan.action is SearchAction.SEARCH and any(
+        marker in text for marker in ("двушк", "двухкомнат", "2 квартиру", "2-комнат")
+    ):
+        params.setdefault("rooms", 2)
+    ordered = tuple(claim for claim in _CLAIM_ORDER if claim in claims)
+    if ordered == plan.requested_claims and params == dict(plan.params):
+        return plan
+    return replace(plan, requested_claims=ordered, params=params)
 
 
 def _validate_audit(value: Any) -> Mapping[str, Any] | None:

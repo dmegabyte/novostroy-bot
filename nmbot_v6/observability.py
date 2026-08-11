@@ -6,6 +6,7 @@ import re
 from typing import Any, Mapping
 
 from .provider import TrustedMcpEnvelope
+from .canonical_card import build_answer_contract
 from .prompt1_contract import Prompt1Result
 from .state import V6State
 
@@ -30,6 +31,13 @@ _SAFE_PROJECTION_CONTAINERS = frozenset({"cards", "facts", "near", "results", "o
 _SAFE_CONSTRAINT_KEYS = frozenset({
     "rooms", "min_price", "max_price", "district", "floor", "has_renovation",
     "count", "purpose", "facets", "mortgage_type",
+})
+_SAFE_ANSWER_CONTRACT_KEYS = frozenset({
+    "version", "cards", "canonical", "conflicts", "allowed_claims",
+    "requested_claims", "missing_claims", "next_action", "question_goal",
+    "operator_escalation_required", "project_name", "developer", "location",
+    "district", "project_price", "project_completion", "project_finishing",
+    "metro_name", "metro_distance", "lots", "installment_terms", "mortgage_terms",
 })
 _SAFE_ACTIONS = frozenset({"search", "clarify", "operator_contact", "recover_dialogue", "answer_current_options"})
 _SAFE_TARGETS = frozenset({"new_search", "current_options", "none"})
@@ -103,6 +111,29 @@ def build_turn_trace(*, before: V6State, after: V6State,
             "action": _safe_enum(plan.action.value, _SAFE_ACTIONS),
             "target": _safe_enum(plan.target.value, _SAFE_TARGETS),
             "search_policy": _safe_enum(plan.search_policy.value, _SAFE_SEARCH_POLICIES),
+            "params": _safe_value(plan.params, allowed_keys=_SAFE_CONSTRAINT_KEYS),
+            "missing": _safe_value(plan.missing, allowed_keys=frozenset()),
+            "requested_claims": _safe_value(getattr(plan, "requested_claims", ()), allowed_keys=frozenset()),
+        }
+        answer_contract = build_answer_contract(
+            plan, envelope, question_policy={},
+        )
+        result["prompt2_context"] = {
+            "search_result": {
+                "action": result["plan"]["action"],
+                "target": result["plan"]["target"],
+                "search_policy": result["plan"]["search_policy"],
+                "params": result["plan"]["params"],
+                "missing": result["plan"]["missing"],
+                "requested_claims": result["plan"]["requested_claims"],
+            },
+            "trusted_mcp": _safe_value(
+                envelope.safe_facts if envelope is not None else {},
+                allowed_keys=_SAFE_FACT_KEYS | _SAFE_PROJECTION_CONTAINERS,
+            ),
+            "answer_contract": _safe_value(
+                answer_contract, allowed_keys=_SAFE_ANSWER_CONTRACT_KEYS,
+            ),
         }
     if failure_code:
         result["failure_code"] = _safe_code(failure_code)
@@ -142,6 +173,7 @@ def _safe_value(
         if key and key not in _SAFE_PROJECTION_CONTAINERS and key not in {
             "facets", "infrastructure", "family_infrastructure", "schools",
             "kindergartens", "parks", "shops", "clinics", "yards", "transport",
+            "requested_claims", "missing_claims", "allowed_claims",
         }:
             return "[redacted]"
         return [_safe_value(item, depth=depth + 1, allowed_keys=allowed_keys) for item in list(value)[:10]]

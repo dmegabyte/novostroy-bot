@@ -30,7 +30,16 @@ except ImportError:  # pragma: no cover - standalone diagnostic fallback
 
 DEFAULT_JOURNAL_FILE = Path(__file__).resolve().parent.parent / "logs" / "dialogue_journal.jsonl"
 DEFAULT_READABLE_JOURNAL_DIR = Path(__file__).resolve().parent.parent / "logs"
-_PHONE_RE = re.compile(r"(?<!\w)(?:\+?7|8)[\s().-]*\d(?:[\s().-]*\d){9,10}(?!\w)")
+# Keep this local rather than importing V6: the generic journal must remain
+# independent of runtime packages, while using the same Russian phone shapes.
+_PHONE_RE = re.compile(
+    r"(?<!\w)(?:"
+    r"\+\d{1,3}(?:[\s().-]*\d){7,14}"  # international E.164-style number with separators
+    r"|(?:\+?7|8)(?:[\s().-]*\d){10}"
+    r"|\d{10}"
+    r"|\d{3}[\s().-]+\d{3}[\s().-]+\d{2}[\s().-]+\d{2}"
+    r")(?!\w)"
+)
 _EMAIL_RE = re.compile(r"(?<![\w.+-])[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}(?![\w.-])", re.I)
 _CONTACT_VALUE_RE = re.compile(
     r"(?i)\b(?:telegram|телеграм|tg|whatsapp|ватсап|wa)\s*[:=]?\s*@?[A-Z0-9_.-]{3,32}\b"
@@ -75,10 +84,12 @@ def append_event(*, session_key: str, role: str, text: str = "", event_type: str
                     prompt_provenance: dict[str, Any] | None = None,
                     execution_path: dict[str, Any] | None = None,
                     response_model: dict[str, Any] | None = None,
-                    error_summary: dict[str, Any] | None = None,
-                    runtime_summary: dict[str, Any] | None = None,
-                    runtime_version: str | None = None,
-                    release_id: str | None = None,
+                     error_summary: dict[str, Any] | None = None,
+                     runtime_summary: dict[str, Any] | None = None,
+                     runtime_version: str | None = None,
+                     v6_candidate: dict[str, Any] | None = None,
+                     v6_trace: dict[str, Any] | None = None,
+                     release_id: str | None = None,
                     source: str = "api", journal: Path | None = None) -> dict[str, Any]:
     """Append one redacted event. The line append is O_APPEND-safe across workers."""
     meta = meta or {}
@@ -126,6 +137,12 @@ def append_event(*, session_key: str, role: str, text: str = "", event_type: str
     safe_runtime_version = _safe_runtime_version(runtime_version)
     if safe_runtime_version:
         event["runtime_version"] = safe_runtime_version
+    safe_v6_candidate = _safe_v6_candidate(v6_candidate)
+    if safe_v6_candidate:
+        event["v6_candidate"] = safe_v6_candidate
+    safe_v6_trace = _safe_v6_trace(v6_trace) if safe_runtime_version == "V6" else None
+    if safe_v6_trace:
+        event["v6_trace"] = safe_v6_trace
     safe_release_id = _safe_release_id(release_id)
     if safe_release_id:
         event["release_id"] = safe_release_id
@@ -140,6 +157,246 @@ def append_event(*, session_key: str, role: str, text: str = "", event_type: str
         os.close(fd)
     _append_readable_turn(event, now=now)
     return event
+
+
+_V6_STAGE_ORDER = ("user", "prompt1", "mcp", "prompt2", "bot_message")
+_V6_STAGE_OWNERS = {"user": "client", "prompt1": "model", "mcp": "transport", "prompt2": "model", "bot_message": "jivo"}
+_V6_STAGE_STATUSES = {
+    "user": {"received"},
+    "prompt1": {"not_called", "accepted", "failed", "unknown"},
+    "mcp": {"not_called", "accepted", "failed", "unknown"},
+    "prompt2": {"not_called", "accepted", "failed", "unknown"},
+    "bot_message": {"not_sent", "prepared", "returned", "unknown"},
+}
+_V6_PLAN_VALUES = {
+    "action": {"search", "clarify", "operator_contact", "recover_dialogue", "answer_current_options"},
+    "target": {"new_search", "current_options", "none"},
+    "search_policy": {"required", "forbidden"},
+}
+_V6_FAILURE_CODES = {
+    "invalid_input", "phone_dependency_unavailable", "provider_failure", "mode_off",
+    "missing_v6_ports", "missing_state_store", "invalid_v6_state", "shadow_phone_bypass",
+    "missing_callback_outbox", "callback_enqueue_failed", "callback_not_queued",
+    "unexpected_phone_bypass", "v6_runtime_failed", "state_save_failed", "shadow_only",
+}
+_V6_FAILURE_STAGES = {"input", "phone", "prompt1", "mcp", "prompt2", "state", "unknown"}
+_V6_ALLOWED_MODELS = {"google/gemini-3.1-flash-lite-preview"}
+_V6_FOLLOWUP_STATUSES = {"not_present", "unresolved", "resolved", "replaced"}
+_V6_FOLLOWUP_ACTIONS = {"accept", "reject", "select", "normal_prompt1", "unknown"}
+_V6_EVIDENCE_SOURCES = {"transport_trace", "gateway_model_mcp_projection"}
+_V6_FACT_KEYS = {
+    "name", "ref", "id", "object_id", "option_ref", "district", "location", "price",
+    "price_min", "price_max", "price_range", "finishing", "metro", "area", "rooms",
+    "ready", "developer", "link", "infrastructure", "family_infrastructure", "schools",
+    "kindergartens", "parks", "shops", "clinics", "yards", "transport", "why_family",
+    "why_close", "count", "result_count",
+}
+_V6_PROJECTION_CONTAINERS = {"cards", "facts", "near", "results", "options", "data"}
+_V6_CONSTRAINT_KEYS = {
+    "rooms", "min_price", "max_price", "district", "floor", "has_renovation", "count",
+    "purpose", "facets", "mortgage_type",
+}
+_V6_PROMPT2_SEARCH_KEYS = {
+    "action", "target", "search_policy", "response", "clarification_question",
+    "params", "missing", "requested_claims", "facts", "near",
+}
+_V6_ANSWER_CONTRACT_KEYS = {
+    "version", "cards", "canonical", "conflicts", "allowed_claims",
+    "requested_claims", "missing_claims", "next_action", "question_goal",
+    "operator_escalation_required", "project_name", "developer", "location",
+    "district", "project_price", "project_completion", "project_finishing",
+    "metro_name", "metro_distance", "lots", "installment_terms", "mortgage_terms",
+}
+_V6_PRICE_KEYS = {"price", "price_min", "price_max", "price_range", "min_price", "max_price"}
+_V6_SECRETISH_VALUE_RE = re.compile(
+    r"(?:bearer\s+\S+|(?:api[_-]?key|token|secret|password|authorization|prompt|query|response)\s*[:=]|\b(?:sk|pk|ghp|xox[baprs]?)[_-][A-Za-z0-9_-]{8,}\b|\beyJ[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b)",
+    re.I,
+)
+
+
+def _safe_v6_trace(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict) or value.get("schema_version") != 1:
+        return None
+    raw_stages = value.get("stages")
+    if not isinstance(raw_stages, list) or len(raw_stages) != len(_V6_STAGE_ORDER):
+        return None
+    stages: list[dict[str, Any]] = []
+    for expected_stage, raw in zip(_V6_STAGE_ORDER, raw_stages):
+        if not isinstance(raw, dict) or raw.get("stage") != expected_stage:
+            return None
+        status = str(raw.get("status") or "").strip().lower()
+        item: dict[str, Any] = {
+            "stage": expected_stage,
+            "owner": _V6_STAGE_OWNERS[expected_stage],
+            "status": status if status in _V6_STAGE_STATUSES[expected_stage] else "unknown",
+        }
+        if expected_stage == "prompt1":
+            if raw.get("model") in _V6_ALLOWED_MODELS:
+                item["model"] = raw["model"]
+            if isinstance(raw.get("prompt1_mcp_audit"), dict):
+                item["prompt1_mcp_audit"] = _safe_v6_audit(raw["prompt1_mcp_audit"])
+        elif expected_stage == "prompt2":
+            if raw.get("model") in _V6_ALLOWED_MODELS:
+                item["model"] = raw["model"]
+        elif expected_stage == "mcp":
+            if raw.get("server") == "novostroym":
+                item["server"] = "novostroym"
+            if raw.get("tool") == "get_flat_info":
+                item["tool"] = "get_flat_info"
+            source = str(raw.get("evidence_source") or "").strip()
+            item["evidence_source"] = source if source in _V6_EVIDENCE_SOURCES else "unknown"
+            task_ref = _safe_v6_ref(raw.get("task_ref"))
+            if task_ref:
+                item["task_ref"] = task_ref
+            item["call_count"] = 1 if raw.get("call_count") == 1 else 0
+            item["effective_constraints"] = _safe_v6_projection(
+                raw.get("effective_constraints"), allowed_keys=_V6_CONSTRAINT_KEYS
+            )
+            item["safe_projection"] = _safe_v6_projection(
+                raw.get("safe_projection"), allowed_keys=_V6_FACT_KEYS | _V6_PROJECTION_CONTAINERS
+            )
+            refs = raw.get("visible_refs") if isinstance(raw.get("visible_refs"), list) else []
+            item["visible_refs"] = [ref for ref in (_safe_v6_ref(v) for v in refs[:3]) if ref]
+        stages.append(item)
+    result: dict[str, Any] = {"schema_version": 1, "stages": stages}
+    state = value.get("state")
+    if isinstance(state, dict):
+        result["state"] = {
+            "before_revision": _bounded_trace_int(state.get("before_revision")),
+            "after_revision": _bounded_trace_int(state.get("after_revision")),
+        }
+    plan = value.get("plan")
+    if isinstance(plan, dict):
+        result["plan"] = {
+            key: str(plan.get(key) or "").strip().lower()
+            if str(plan.get(key) or "").strip().lower() in allowed else "unknown"
+            for key, allowed in _V6_PLAN_VALUES.items()
+        }
+    if value.get("failure_code"):
+        code = str(value["failure_code"]).strip().lower()
+        result["failure_code"] = code if code in _V6_FAILURE_CODES else "unknown"
+    if value.get("failure_stage"):
+        stage = str(value["failure_stage"]).strip().lower()
+        result["failure_stage"] = stage if stage in _V6_FAILURE_STAGES else "unknown"
+    followup = value.get("followup")
+    if isinstance(followup, dict):
+        status = str(followup.get("status") or "").strip().lower()
+        action = str(followup.get("action") or "").strip().lower()
+        result["followup"] = {
+            "status": status if status in _V6_FOLLOWUP_STATUSES else "unresolved",
+            "action": action if action in _V6_FOLLOWUP_ACTIONS else "unknown",
+        }
+    prompt2_context = value.get("prompt2_context")
+    if isinstance(prompt2_context, dict):
+        result["prompt2_context"] = {
+            "search_result": _safe_v6_projection(
+                prompt2_context.get("search_result"),
+                allowed_keys=_V6_PROMPT2_SEARCH_KEYS,
+            ),
+            "trusted_mcp": _safe_v6_projection(
+                prompt2_context.get("trusted_mcp"),
+                allowed_keys=_V6_FACT_KEYS | _V6_PROJECTION_CONTAINERS | _V6_CONSTRAINT_KEYS,
+            ),
+            "answer_contract": _safe_v6_projection(
+                prompt2_context.get("answer_contract"),
+                allowed_keys=_V6_ANSWER_CONTRACT_KEYS,
+            ),
+        }
+    return result
+
+
+def _bounded_trace_int(value: Any) -> int:
+    return max(0, min(int(value), 1000000)) if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def _safe_v6_projection(value: Any, *, allowed_keys: set[str], key: str = "", depth: int = 0) -> Any:
+    if depth > 4:
+        return "[redacted]"
+    if isinstance(value, dict):
+        return {
+            str(k): _safe_v6_projection(v, allowed_keys=allowed_keys, key=str(k), depth=depth + 1)
+            for k, v in list(value.items())[:40]
+            if str(k) in allowed_keys
+        }
+    if isinstance(value, (list, tuple)):
+        if key and key not in _V6_PROJECTION_CONTAINERS and key not in {
+            "facets", "infrastructure", "family_infrastructure", "schools", "kindergartens",
+            "parks", "shops", "clinics", "yards", "transport", "requested_claims",
+            "missing_claims", "allowed_claims", "conflicts", "cards", "canonical", "lots",
+        }:
+            return "[redacted]"
+        return [_safe_v6_projection(v, allowed_keys=allowed_keys, depth=depth + 1) for v in list(value)[:10]]
+    if isinstance(value, str):
+        return "[redacted]" if _V6_SECRETISH_VALUE_RE.search(value) else _safe_text(value)[:500]
+    if isinstance(value, (bool, int, float)) or value is None:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            digits = str(abs(value)).split(".", 1)[0]
+            if len(digits) in range(10, 16) and key not in _V6_PRICE_KEYS:
+                return "[redacted]"
+        return value
+    return "[redacted]"
+
+
+def _safe_v6_ref(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if text.isdigit() or _V6_SECRETISH_VALUE_RE.search(text):
+        return None
+    return text if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", text) else None
+
+
+def _safe_v6_audit(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    result = {}
+    for key in ("tool", "arguments", "sql_audit"):
+        raw = value.get(key)
+        if key == "sql_audit" and isinstance(raw, dict):
+            query = raw.get("query")
+            result[key] = {
+                "query": "[redacted]" if isinstance(query, str) and _V6_SECRETISH_VALUE_RE.search(query) else _safe_text(query),
+                "parameters": _safe_v6_audit_parameters(raw.get("parameters", {})),
+            }
+        else:
+            result[key] = "[redacted]" if isinstance(raw, str) and _V6_SECRETISH_VALUE_RE.search(raw) else (_safe_text(raw) if isinstance(raw, str) else None)
+    result["result_count"] = value.get("result_count") if type(value.get("result_count")) is int else None
+    objects = []
+    for raw in value.get("returned_objects", [])[:20]:
+        if not isinstance(raw, dict):
+            continue
+        item = _safe_v6_projection(raw, allowed_keys={"id", "name", "price_mod", "price1", "price2", "price3", "price4", "price_n", "price_s"})
+        ads = []
+        for ad in raw.get("ads", [])[:20] if isinstance(raw.get("ads"), list) else []:
+            if isinstance(ad, dict):
+                ads.append({key: _safe_text(ad.get(key)) for key in ("id", "state", "status")})
+        item["ads"] = ads
+        objects.append(item)
+    result["returned_objects"] = objects
+    result["selected_objects"] = _safe_v6_projection(value.get("selected_objects", []), allowed_keys=set(), key="cards")
+    condition = value.get("condition_audit") if isinstance(value.get("condition_audit"), dict) else {}
+    result["condition_audit"] = {
+        key: condition.get(key) is True
+        for key in ("requested_in_prompt", "visible_in_tool_arguments", "visible_in_tool_response", "application_confirmed")
+    }
+    result["truncated"] = value.get("truncated") is True
+    result["missing_evidence"] = _safe_v6_projection(value.get("missing_evidence", []), allowed_keys=set(), key="cards")
+    return result
+
+
+def _safe_v6_audit_parameters(value: Any, depth: int = 0) -> dict[str, Any]:
+    if depth > 3 or not isinstance(value, dict):
+        return {}
+    result = {}
+    for raw_key, item in list(value.items())[:32]:
+        key = str(raw_key)
+        if re.search(r"token|secret|password|authorization|api[_-]?key|credential|prompt|metadata|mcp[_-]?servers", key, re.I):
+            continue
+        if isinstance(item, dict):
+            result[key] = _safe_v6_audit_parameters(item, depth + 1)
+        elif isinstance(item, (list, tuple)):
+            result[key] = [_safe_v6_audit_parameters(v, depth + 1) if isinstance(v, dict) else _safe_v6_projection(v, allowed_keys=set(), key=key) for v in list(item)[:20]]
+        else:
+            result[key] = _safe_v6_projection(item, allowed_keys=set(), key=key)
+    return result
 
 
 def _safe_prompt_provenance(value: Any) -> dict[str, Any] | None:
@@ -164,7 +421,73 @@ def _safe_execution_path(value: Any) -> dict[str, Any] | None:
 
 def _safe_runtime_version(value: Any) -> str | None:
     normalized = str(value or "").strip().upper()
-    return normalized if normalized in {"V0", "V1", "V2", "V3", "V5"} else None
+    return normalized if normalized in {"V0", "V1", "V2", "V3", "V5", "V6"} else None
+
+
+_SAFE_V6_MODES = {"off", "shadow", "publish"}
+_SAFE_V6_STATUSES = {"off", "accepted", "rejected", "fallback"}
+_SAFE_V6_VALIDATION_STATUSES = {"accepted", "rejected", "not_validated"}
+_SAFE_V6_FALLBACK_REASONS = {
+    "mode_off",
+    "invalid_input",
+    "gateway_unavailable",
+    "gateway_failure",
+    "validation_failed",
+    "publish_disabled",
+    "shadow_only",
+    "gateway_exception",
+    "gateway_failure_after_retry",
+    "validation_failed_after_retry",
+    "gateway_exception_after_retry",
+}
+_SAFE_V6_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$")
+_SAFE_V6_PROMPT_SOURCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*){0,7}$")
+_SAFE_V6_PROMPT_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _safe_v6_candidate(value: Any) -> dict[str, Any] | None:
+    """Whitelist the V6 runtime report; never persist prompt or request content."""
+    if not isinstance(value, dict):
+        return None
+    mode = str(value.get("mode") or "").strip().lower()
+    status = str(value.get("status") or "").strip().lower()
+    if mode not in _SAFE_V6_MODES or status not in _SAFE_V6_STATUSES:
+        return None
+    out: dict[str, Any] = {"mode": mode, "status": status}
+    task_id = _bounded_token(value.get("task_id"))
+    if task_id:
+        out["task_id"] = task_id
+    model = str(value.get("model") or "").strip()
+    if _SAFE_V6_MODEL_RE.fullmatch(model):
+        out["model"] = model
+    if value.get("payload_stage") == "v6_single_agent":
+        out["payload_stage"] = "v6_single_agent"
+    if value.get("transport") == "gateway":
+        out["transport"] = "gateway"
+    if value.get("agent") == "gateway-agent":
+        out["agent"] = "gateway-agent"
+    if value.get("upstream_provider") == "openrouter":
+        out["upstream_provider"] = "openrouter"
+    prompt_source = str(value.get("prompt_source") or "").strip()
+    if _SAFE_V6_PROMPT_SOURCE_RE.fullmatch(prompt_source):
+        out["prompt_source"] = prompt_source
+    prompt_sha256 = str(value.get("prompt_sha256") or "").strip()
+    if _SAFE_V6_PROMPT_SHA256_RE.fullmatch(prompt_sha256):
+        out["prompt_sha256"] = prompt_sha256
+    validation_status = str(value.get("validation_status") or "").strip().lower()
+    if validation_status in _SAFE_V6_VALIDATION_STATUSES:
+        out["validation_status"] = validation_status
+    call_count = value.get("call_count")
+    if isinstance(call_count, int) and not isinstance(call_count, bool) and call_count in {0, 1, 2}:
+        out["call_count"] = call_count
+    if isinstance(value.get("state_commit"), bool):
+        out["state_commit"] = value["state_commit"]
+    if isinstance(value.get("published"), bool):
+        out["published"] = value["published"]
+    fallback_reason = str(value.get("fallback_reason") or "").strip()
+    if fallback_reason in _SAFE_V6_FALLBACK_REASONS:
+        out["fallback_reason"] = fallback_reason
+    return out
 
 
 def _safe_response_model(value: Any) -> dict[str, Any] | None:
@@ -407,9 +730,6 @@ def _safe_runtime_summary(value: dict[str, Any] | None) -> dict[str, Any]:
     gateway_attempt_details = _safe_gateway_attempt_details(value.get("gateway_attempt_details"))
     if gateway_attempt_details:
         summary["gateway_attempt_details"] = gateway_attempt_details
-    inventory_gate = _safe_inventory_gate_summary(value.get("inventory_gate"))
-    if inventory_gate:
-        summary["inventory_gate"] = inventory_gate
     option_enrichment = _safe_option_enrichment(value.get("option_enrichment"))
     if option_enrichment:
         summary["option_enrichment"] = option_enrichment
@@ -434,21 +754,6 @@ def _safe_runtime_summary(value: dict[str, Any] | None) -> dict[str, Any]:
         if safe_cards:
             summary["card_reformatter_shadow"] = {"mode": "shadow", "card_count": min(len(safe_cards), 3), "cards": safe_cards[:3]}
     return summary
-
-
-def _safe_inventory_gate_summary(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    status = str(value.get("status") or "").strip().lower()
-    if not isinstance(value.get("enabled"), bool) or status not in {"filtered", "unchanged", "disabled"}:
-        return {}
-    return {
-        "enabled": value["enabled"],
-        "status": status,
-        "source_count": _bounded_int(value.get("source_count"), 0, 1000),
-        "visible_count": _bounded_int(value.get("visible_count"), 0, 1000),
-        "excluded_unqualified_count": _bounded_int(value.get("excluded_unqualified_count"), 0, 1000),
-    }
 
 
 _SAFE_INTENT_GOALS = {

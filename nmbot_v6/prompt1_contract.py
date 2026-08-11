@@ -24,7 +24,7 @@ _ROOT_FIELDS = {
     "missing",
     "params",
 }
-_OPTIONAL_ROOT_FIELDS = {"mcp_audit"}
+_OPTIONAL_ROOT_FIELDS = {"mcp_audit", "requested_claims"}
 _PARAM_FIELDS = {
     "rooms",
     "max_price",
@@ -95,6 +95,7 @@ class Prompt1Result:
     missing: tuple[str, ...]
     params: Mapping[str, Any]
     mcp_audit: Mapping[str, Any] | None = None
+    requested_claims: tuple[str, ...] = ()
 
 
 def parse_prompt1(raw: str | Mapping[str, Any]) -> Prompt1Result:
@@ -125,6 +126,7 @@ def parse_prompt1(raw: str | Mapping[str, Any]) -> Prompt1Result:
     missing = _string_list(data["missing"], "missing")
     params = _params(data["params"])
     mcp_audit = _validate_audit(data.get("mcp_audit"))
+    requested_claims = tuple(_string_list(data.get("requested_claims", []), "requested_claims"))
 
     _validate_options(facts, near)
     _validate_consistency(action, target, policy, question, facts, near, missing, params)
@@ -139,6 +141,7 @@ def parse_prompt1(raw: str | Mapping[str, Any]) -> Prompt1Result:
         immutable_safe_copy(missing),
         immutable_safe_copy(params, allowed_numeric_fields=_NUMERIC_PARAM_FIELDS),
         mcp_audit,
+        requested_claims,
     )
 
 

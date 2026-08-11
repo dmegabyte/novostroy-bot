@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import Any, Mapping, Protocol
 
 from .contracts import ContractError
+from .canonical_card import build_answer_contract
 from .privacy import immutable_safe_copy
 from .prompt1_contract import Prompt1Result
 from .provider import (
@@ -27,6 +28,7 @@ MCP_SERVER = TRUSTED_MCP_SERVER
 MCP_TOOL = TRUSTED_MCP_TOOL
 PROMPT1_PATH = Path(__file__).resolve().parents[1] / "prompts" / "v6_search_agent.txt"
 PROMPT2_PATH = Path(__file__).resolve().parents[1] / "prompts" / "v6_answer_writer.txt"
+OPERATOR_PROMPT2_PATH = Path(__file__).resolve().parents[1] / "prompts" / "v6_operator_offer_writer.txt"
 PROMPT1_STAGE = "v6_search_agent"
 PROMPT2_STAGE = "v6_answer_writer"
 PROMPT2_RETRY_NOTE = (
@@ -55,6 +57,13 @@ EXPANDED_CARD_FIELDS = (
     "shops", "transport", "link", "novos_id", "house", "ads",
     "apartment_types", "lot_examples",
 )
+_DIALOGUE_CONSTRAINT_FIELDS = frozenset({
+    "rooms", "max_price", "min_price", "district", "floor",
+    "has_renovation", "purpose", "facets", "mortgage_type",
+})
+_DIALOGUE_CARD_FIELDS = frozenset(EXPANDED_CARD_FIELDS) | frozenset({
+    "ref", "id", "object_id", "option_ref", "price", "rooms",
+})
 MCP_AUDIT_NOTE = """
 DIAGNOSTIC-ONLY ADDENDUM:
 После каждого вызова MCP добавь в итоговый JSON поле `mcp_audit` со структурой:
@@ -331,14 +340,20 @@ class Prompt2Gateway:
         retry_reason: str | None = None,
     ) -> str:
         safe_input = _safe_input(user_text, state)
-        prompt = PROMPT2_PATH.read_text(encoding="utf-8")
+        question_policy = build_question_policy(user_text, state, plan)
+        answer_contract = build_answer_contract(plan, evidence, question_policy=question_policy)
+        prompt_path = OPERATOR_PROMPT2_PATH if question_policy.get(
+            "operator_escalation_required"
+        ) is True else PROMPT2_PATH
+        prompt = prompt_path.read_text(encoding="utf-8")
         if retry_reason == "invalid_json":
             prompt = f"{prompt}\n\n{PROMPT2_RETRY_NOTE}"
         query_input = MappingProxyType({
             **safe_input,
             "search_result": _prompt1_projection(plan),
             "trusted_mcp": trusted_envelope_projection(evidence),
-            "question_policy": build_question_policy(user_text, state, plan),
+            "question_policy": question_policy,
+            "answer_contract": answer_contract,
             **({
                 "retry_contract": {
                     "retry_reason": "invalid_json",
@@ -369,14 +384,92 @@ def _safe_input(user_text: str, state: Mapping[str, Any]) -> Mapping[str, Any]:
     if "pending_phone" in state and type(pending_phone) is not bool:
         raise ContractError("pending_phone must be boolean")
     safe_state = dict(immutable_safe_copy({
-        key: value for key, value in state.items() if key != "pending_phone"
+        key: value for key, value in state.items()
+        if key not in {"pending_phone", "dialogue_context"}
     }))
     if "pending_phone" in state:
         safe_state["pending_phone"] = pending_phone
     return MappingProxyType({
         "user_text": immutable_safe_copy(user_text),
         "state": MappingProxyType(safe_state),
+        "dialogue_context": build_dialogue_context(state),
     })
+
+
+def build_dialogue_context(state: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Project only bounded, confirmed dialogue facts to both V6 gateways."""
+
+    if not isinstance(state, Mapping):
+        raise ContractError("dialogue context state is invalid")
+    supplied = state.get("dialogue_context")
+    if isinstance(supplied, Mapping):
+        source = supplied
+    else:
+        context = state.get("safe_context")
+        context = context if isinstance(context, Mapping) else {}
+        cards = state.get("current_cards")
+        cards = list(cards[:3]) if isinstance(cards, (list, tuple)) else []
+        selected_ref = state.get("selected_option_ref")
+        pending = state.get("pending_interaction")
+        if not isinstance(selected_ref, str) and isinstance(pending, Mapping):
+            refs = pending.get("subject_refs")
+            if isinstance(refs, (list, tuple)) and len(refs) == 1 and isinstance(refs[0], str):
+                selected_ref = refs[0]
+        selected_card = _selected_dialogue_card(cards, selected_ref)
+        constraints: dict[str, Any] = {}
+        for container in (context, context.get("effective_constraints"), context.get("lot_constraints")):
+            if not isinstance(container, Mapping):
+                continue
+            for key in _DIALOGUE_CONSTRAINT_FIELDS:
+                if key in container:
+                    constraints[key] = _normalize_dialogue_constraint(key, container[key])
+        source = {
+            "last_question_goal": context.get("last_question_goal"),
+            "selected_subject_ref": selected_ref if isinstance(selected_ref, str) else None,
+            "selected_card": selected_card,
+            "confirmed_constraints": constraints,
+            "current_card_count": len(cards),
+        }
+    allowed = {
+        "last_question_goal", "selected_subject_ref", "selected_card",
+        "confirmed_constraints", "current_card_count",
+    }
+    bounded = {key: source.get(key) for key in allowed}
+    card = bounded.get("selected_card")
+    bounded["selected_card"] = (
+        {key: value for key, value in card.items() if key in _DIALOGUE_CARD_FIELDS}
+        if isinstance(card, Mapping) else None
+    )
+    constraints = bounded.get("confirmed_constraints")
+    bounded["confirmed_constraints"] = {
+        key: _normalize_dialogue_constraint(key, value)
+        for key, value in constraints.items()
+        if key in _DIALOGUE_CONSTRAINT_FIELDS
+    } if isinstance(constraints, Mapping) else {}
+    count = bounded.get("current_card_count")
+    bounded["current_card_count"] = count if type(count) is int and 0 <= count <= 3 else 0
+    for key in ("last_question_goal", "selected_subject_ref"):
+        value = bounded.get(key)
+        bounded[key] = value[:128] if isinstance(value, str) else None
+    return MappingProxyType(dict(immutable_safe_copy(bounded)))
+
+
+def _selected_dialogue_card(cards: list[Any], selected_ref: Any) -> Mapping[str, Any] | None:
+    if isinstance(selected_ref, str):
+        for card in cards:
+            if isinstance(card, Mapping) and any(
+                card.get(key) == selected_ref for key in ("ref", "id", "object_id", "option_ref")
+            ):
+                return card
+    return cards[0] if len(cards) == 1 and isinstance(cards[0], Mapping) else None
+
+
+def _normalize_dialogue_constraint(key: str, value: Any) -> Any:
+    if key in {"rooms", "floor", "min_price", "max_price"} and isinstance(value, str):
+        text = value.strip()
+        if text.isascii() and text.isdigit():
+            return int(text)
+    return value
 
 
 def _detail_followup_context(value: Mapping[str, Any]) -> bool:
@@ -438,6 +531,7 @@ def _prompt1_projection(plan: Prompt1Result) -> Mapping[str, Any]:
         "near": plan.near,
         "missing": plan.missing,
         "params": plan.params,
+        "requested_claims": plan.requested_claims,
     })
 
 
@@ -469,6 +563,14 @@ def build_question_policy(
         for card in plan.facts
         for key in ("ads", "lot_examples")
     )
+    no_results_search = bool(
+        plan.action.value == "search"
+        and plan.search_policy.value == "required"
+        and cards_displayed == 0
+    )
+    operator_escalation_required = bool(
+        no_results_search or dialogue_step >= 3
+    )
     if expanded_detail and lot_evidence:
         goal = "offer_layouts_or_viewing"
     elif expanded_detail:
@@ -483,12 +585,15 @@ def build_question_policy(
         goal = "offer_layouts_or_viewing"
     else:
         goal = "choose_complex"
-    return MappingProxyType({
+    policy = {
         "question_goal": goal,
         "answer_mode": "expanded_detail" if expanded_detail else "standard",
         "cards_displayed": cards_displayed,
         "dialogue_step": dialogue_step,
-    })
+    }
+    if operator_escalation_required:
+        policy["operator_escalation_required"] = True
+    return MappingProxyType(policy)
 
 
 def _nonempty_lot_container(value: Any) -> bool:

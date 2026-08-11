@@ -2,7 +2,7 @@ import asyncio
 import json
 
 from nmbot_v6.followup import FollowupKind, PendingInteractionResolver, exact_detail_context
-from nmbot_v6.gateway import Prompt1GatewayResult, V6OvermindTransport
+from nmbot_v6.gateway import Prompt1GatewayResult, V6OvermindTransport, build_question_policy
 from nmbot_v6.phone import PhoneParseResult
 from nmbot_v6.runtime import RuntimeStatus, V6Runtime
 from nmbot_v6.state import PendingInteraction, V6State
@@ -59,7 +59,9 @@ class Prompt2Stub:
     async def run(self, _text, state, plan, evidence):
         self.calls.append((state, plan, evidence))
         cards = [{"index": index, "text": "Данные подтверждены."} for index, _ in enumerate(plan.facts)]
-        return json.dumps({"intro": "", "cards": cards, "question": "Что уточнить дальше?"})
+        operator = build_question_policy(_text, state, plan).get("operator_escalation_required") is True
+        question = "Передать текущий вопрос оператору?" if operator else "Что уточнить дальше?"
+        return json.dumps({"intro": "", "cards": cards, "question": question})
 
 
 def _run(state, text, output):

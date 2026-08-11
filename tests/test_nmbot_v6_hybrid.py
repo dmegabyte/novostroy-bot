@@ -33,7 +33,9 @@ class Prompt2Stub:
     async def run(self, _text, state, plan, evidence):
         self.calls.append((state, plan, evidence))
         cards = [{"index": 0, "text": "Детали подтверждены."}] if plan.facts else []
-        return json.dumps({"intro": "", "cards": cards, "question": "Показать планировки?"})
+        operator = build_question_policy(_text, state, plan).get("operator_escalation_required") is True
+        question = "Передать текущий вопрос оператору?" if operator else "Показать планировки?"
+        return json.dumps({"intro": "", "cards": cards, "question": question})
 
 
 def _run(state, text, output):

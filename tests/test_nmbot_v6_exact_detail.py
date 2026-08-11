@@ -6,7 +6,7 @@ import pytest
 from nmbot_v6.followup import PendingInteractionResolver
 from nmbot_v6.gateway import (
     Prompt1Gateway, Prompt1GatewayResult, Prompt2Gateway, TransportResponse,
-    V6OvermindTransport,
+    V6OvermindTransport, build_question_policy,
 )
 from nmbot_v6.phone import PhoneParseResult
 from nmbot_v6.runtime import RuntimeFailureStage, RuntimeStatus, V6Runtime, run_v6
@@ -72,7 +72,9 @@ class Prompt2Stub:
     async def run(self, user_text, state, plan, evidence):
         self.calls.append((user_text, state, plan, evidence))
         cards = [{"index": 0, "text": "Подробности подтверждены."}] if plan.facts else []
-        return json.dumps({"intro": "", "cards": cards, "question": "Что ещё уточнить?"})
+        operator = build_question_policy(user_text, state, plan).get("operator_escalation_required") is True
+        question = "Передать текущий вопрос оператору?" if operator else "Что ещё уточнить?"
+        return json.dumps({"intro": "", "cards": cards, "question": question})
 
 
 def _run(prompt1, state, text):

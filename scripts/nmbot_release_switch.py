@@ -49,15 +49,17 @@ FIXED_ROOT = "/home/neiro/novostroy-bot"
 FIXED_SERVICE = "novostroy-bot-api.service"
 ROOT = pathlib.Path(FIXED_ROOT)
 RELEASES = ROOT / "releases"
+STAGING = ROOT / ".release_staging"
 CURRENT = ROOT / "current"
 PREVIOUS = ROOT / "previous"
 DATA = ROOT / "data"
 EXTERNAL = DATA / "nmbot_release_identity.json"
-LOCK = ROOT / ".release_switch_lock"
+LOCK = ROOT / ".release_lock"
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 MANIFEST_KEYS = {"schema", "release_id", "generated_at", "tracked_files"}
 ROW_KEYS = {"path", "sha256"}
+ARTIFACT_KEYS = {"schema_version", "scope", "release_id", "created_at_utc", "archive_name", "archive_sha256", "files", "entrypoints", "import_modules", "service", "forbidden_services", "config_schema_requirements", "external_runtime_strategy", "identity_path", "source_provenance"}
 SYSTEMCTL_TIMEOUT = 8
 READINESS_SECONDS = 15
 HEALTH_TIMEOUT = 2
@@ -137,13 +139,65 @@ def manifest(path, release_id, release_dir=None):
     return raw
 
 
+def artifact_manifest(release_id, release_dir):
+    staging_dir = STAGING / release_id
+    path = staging_dir / ("nmbot-" + release_id + ".manifest.json")
+    if staging_dir.is_symlink() or not staging_dir.is_dir() or staging_dir.resolve() != staging_dir:
+        fail("immutable artifact manifest directory missing or symlinked")
+    if path.is_symlink() or not path.is_file() or path.resolve() != path:
+        fail("immutable artifact manifest missing or symlinked")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        fail("immutable artifact manifest invalid")
+    if not isinstance(data, dict) or set(data) != ARTIFACT_KEYS:
+        fail("immutable artifact manifest schema fields invalid")
+    if (data.get("schema_version") != "nmbot.atomic_release.v1" or
+            data.get("scope") != "api" or data.get("release_id") != release_id or
+            data.get("service") != FIXED_SERVICE or
+            data.get("identity_path") != "release_identity/nmbot_release_identity.json"):
+        fail("immutable artifact manifest mismatch")
+    rows = data.get("files")
+    if not isinstance(rows, list) or not rows:
+        fail("immutable artifact manifest files invalid")
+    expected = {}
+    previous = ""
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != ROW_KEYS:
+            fail("immutable artifact manifest file shape invalid")
+        relative, digest = row.get("path"), row.get("sha256")
+        if (not safe_relative(relative) or relative in expected or
+                not isinstance(digest, str) or not HEX64.fullmatch(digest) or
+                (previous and relative <= previous)):
+            fail("immutable artifact manifest file value invalid")
+        expected[relative] = digest
+        previous = relative
+    actual = {}
+    for tracked in release_dir.rglob("*"):
+        if tracked.is_symlink():
+            continue
+        if tracked.is_file():
+            relative = tracked.relative_to(release_dir).as_posix()
+            actual[relative] = hashlib.sha256(tracked.read_bytes()).hexdigest()
+    if actual != expected:
+        fail("immutable release file set/hash mismatch")
+    return data
+
+
 def release(release_id):
     if not isinstance(release_id, str) or not SAFE_ID.fullmatch(release_id) or release_id in (".", ".."):
         fail("unsafe release id")
     path = RELEASES / release_id
     if path.is_symlink() or not path.is_dir() or path.resolve() != path or path.parent != RELEASES:
         fail("release directory missing or symlinked")
-    manifest(path / "release_identity/nmbot_release_identity.json", release_id, path)
+    identity_raw = manifest(path / "release_identity/nmbot_release_identity.json", release_id, path)
+    artifact = artifact_manifest(release_id, path)
+    identity = json.loads(identity_raw.decode("utf-8"))
+    expected = {row["path"]: row["sha256"] for row in artifact["files"]
+                if row["path"] != "release_identity/nmbot_release_identity.json"}
+    actual = {row["path"]: row["sha256"] for row in identity["tracked_files"]}
+    if actual != expected:
+        fail("release identity tracked_files mismatch")
     return path
 
 
@@ -184,9 +238,16 @@ def health(release_id, wait=True):
             response = urllib.request.urlopen("http://127.0.0.1:8088/health", timeout=HEALTH_TIMEOUT)
             data = json.loads(response.read().decode("utf-8"))
             state = run_systemctl("is-active", check=False).stdout.strip()
-            active, _ = current()
-            if data.get("ok") is True and state == "active" and active == release_id:
-                return {"ok": True, "service": state}
+            active, active_path = current()
+            local_id = json.loads((active_path / "release_identity/nmbot_release_identity.json").read_text(encoding="utf-8")).get("release_id")
+            external_id = json.loads(EXTERNAL.read_text(encoding="utf-8")).get("release_id")
+            if (data.get("ok") is True and
+                    data.get("jivo_token_configured") is True and
+                    data.get("api_token_configured") is True and
+                    state == "active" and active == release_id and
+                    local_id == release_id and external_id == release_id):
+                return {"ok": True, "service": state, "current": active,
+                        "local_identity": local_id, "external_identity": external_id}
             last = "health/service/identity"
         except Exception as exc:
             last = type(exc).__name__
@@ -244,13 +305,19 @@ def acquire_lock():
 
 
 def release_lock(owner):
-    try:
-        owner_path = LOCK / "owner"
-        if owner_path.read_text(encoding="ascii") == owner:
-            owner_path.unlink()
-            LOCK.rmdir()
-    except OSError:
-        pass
+    owner_path = LOCK / "owner"
+    if owner_path.read_text(encoding="ascii") != owner:
+        fail("release lock owner mismatch during cleanup")
+    owner_path.unlink()
+    LOCK.rmdir()
+
+
+def stop_and_prove_inactive():
+    run_systemctl("stop")
+    state = run_systemctl("is-active", check=False).stdout.strip()
+    if state not in ("inactive", "failed"):
+        fail("api did not stop")
+    return state
 
 
 def switch(config):
@@ -288,6 +355,8 @@ def switch(config):
     staged = None
     cutover_started = False
     backup = None
+    result = None
+    error = None
     try:
         previous_id, _ = current()
         target_dir = release(target)
@@ -299,11 +368,8 @@ def switch(config):
         if staged.read_bytes() != target_raw:
             fail("target identity staging mismatch")
 
+        stop_and_prove_inactive()
         cutover_started = True
-        run_systemctl("stop")
-        state = run_systemctl("is-active", check=False).stdout.strip()
-        if state not in ("inactive", "failed"):
-            fail("api did not stop")
         atomic_link(CURRENT, target)
         replace_identity(staged)
         staged = None
@@ -314,29 +380,55 @@ def switch(config):
         if not result.get("ok"):
             fail("target health failed")
         atomic_link(PREVIOUS, previous_id)
-        return {"status": "ok", "previous": previous_id, "target": target,
-                "current": target, "previous_marker": "releases/" + previous_id,
-                "rollback": {"attempted": False}, "health": result}
+        result = {"status": "ok", "previous": previous_id, "target": target,
+                  "current": target, "previous_marker": "releases/" + previous_id,
+                  "rollback": {"attempted": False}, "health": result}
     except Exception as exc:
         if not cutover_started:
-            raise
-        rollback = {"attempted": True, "ok": False}
-        try:
-            run_systemctl("stop", check=False)
-            atomic_link(CURRENT, previous_id)
-            restore_identity(backup)
-            run_systemctl("start")
-            rollback["health"] = health(previous_id)
-            rollback["ok"] = bool(rollback["health"].get("ok"))
-        except Exception as rollback_exc:
-            rollback["error"] = type(rollback_exc).__name__
-        return {"status": "error", "error": str(exc), "previous": previous_id,
-                "target": target, "current": previous_id if rollback["ok"] else None,
-                "previous_marker": marker_before, "rollback": rollback}
+            error = exc
+        else:
+            rollback = {"attempted": True, "ok": False}
+            try:
+                stop_and_prove_inactive()
+                atomic_link(CURRENT, previous_id)
+                restore_identity(backup)
+                run_systemctl("start")
+                rollback["health"] = health(previous_id)
+                rollback["ok"] = bool(rollback["health"].get("ok"))
+            except Exception as rollback_exc:
+                rollback["error"] = type(rollback_exc).__name__
+                rollback["error_detail"] = str(rollback_exc)
+            result = {"status": "error", "error": str(exc), "previous": previous_id,
+                      "target": target, "current": previous_id if rollback["ok"] else None,
+                      "previous_marker": marker_before, "rollback": rollback}
     finally:
+        cleanup_failures = []
         if staged is not None:
-            staged.unlink(missing_ok=True)
-        release_lock(owner)
+            try:
+                staged.unlink(missing_ok=True)
+            except Exception as staged_cleanup_exc:
+                cleanup_failures.append({"step": "staged_identity", "error": type(staged_cleanup_exc).__name__,
+                                         "detail": str(staged_cleanup_exc)})
+        try:
+            release_lock(owner)
+        except Exception as lock_cleanup_exc:
+            cleanup_failures.append({"step": "release_lock", "error": type(lock_cleanup_exc).__name__,
+                                     "detail": str(lock_cleanup_exc)})
+        if cleanup_failures:
+            cleanup = cleanup_failures[0] if len(cleanup_failures) == 1 else cleanup_failures
+            if result is not None:
+                result = {**result, "status": "error", "cleanup_failure": cleanup,
+                          "original_result": result}
+            elif error is not None:
+                result = {"status": "error", "error": str(error),
+                          "cleanup_failure": cleanup,
+                          "original_error": {"type": type(error).__name__, "detail": str(error)}}
+            else:
+                result = {"status": "error", "error": "release lock cleanup failed",
+                          "cleanup_failure": cleanup}
+    if result is not None:
+        return result
+    raise error
 
 
 def main():

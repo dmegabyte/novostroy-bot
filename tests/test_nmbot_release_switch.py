@@ -48,6 +48,24 @@ def identity(release_id: str, content: bytes, **changes) -> bytes:
     return json.dumps(data, sort_keys=True).encode()
 
 
+def artifact_manifest(release_id: str, content: bytes, identity_raw: bytes) -> dict:
+    return {
+        "schema_version": "nmbot.atomic_release.v1", "scope": "api",
+        "release_id": release_id, "created_at_utc": "2026-08-13T12:00:00Z",
+        "archive_name": f"nmbot-{release_id}.tar.gz", "archive_sha256": "0" * 64,
+        "files": [
+            {"path": "app.py", "sha256": hashlib.sha256(content).hexdigest()},
+            {"path": "release_identity/nmbot_release_identity.json", "sha256": hashlib.sha256(identity_raw).hexdigest()},
+        ],
+        "entrypoints": ["scripts/nmbot_api_server.py"], "import_modules": [],
+        "service": "novostroy-bot-api.service",
+        "forbidden_services": ["novostroy-bot-n8n-bridge.service", "novostroy-bot-worker.service"],
+        "config_schema_requirements": {}, "external_runtime_strategy": "symlink",
+        "identity_path": "release_identity/nmbot_release_identity.json",
+        "source_provenance": {"present": False},
+    }
+
+
 def sandbox(tmp_path: Path, releases=("old", "new")):
     remote = load_remote()
     root = tmp_path / "root"
@@ -55,6 +73,8 @@ def sandbox(tmp_path: Path, releases=("old", "new")):
     data_dir = root / "data"
     release_root.mkdir(parents=True)
     data_dir.mkdir()
+    staging_root = root / ".release_staging"
+    staging_root.mkdir()
     manifests = {}
     for release_id in releases:
         release_dir = release_root / release_id
@@ -63,6 +83,10 @@ def sandbox(tmp_path: Path, releases=("old", "new")):
         (release_dir / "app.py").write_bytes(content)
         raw = identity(release_id, content)
         (release_dir / "release_identity/nmbot_release_identity.json").write_bytes(raw)
+        staging_dir = staging_root / release_id
+        staging_dir.mkdir()
+        (staging_dir / f"nmbot-{release_id}.manifest.json").write_text(
+            json.dumps(artifact_manifest(release_id, content, raw)))
         manifests[release_id] = raw
     os.symlink("releases/old", root / "current")
     (data_dir / "nmbot_release_identity.json").write_bytes(manifests["old"])
@@ -70,11 +94,12 @@ def sandbox(tmp_path: Path, releases=("old", "new")):
     remote.FIXED_ROOT = str(root)
     remote.ROOT = root
     remote.RELEASES = release_root
+    remote.STAGING = staging_root
     remote.CURRENT = root / "current"
     remote.PREVIOUS = root / "previous"
     remote.DATA = data_dir
     remote.EXTERNAL = data_dir / "nmbot_release_identity.json"
-    remote.LOCK = root / ".release_switch_lock"
+    remote.LOCK = root / ".release_lock"
     config = {"root": str(root), "service": remote.FIXED_SERVICE}
     return remote, config, manifests
 
@@ -147,6 +172,12 @@ def test_success_returns_normally_without_rollback_and_sets_marker_last(tmp_path
     assert not remote.LOCK.exists()
 
 
+def test_switch_uses_atomic_release_lock_name(tmp_path):
+    remote, _, _ = sandbox(tmp_path)
+    assert remote.LOCK == remote.ROOT / ".release_lock"
+    assert ".release_switch_lock" not in switch.REMOTE
+
+
 def test_lock_is_removed_when_owner_write_fails(tmp_path, monkeypatch):
     remote, _, _ = sandbox(tmp_path)
     original = pathlib.Path.write_text
@@ -208,7 +239,24 @@ def test_failed_cutover_rolls_back_without_changing_previous_marker(tmp_path):
     assert os.readlink(remote.CURRENT) == "releases/old"
     assert os.readlink(remote.PREVIOUS) == "releases/older"
     assert remote.EXTERNAL.read_bytes() == manifests["old"]
-    assert actions == ["stop", "is-active", "start", "stop", "start"]
+    assert actions == ["stop", "is-active", "start", "stop", "is-active", "start"]
+
+
+def test_stop_failure_does_not_cut_over_identity_or_current(tmp_path):
+    remote, config, manifests = sandbox(tmp_path)
+    os.symlink("releases/new", remote.PREVIOUS)
+
+    def systemctl(action, check=True):
+        if action == "stop":
+            raise subprocess.CalledProcessError(1, "systemctl stop")
+        raise AssertionError(action)
+
+    remote.run_systemctl = systemctl
+    with pytest.raises(subprocess.CalledProcessError):
+        remote.switch({**config, "op": "rollback", "target": None, "confirm": True})
+    assert os.readlink(remote.CURRENT) == "releases/old"
+    assert remote.EXTERNAL.read_bytes() == manifests["old"]
+    assert not remote.LOCK.exists()
 
 
 def test_rollback_failure_never_claims_current_or_success(tmp_path):
@@ -256,6 +304,74 @@ def test_manifest_contract_rejects_extra_fields_duplicates_and_symlinks(tmp_path
     os.symlink(real_dir.name, identity_dir)
     with pytest.raises(remote.SwitchError, match="directory missing or symlinked"):
         remote.release("new")
+
+
+def test_health_requires_both_config_flags_and_exact_identities(tmp_path, monkeypatch):
+    remote, _, _ = sandbox(tmp_path)
+    remote.run_systemctl = lambda action, check=True: subprocess.CompletedProcess([], 0, "active\n", "")
+
+    class Response:
+        def __init__(self, body):
+            self.body = body
+
+        def read(self):
+            return json.dumps(self.body).encode()
+
+    good = {"ok": True, "jivo_token_configured": True, "api_token_configured": True}
+    monkeypatch.setattr(remote.urllib.request, "urlopen", lambda *a, **k: Response(good))
+    assert remote.health("old", wait=False)["ok"] is True
+    for missing in ("jivo_token_configured", "api_token_configured"):
+        body = dict(good)
+        body[missing] = False
+        monkeypatch.setattr(remote.urllib.request, "urlopen", lambda *a, body=body, **k: Response(body))
+        assert remote.health("old", wait=False)["ok"] is False
+
+
+def test_release_rejects_incomplete_identity_and_missing_artifact_manifest(tmp_path):
+    remote, _, _ = sandbox(tmp_path)
+    release_dir = remote.RELEASES / "new"
+    identity_path = release_dir / "release_identity/nmbot_release_identity.json"
+    partial = json.loads(identity_path.read_text())
+    partial["tracked_files"] = []
+    partial_raw = json.dumps(partial, sort_keys=True).encode()
+    identity_path.write_bytes(partial_raw)
+    artifact_path = remote.STAGING / "new/nmbot-new.manifest.json"
+    artifact = json.loads(artifact_path.read_text())
+    artifact["files"][-1]["sha256"] = hashlib.sha256(partial_raw).hexdigest()
+    artifact_path.write_text(json.dumps(artifact))
+    with pytest.raises(remote.SwitchError, match="tracked files invalid|tracked_files mismatch"):
+        remote.release("new")
+
+    identity_path.write_bytes(identity("new", b"new\n"))
+    artifact_path.unlink()
+    with pytest.raises(remote.SwitchError, match="artifact manifest missing"):
+        remote.release("new")
+
+
+def test_lock_cleanup_failure_overrides_success_and_preserves_result(tmp_path, monkeypatch):
+    remote, config, _ = sandbox(tmp_path)
+
+    def systemctl(action, check=True):
+        stdout = "inactive\n" if action == "is-active" else ""
+        return subprocess.CompletedProcess([], 0, stdout, "")
+
+    remote.run_systemctl = systemctl
+    remote.health = lambda release_id, wait=True: {"ok": True, "service": "active"}
+    original_rmdir = pathlib.Path.rmdir
+
+    def fail_lock_cleanup(self):
+        if self == remote.LOCK:
+            raise OSError("cleanup denied")
+        return original_rmdir(self)
+
+    monkeypatch.setattr(pathlib.Path, "rmdir", fail_lock_cleanup)
+    result = remote.switch({**config, "op": "switch", "target": "new", "confirm": True})
+    assert result["status"] == "error"
+    assert result["original_result"]["status"] == "ok"
+    assert result["cleanup_failure"] == {
+        "step": "release_lock", "error": "OSError", "detail": "cleanup denied",
+    }
+    assert remote.LOCK.exists()
 
 
 def test_remote_error_result_and_cli_exit_contract():

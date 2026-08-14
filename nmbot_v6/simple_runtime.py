@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable, Mapping
 
 from .phone import PhoneMetadataBackend, PrivatePhone, parse_phone
 from .simple_contract import SimpleContractError, build_prompt1_input, build_prompt2_input, parse_prompt1, parse_prompt2
@@ -16,6 +17,7 @@ SPECIALIST_CTA = "Хотите, чтобы специалист проверил
 CLARIFICATION_FAILURE = "Не получилось уточнить запрос.\n\nМожете уточнить этот параметр поиска?"
 PHONE_QUESTION = "На какой номер вам позвонить?"
 MULTIPLE_PHONES_TEXT = "Пришлите, пожалуйста, один номер для связи."
+URL_CARD_FAILURE_TEXT = "Не удалось открыть карточку по этой ссылке. Проверьте ссылку и попробуйте ещё раз."
 _CANDIDATE = re.compile(r"(?<!\d)(?:\+?\d[\s().-]*){10,18}(?!\d)")
 
 
@@ -44,6 +46,7 @@ class SimpleRuntimeResult:
     error_field: str | None = None
     prompt1_failed: bool = False
     request_phone: bool = False
+    url_card_status: str | None = None
 
 
 def guard_phone(text: str, backend: PhoneMetadataBackend | None = None) -> PhoneGuardResult:
@@ -67,8 +70,198 @@ def guard_phone(text: str, backend: PhoneMetadataBackend | None = None) -> Phone
 
 
 class SimpleRuntime:
-    def __init__(self, prompt1: Any, prompt2: Any, *, phone_backend: PhoneMetadataBackend | None = None) -> None:
+    def __init__(
+        self,
+        prompt1: Any,
+        prompt2: Any,
+        *,
+        phone_backend: PhoneMetadataBackend | None = None,
+        url_card_fetcher: Callable[[str], Mapping[str, Any]] | None = None,
+        url_card_extractor: Callable[[str], str | None] | None = None,
+    ) -> None:
         self.prompt1, self.prompt2, self.phone_backend = prompt1, prompt2, phone_backend
+        self.url_card_fetcher, self.url_card_extractor = url_card_fetcher, url_card_extractor
+
+    @staticmethod
+    def _url_card_failure(
+        state: SimpleState,
+        message: str,
+        *,
+        code: str,
+        status: str,
+    ) -> SimpleRuntimeResult:
+        try:
+            remembered = state.accepted(
+                message,
+                URL_CARD_FAILURE_TEXT,
+                awaiting_phone=False,
+                pending_offer="none",
+                advance_client_turn=False,
+            )
+        except Exception:
+            return SimpleRuntimeResult("failed", state, TECHNICAL_TEXT, failure_stage="state", url_card_status=status)
+        return SimpleRuntimeResult(
+            "safe_failure",
+            remembered,
+            URL_CARD_FAILURE_TEXT,
+            failure_stage="url_card",
+            material_status="url_card_failed",
+            material_source="url_card_tool",
+            tool_observation="not_called",
+            error_code=code,
+            url_card_status=status,
+        )
+
+    @staticmethod
+    def _url_card_prompt2_failure(
+        state: SimpleState,
+        message: str,
+        *,
+        code: str,
+        calls: int,
+        p2_attempt: str | None,
+    ) -> SimpleRuntimeResult:
+        try:
+            remembered = state.accepted(
+                message,
+                SPECIALIST_OFFER_ON_FAILURE,
+                awaiting_phone=False,
+                pending_offer="specialist_contact",
+                specialist_offer_published=True,
+            )
+        except Exception:
+            return SimpleRuntimeResult(
+                "failed",
+                state,
+                TECHNICAL_TEXT,
+                failure_stage="state",
+                model_calls=calls,
+                prompt2_attempt_ref=p2_attempt,
+                material_status="url_card_accepted",
+                material_source="url_card_tool",
+                tool_observation="url_card",
+                url_card_status="prompt2_failed",
+            )
+        return SimpleRuntimeResult(
+            "safe_failure",
+            remembered,
+            SPECIALIST_OFFER_ON_FAILURE,
+            failure_stage="prompt2",
+            model_calls=calls,
+            prompt2_attempt_ref=p2_attempt,
+            material_status="url_card_accepted",
+            material_source="url_card_tool",
+            tool_observation="url_card",
+            error_code=code,
+            url_card_status="prompt2_failed",
+        )
+
+    async def _run_url_card_turn(
+        self,
+        source_url: str,
+        message: str,
+        history: list[dict[str, str]],
+        state: SimpleState,
+    ) -> SimpleRuntimeResult:
+        try:
+            raw_card = await asyncio.to_thread(self.url_card_fetcher, source_url)
+        except Exception:
+            return self._url_card_failure(
+                state,
+                message,
+                code="url_card_fetch_failed",
+                status="fetch_failed",
+            )
+
+        offer_specialist_now = state.client_turn_count + 1 == 3
+        try:
+            p2_payload = build_prompt2_input(
+                message,
+                history,
+                None,
+                offer_specialist_now=offer_specialist_now,
+                url_card=raw_card,
+            )
+        except SimpleContractError as exc:
+            return self._url_card_failure(
+                state,
+                message,
+                code=exc.code,
+                status="invalid_card",
+            )
+
+        calls = 0
+        p2_attempt: str | None = None
+        try:
+            calls += 1
+            p2_result = await self.prompt2.run(p2_payload)
+        except Exception:
+            return self._url_card_prompt2_failure(
+                state,
+                message,
+                code="transport_failure",
+                calls=calls,
+                p2_attempt=p2_attempt,
+            )
+        try:
+            p2 = parse_prompt2(p2_result.output, allow_request_phone=False)
+        except SimpleContractError:
+            try:
+                calls += 1
+                p2_result = await self.prompt2.run(p2_payload, repair=True)
+                p2 = parse_prompt2(p2_result.output, allow_request_phone=False)
+            except Exception as exc:
+                code = exc.code if isinstance(exc, SimpleContractError) else "prompt2_failure"
+                return self._url_card_prompt2_failure(
+                    state,
+                    message,
+                    code=code,
+                    calls=calls,
+                    p2_attempt=p2_attempt,
+                )
+        p2_attempt = p2_result.attempt_ref
+        final_question = SPECIALIST_CTA if offer_specialist_now else p2.final_question
+        text = p2.response + ("\n\n" + final_question if final_question else "")
+        if len(text) > 2000:
+            return self._url_card_prompt2_failure(
+                state,
+                message,
+                code="output_too_large",
+                calls=calls,
+                p2_attempt=p2_attempt,
+            )
+        try:
+            next_state = state.accepted(
+                message,
+                text,
+                awaiting_phone=False,
+                pending_offer="specialist_contact" if offer_specialist_now else "none",
+                specialist_offer_published=offer_specialist_now,
+            )
+        except Exception:
+            return SimpleRuntimeResult(
+                "failed",
+                state,
+                TECHNICAL_TEXT,
+                failure_stage="state",
+                model_calls=calls,
+                prompt2_attempt_ref=p2_attempt,
+                material_status="url_card_accepted",
+                material_source="url_card_tool",
+                tool_observation="url_card",
+                url_card_status="accepted",
+            )
+        return SimpleRuntimeResult(
+            "completed",
+            next_state,
+            text,
+            model_calls=calls,
+            prompt2_attempt_ref=p2_attempt,
+            material_status="url_card_accepted",
+            material_source="url_card_tool",
+            tool_observation="url_card",
+            url_card_status="accepted",
+        )
 
     async def run(self, current_message: str, state: SimpleState) -> SimpleRuntimeResult:
         if not isinstance(current_message, str) or not current_message.strip() or not isinstance(state, SimpleState):
@@ -121,6 +314,20 @@ class SimpleRuntime:
                 mcp_call_count=mcp_calls, material_status="clarification_required",
                 tool_observation=observation, error_code=code,
             )
+
+        if self.url_card_fetcher is not None and self.url_card_extractor is not None:
+            try:
+                source_url = self.url_card_extractor(current_message)
+            except Exception:
+                return self._url_card_failure(
+                    state,
+                    message,
+                    code="url_card_extractor_failure",
+                    status="extractor_failed",
+                )
+            if source_url:
+                return await self._run_url_card_turn(source_url, message, history, state)
+
         try:
             calls += 1
             p1_result = await self.prompt1.run(

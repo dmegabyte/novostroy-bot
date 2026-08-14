@@ -39,7 +39,15 @@ async def run_v6_simple_turn(app: Any, *, user_id: str, message: str, channel: s
         state = SimpleState.from_mapping(raw) if isinstance(raw, Mapping) else SimpleState()
     except Exception:
         return _public(False, TECHNICAL_TEXT, "state_load_failure", v6_trace=_trace("not_called", "not_called", "not_called", "failed"))
-    result = await SimpleRuntime(prompt1, prompt2, phone_backend=get("v6_phone_backend")).run(str(message or ""), state)
+    url_card_fetcher = get("v6_url_card_fetcher")
+    url_card_extractor = get("v6_url_card_extractor")
+    result = await SimpleRuntime(
+        prompt1,
+        prompt2,
+        phone_backend=get("v6_phone_backend"),
+        url_card_fetcher=url_card_fetcher if callable(url_card_fetcher) else None,
+        url_card_extractor=url_card_extractor if callable(url_card_extractor) else None,
+    ).run(str(message or ""), state)
     if result.status == "phone":
         outbox = get("v6_callback_outbox")
         if outbox is None or result.private_phone is None:
@@ -103,6 +111,32 @@ def _trace(prompt1: str, mcp: str, prompt2: str, state: str, *, p1_ref: str | No
 
 def _runtime_trace(result: Any, *, state_status: str) -> dict[str, Any]:
     failed = result.failure_stage
+    url_card_status = getattr(result, "url_card_status", None)
+    if url_card_status:
+        prompt2_status = (
+            "failed" if failed == "prompt2"
+            else "not_called" if failed == "url_card"
+            else "accepted"
+        )
+        trace = _trace(
+            "not_called",
+            "not_called",
+            prompt2_status,
+            "failed" if failed == "state" else state_status,
+            p2_ref=result.prompt2_attempt_ref,
+        )
+        trace["url_card"] = {"status": url_card_status, "route": "prompt2_direct"}
+        if result.failure_stage:
+            trace["failure_stage"] = result.failure_stage
+        if result.error_code:
+            trace["error_code"] = result.error_code
+        if result.error_field:
+            trace["error_field"] = result.error_field
+        if result.material_status:
+            trace["material_status"] = result.material_status
+            trace["material_source"] = result.material_source
+            trace["tool_observation"] = result.tool_observation
+        return trace
     before_prompt1 = failed in {"input", "phone"}
     p1_status = "not_called" if before_prompt1 else ("failed" if result.prompt1_failed else "accepted")
     recovered_p1 = failed == "prompt1" and result.status == "completed"

@@ -50,6 +50,18 @@ _FORBIDDEN_KEY = re.compile(
 )
 PHONEISH = re.compile(r"(?<!\d)(?:\+?\d[\s().-]*){10,18}(?!\d)")
 
+# The URL-card parser is allowed to return a richer page envelope, but Prompt
+# 2 receives only this bounded, source-backed projection. In particular,
+# transport/source metadata and raw HTML never cross the model boundary.
+URL_CARD_FIELDS = frozenset({
+    "object_type", "complex_name", "developer", "area_m2", "floor", "floors_total",
+    "price_rub", "previous_price_rub", "price_history", "price_per_m2_rub",
+    "mortgage_from_rub_per_month", "completion", "construction_stage", "finishing",
+    "location", "address", "building", "section", "metro", "railway_station",
+    "highway", "listing_number", "payment_terms", "installment_terms", "special_offers",
+})
+URL_CARD_DERIVED_FIELDS = frozenset({"price_difference_rub", "price_difference_is_not_a_promotion"})
+
 
 @dataclass(frozen=True)
 class Ambiguity:
@@ -252,6 +264,45 @@ def parse_prompt2(
     return Prompt2Document(action, response, final_question)
 
 
+def project_url_card_for_prompt2(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep only the bounded URL-card fields that Prompt 2 may use."""
+
+    if not isinstance(raw, Mapping) or not isinstance(raw.get("card"), Mapping):
+        raise SimpleContractError("invalid_url_card_shape")
+    card_raw = raw["card"]
+    card = {
+        key: _json_value(card_raw[key])
+        for key in URL_CARD_FIELDS
+        if key in card_raw
+    }
+    if not card:
+        raise SimpleContractError("invalid_url_card_shape")
+
+    missing_raw = raw.get("missing", [])
+    if not isinstance(missing_raw, list) or len(missing_raw) > 12:
+        raise SimpleContractError("invalid_url_card_missing")
+    missing = [_text(item, "url_card_missing", maximum=300) for item in missing_raw]
+
+    derived_raw = raw.get("derived")
+    if not isinstance(derived_raw, Mapping):
+        raise SimpleContractError("invalid_url_card_derived")
+    if derived_raw.get("price_difference_is_not_a_promotion") is not True:
+        raise SimpleContractError("invalid_url_card_derived")
+    derived = {
+        key: _json_value(derived_raw[key])
+        for key in URL_CARD_DERIVED_FIELDS
+        if key in derived_raw
+    }
+    if derived.get("price_difference_is_not_a_promotion") is not True:
+        raise SimpleContractError("invalid_url_card_derived")
+
+    result: dict[str, Any] = {"card": card, "missing": missing, "derived": derived}
+    page_updated = raw.get("page_updated")
+    if page_updated is not None:
+        result["page_updated"] = _text(page_updated, "url_card_page_updated", maximum=100)
+    return result
+
+
 def build_prompt1_input(current_message: str, dialogue_history: list[dict[str, str]], *, pending_offer: str) -> dict[str, Any]:
     if pending_offer not in {"none", "specialist_contact"}:
         raise SimpleContractError("invalid_dialogue_policy")
@@ -261,13 +312,34 @@ def build_prompt1_input(current_message: str, dialogue_history: list[dict[str, s
     }
 
 
-def build_prompt2_input(current_message: str, dialogue_history: list[dict[str, str]], result: Prompt1Document, *, offer_specialist_now: bool) -> dict[str, Any]:
+def build_prompt2_input(
+    current_message: str,
+    dialogue_history: list[dict[str, str]],
+    result: Prompt1Document | None,
+    *,
+    offer_specialist_now: bool,
+    url_card: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     if type(offer_specialist_now) is not bool:
         raise SimpleContractError("invalid_dialogue_policy")
-    plain = result.plain()
+    if result is None and url_card is None:
+        raise SimpleContractError("missing_prompt2_material")
+    plain = result.plain() if result is not None else {
+        "facts": [], "near": [], "params": {}, "missing": [], "ambiguity": None,
+    }
     facts = plain["facts"][:3]
     near = plain["near"][:3 - len(facts)]
-    return {"current_message": current_message, "dialogue_history": dialogue_history,
-            "property_material": {"facts": facts, "near": near, "params": plain["params"]}, "missing": plain["missing"],
-            "ambiguity": plain["ambiguity"],
-            "dialogue_policy": {"offer_specialist_now": offer_specialist_now}}
+    property_material: dict[str, Any] = {"facts": facts, "near": near, "params": plain["params"]}
+    missing = list(plain["missing"])
+    if url_card is not None:
+        projected_url_card = project_url_card_for_prompt2(url_card)
+        property_material["url_card"] = projected_url_card
+        missing = [*missing, *projected_url_card["missing"]][:12]
+    return {
+        "current_message": current_message,
+        "dialogue_history": dialogue_history,
+        "property_material": property_material,
+        "missing": missing,
+        "ambiguity": plain["ambiguity"],
+        "dialogue_policy": {"offer_specialist_now": offer_specialist_now},
+    }

@@ -3706,6 +3706,13 @@ def create_app() -> web.Application:
     v6_transport = DirectTransport(app["overmind_client"])
     app["v6_simple_prompt1_port"] = SimpleGateway(v6_transport, "prompt1")
     app["v6_simple_prompt2_port"] = SimpleGateway(v6_transport, "prompt2")
+    from nmbot_url_card import extract_novostroy_url, fetch_card, url_card_feature_enabled
+
+    # Deploying the isolated branch is the opt-in action. The environment key
+    # remains a fail-closed kill switch, so TEST needs no remote dotenv edit.
+    if url_card_feature_enabled():
+        app["v6_url_card_fetcher"] = fetch_card
+        app["v6_url_card_extractor"] = extract_novostroy_url
     app["v1_planner_port"] = V1GatewayPlannerPort(app["overmind_client"])
     app["v1_search_port"] = V1GatewaySearchPort(app["overmind_client"])
     app["v1_one_model_gpt55_port"] = V1GatewayOneModelResponsePort(app["overmind_client"])

@@ -73,6 +73,51 @@ def test_h108_material_is_preserved_literal_and_diagnostics_dropped():
     assert handoff["missing"] == raw["missing"] and "diagnostics" not in str(handoff)
 
 
+@pytest.mark.parametrize("near_count", [4, 5])
+def test_h148_continue_accepts_bounded_internal_near_material(near_count):
+    raw = {
+        "action": "continue", "facts": [],
+        "near": [{"name": f"ЖК {index}"} for index in range(near_count)],
+        "missing": [], "params": {}, "ambiguity": None,
+    }
+    assert parse_prompt1(raw).plain() == raw
+
+
+def test_h148_continue_rejects_more_than_five_near_objects():
+    raw = {
+        "action": "continue", "facts": [],
+        "near": [{"name": f"ЖК {index}"} for index in range(6)],
+        "missing": [], "params": {}, "ambiguity": None,
+    }
+    with pytest.raises(SimpleContractError, match="invalid_prompt1_bounds"):
+        parse_prompt1(raw)
+
+
+def test_h148_prompt2_projection_keeps_facts_then_first_near():
+    raw = {
+        "action": "continue",
+        "facts": [{"name": "ЖК Факт 1"}, {"name": "ЖК Факт 2"}],
+        "near": [{"name": f"ЖК Рядом {index}"} for index in range(1, 6)],
+        "missing": [], "params": {}, "ambiguity": None,
+    }
+    handoff = build_prompt2_input("x", [], parse_prompt1(raw), offer_specialist_now=False)
+    assert handoff["property_material"] == {
+        "facts": raw["facts"], "near": raw["near"][:1], "params": {},
+    }
+
+
+def test_h148_prompt2_projection_keeps_first_three_near_without_facts():
+    raw = {
+        "action": "continue", "facts": [],
+        "near": [{"name": f"ЖК Рядом {index}"} for index in range(1, 6)],
+        "missing": [], "params": {}, "ambiguity": None,
+    }
+    handoff = build_prompt2_input("x", [], parse_prompt1(raw), offer_specialist_now=False)
+    assert handoff["property_material"] == {
+        "facts": [], "near": raw["near"][:3], "params": {},
+    }
+
+
 def test_h124_c01_returned_location_name_is_preserved_literal():
     raw = {
         "action": "continue", "facts": [{"id": 2332, "name": "ЖК А", "location_name": "Западное Дегунино", "min_price": 13_605_280}],
@@ -228,6 +273,9 @@ def test_prompts_define_genuine_ambiguity_and_unique_typo_contract_statically():
     assert '- request_phone: {"action":"request_phone"}' in prompt1
     assert "верни facts=[], near=[], missing=[]" not in prompt1
     assert "ключи facts, near и missing запрещены" in prompt1
+    assert "внутренний список максимум 5" in prompt1
+    assert "в порядке от лучшей/наиболее релевантной" in prompt1
+    assert "Prompt 2 получает не более 3 объектов суммарно, сначала facts, затем near" in prompt1
     assert "ambiguity не null" in prompt2
     assert "только о параметре ambiguity.parameter" in prompt2
     assert "д о509" not in prompt1

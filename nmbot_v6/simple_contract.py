@@ -206,7 +206,7 @@ def parse_prompt1(raw: str | Mapping[str, Any]) -> Prompt1Document:
         raise SimpleContractError("invalid_prompt1_variant_shape")
     facts_raw, near_raw, missing_raw, params_raw = root["facts"], root["near"], root["missing"], root["params"]
     if (not isinstance(facts_raw, list) or len(facts_raw) > 20 or not isinstance(near_raw, list)
-            or len(near_raw) > 3 or not isinstance(missing_raw, list) or len(missing_raw) > 12
+            or len(near_raw) > 5 or not isinstance(missing_raw, list) or len(missing_raw) > 12
             or not isinstance(params_raw, Mapping) or len(params_raw) > len(PARAM_FIELDS)):
         raise SimpleContractError("invalid_prompt1_bounds")
     facts = [_literal_item(item, name="fact", allowed_keys=FACT_FIELDS) for item in facts_raw]
@@ -265,7 +265,9 @@ def build_prompt2_input(current_message: str, dialogue_history: list[dict[str, s
     if type(offer_specialist_now) is not bool:
         raise SimpleContractError("invalid_dialogue_policy")
     plain = result.plain()
+    facts = plain["facts"][:3]
+    near = plain["near"][:3 - len(facts)]
     return {"current_message": current_message, "dialogue_history": dialogue_history,
-            "property_material": {key: plain[key] for key in ("facts", "near", "params")}, "missing": plain["missing"],
+            "property_material": {"facts": facts, "near": near, "params": plain["params"]}, "missing": plain["missing"],
             "ambiguity": plain["ambiguity"],
             "dialogue_policy": {"offer_specialist_now": offer_specialist_now}}

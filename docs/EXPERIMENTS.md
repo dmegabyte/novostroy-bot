@@ -2781,6 +2781,15 @@ NotebookLM source note: `Session 2026-07-01 — selected complex formatting depl
   existing `SelectedEntity` import mismatch in `nmbot_runtime_adapter.py`.
   Neither blocker was changed under H083. Git/deploy remain gated on isolated
   review and a clean immutable source artifact.
+### H149 — V6-simple bounded near material and three-object Prompt2 projection (2026-08-14, **TEST candidate**)
+
+- **Actual:** H148's full callback matrix found a real Prompt1 failure on the follow-up `да` after a response naming five Lubertsy projects. In two of three identical direct TEST calls Prompt1 returned five grounded `near` alternatives; the mechanical `near<=3` bound rejected the document with `invalid_prompt1_bounds` before MCP or Prompt 2, producing a safe fallback. The same history also produced a valid zero-near document once, so the defect was a bounded material-shape failure rather than a proven search failure.
+- **Contract:** Prompt1 may retain up to five literal, grounded `near` alternatives in best-first order as internal bounded material. The mechanical parser accepts `near<=5` but continues to reject `near>5`, unknown fields, privacy violations and invalid variants. The existing Prompt1→Prompt2 payload boundary projects at most three objects total: exact `facts` first, then the first `near` alternatives in Prompt1 order. Prompt 2 remains the owner of public wording and one logical question.
+- **Desired:** A valid follow-up never becomes a technical fallback because four or five safe alternatives were returned internally. The client sees no more than three grounded objects, with facts preferred over alternatives. Preserve state v2, third-turn specialist policy, callback/outbox, phone privacy and rollback contracts without adding a runtime layer, retry, router or regex.
+- **Owner layer:** Prompt1 ordering/selection plus the existing mechanical parser and payload boundary. Runtime/state/gateway/adapter are unchanged.
+- **Acceptance:** near=4/5 accepted and near=6 rejected; facts-first projection totals at most three objects; repeated Lubertsy follow-up reaches Prompt 2 without `invalid_prompt1_bounds` or safe fallback; ordinary Moscow, ambiguity clarification/follow-up, specialist→phone and callback/outbox/privacy regressions remain green.
+- **Result:** Isolated candidate passed **120 tests** and compileall. Canonical focused contract/runtime/phone scopes passed **106 tests** and compileall. H149 has not yet been deployed; TEST smoke is required before marking verified.
+
 ### H148 — V6-simple continue nullable-ambiguity normalization (2026-08-14, **TEST verified**)
 
 - **Actual:** After H147 deployment, ordinary TEST requests such as `двушка в Москве` sometimes returned a valid semantic `action=continue` document without the optional wire key `ambiguity`. The narrow parser rejected that harmless serialization variant with `invalid_prompt1_variant_shape` before MCP or Prompt 2, causing a safe fallback. Direct gateway refs `2541433`, `2541434`, `2541437` reproduced the omission; candidate-parser reruns `2541440`, `2541441`, `2541442` accepted the same outputs.

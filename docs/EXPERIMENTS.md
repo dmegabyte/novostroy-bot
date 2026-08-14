@@ -67,6 +67,74 @@ summaries. Не трактуйте report как полный execution ledger. 
 только metadata compatibility, hashes и keys параметров, а не семантическое
 качество. Локальные результаты не являются доказательством production/Jivo.
 
+## Канонический реестр выводов гипотез
+
+`docs/EXPERIMENTS.md` — долговременный, отслеживаемый Git-источник решений по
+гипотезам. Логи, receipts, NotebookLM и MemPalace помогают искать evidence, но
+не заменяют запись здесь. Нельзя закрыть гипотезу только строкой `pass`, числом
+тестов или успешным health-check.
+
+### Поля жизненного цикла
+
+- **Stage** — где находится проверка:
+  `hypothesis` → `confirmed_in_test` → `candidate_green` → `regression_green`
+  → `release_ready` → `deployed_unverified` → `verified_live`.
+- **Status** — вывод проверки: `open`, `accepted`, `rejected`, `partial`,
+  `inconclusive`, `blocked` или `superseded`.
+- **Evidence level** — максимальный доказанный контур:
+  `local`, `TEST`, `full regression`, `live verified`.
+
+`accepted` означает принятие только в пределах указанного `Evidence level`;
+он не означает production без `live verified`. `blocked` означает, что
+переход дальше запрещён. Если гипотеза уточняется, старая запись сохраняется,
+а новая `H###` указывает `supersedes`/`superseded by`.
+
+### Обязательная карточка H###
+
+```md
+### H### — <название>
+
+- Opened: <UTC date/time>
+- Stage: hypothesis | confirmed_in_test | candidate_green | regression_green | release_ready | deployed_unverified | verified_live
+- Status: open | accepted | rejected | partial | inconclusive | blocked | superseded
+- Evidence level: local | TEST | full regression | live verified
+- Hypothesis: <одно проверяемое утверждение>
+- Actual / Contract / Desired: <факт / контракт / желаемый результат>
+- Owner-layer: <точный слой, файл и функция если известны>
+- Baseline: <версия, snapshot, prompt/model IDs и одинаковый input/payload>
+- Acceptance: <измеримый pass/fail критерий>
+- RED evidence: <команда, fixture, первая ошибка или ссылка на trace>
+- Change: <минимальное изменение и почему оно принадлежит owner-layer>
+- GREEN evidence: <focused, negative, stateful/integration checks>
+- Comparison/regression: <baseline vs candidate и полный regression>
+- Result: <что фактически произошло>
+- Conclusion: <главный доказанный вывод>
+- Boundary: <чего этот эксперимент не доказал>
+- Reusable rule: <что применять в следующих задачах>
+- Do not repeat: <какой подход не повторять и почему>
+- Remaining unknowns: <непроверенные риски>
+- Next hypothesis: <H### или none>
+- Supersedes / superseded by: <H### или none>
+- Evidence: <точные файлы, строки, команды, task/release IDs>
+- Closed: <UTC date/time или pending>
+```
+
+### Conclusion Gate
+
+Перед следующей гипотезой, commit или release карточка должна быть обновлена
+после последней проверки. Минимальный порядок:
+
+1. записать RED и найти owner дефекта;
+2. записать GREEN и границы сравнения;
+3. записать полный regression, включая failures;
+4. выбрать `accepted`, `rejected`, `partial`, `inconclusive` или `blocked`;
+5. сформулировать `Conclusion`, `Boundary` и `Reusable rule` обычным языком;
+6. сохранить конкретные evidence и следующую гипотезу.
+
+`25 passed / 10 failed` должно остаться карточкой со статусом `blocked`, даже
+если focused tests зелёные. Успешная новая гипотеза не переписывает старый
+неуспешный результат: она добавляется отдельной записью с явной связью.
+
 ### Правило ревизии prompt
 
 Изменение prompt начинается с полного чтения текущего текста и его контракта.
@@ -243,8 +311,10 @@ nmbot/
 1. Читает последние 5-10 строк `logs/dialogs-*.jsonl` — понимает контекст.
 2. Проверяет `docs/EXPERIMENTS.md` — какие гипотезы активны.
 3. Если планируется изменение в коде:
-   - присваивает `H###` и описывает гипотезу в `EXPERIMENTS.md`,
-   - пишет в `logs/hypotheses.jsonl` строку с `h_id, opened_at, status=open`,
+   - присваивает `H###` и заполняет обязательную карточку в
+     `docs/EXPERIMENTS.md`,
+   - при необходимости пишет вспомогательную строку в
+     `logs/hypotheses.jsonl` с `h_id, opened_at, status=open`,
    - при изменении промпта — пишет `P###` в `logs/prompts.jsonl` со старым и новым текстом.
    - передаёт Prompt Quality Guardian полный handoff: цель и ожидаемый результат,
      `Actual / Contract / Desired`, ограничения, риски, слой и модель, полный
@@ -252,7 +322,12 @@ nmbot/
      релевантные тесты, live trace/диалог, прежние решения, их результаты и причины
      неудачных попыток. Нельзя отправлять только последнее наблюдение или одну
      ошибочную реплику.
-4. После 3+ диалогов на новой версии — фиксирует outcome в `EXPERIMENTS.md` (принято/откат/нужна доработка) и ставит `status=closed` в `hypotheses.jsonl`.
+4. После focused/negative/full checks и, для UX-гипотез, достаточного числа
+   representative dialogues — закрывает Conclusion Gate в карточке: записывает
+   `Result`, `Conclusion`, `Boundary`, `Reusable rule`, `Remaining unknowns` и
+   конкретные `Evidence`. Одной строки `status=closed` в JSONL недостаточно.
+5. Старые выводы не удаляет и не переписывает: уточнение оформляет новым
+   `H###` с `supersedes`/`superseded by`.
 
 ---
 
@@ -897,6 +972,827 @@ NotebookLM source note: `Session 2026-07-01 — selected complex formatting depl
   3. Кнопка видна и после `/reset`, и в обычной беседе (не исчезает после каждого сообщения).
 - **Статус:** **открыта (planned)**. Не блокирует.
 
+### H056 — Isolated V6 logical-response hypothesis contour (2026-08-11, **local deterministic mechanics accepted; model evidence pending**)
+
+- **Actual:** V6 `parse_prompt2()` rejects malformed output, internal metadata,
+  phones, unsafe card indices and more than one question, but does not establish
+  semantic relevance or factual claim grounding. The legacy `chat_v1` evaluator
+  cannot prove this V6 Prompt2 behavior.
+- **Contract:** the orchestrator owns scenario/route; payload owns available and
+  missing facts; V6 runtime owns phone/operator state; Prompt2 only writes the
+  response under its supplied route and `question_policy`. Each hypothesis must
+  use the same payload for baseline/candidate, record a receipt and stop on the
+  first unexplained failure or regression.
+- **Desired:** a TEST-only queue that can distinguish payload identity,
+  structural Prompt2 output, and code-owned phone/operator bypass without
+  touching the primary pipeline or calling a provider by default.
+- **Owner layer:** verification for replay identity; Prompt2 for phrasing-only
+  cases; orchestrator/payload for route and assertability; runtime for phone and
+  operator bypass.
+- **Baseline / RED:** first focused run exposed two contour defects: CLI imports
+  missed the project root, and the negative-output fixture failed a required
+  phrase before its intended forbidden-claim check.
+- **Minimal change:** added `scripts/nmbot_v6_logic_contour.py`, manifest
+  `tests/fixtures/nmbot_v6_logic_contour.json`, and focused tests. The runner
+  accepts only `payload_identity`, `prompt2_output`, and `runtime_owner` cases;
+  it has no transport, provider, MCP, network or production-write path. It
+  accepts a separately supplied raw-output artifact only for local parsing and
+  writes no raw model response into receipts.
+- **GREEN / comparison:** 7 focused tests passed. The manifest validates 5
+  ordered hypotheses / 12 cases. C002 now includes a trusted-card-index replay.
+  Deterministic C001 replay identity and C005 phone/operator ownership are
+  source-executed. C002–C004 baseline text is a fixture contract, not
+  model-quality proof; it proves only that a future raw artifact will be checked
+  and stop at the first failed assertion.
+- **Result:** local deterministic mechanics accepted; no model/eval/provider,
+  MCP, SSH/VPS/Jivo or production call was made. Receipt safety reports zero for
+  model/provider/MCP/network/production writes and excludes raw outputs/private
+  phones.
+- **Conclusion:** do not change Prompt2 or the main pipeline from these fixture
+  results. The next evidence must be a bounded real Prompt2 TEST batch using the
+  exact V6 transport and the same payload hashes; its first unexplained failure
+  blocks any next behavioral hypothesis.
+- **Boundary:** unknown/conflicting fields and operator consent cannot be
+  assigned to Prompt2 by this contour alone. Phone extraction/handoff remain
+  code-owned. A `FreeAPI` provider was not found in project source/docs or
+  configured `.env` key names; do not invent an endpoint or bypass the V6
+  transport contract.
+- **Reusable rule:** a semantic prompt hypothesis needs two layers of evidence:
+  deterministic invariants first, then independently captured model artifacts;
+  structural JSON validity is not semantic relevance.
+- **Do not repeat:** do not use fixture-written baseline prose as a claim that a
+  real model improved. Do not store raw client/model text in durable receipts.
+- **Unknowns:** a stable, human-labelled golden set is still needed; no current
+  V6 raw Prompt2 output has been collected; live Jivo behavior remains unknown.
+- **Next hypothesis:** C002 real-artifact relevance replay, only when a permitted
+  V6 TEST transport execution mechanism is available.
+
+### H057 — Prompt2 TEST candidate: policy fidelity and claim boundary (2026-08-11, **open; baseline RED captured**)
+
+- **Opened / stage / evidence:** 2026-08-11; isolated V6 Prompt2 TEST batch;
+  real TEST-webhook artifacts, deterministic receipt and hashes. No Jivo,
+  production, MCP or Promptfoo/eval execution.
+- **Hypothesis:** A minimal Prompt2-only instruction that treats
+  `question_policy` as the authoritative next-question contract, copies the
+  exact route-provided `search_result.response` where required, and refuses to
+  turn absent or conflicting fields into prose claims will improve policy
+  fidelity without changing route, state, phone handling or the JSON wire shape.
+- **Actual:** The baseline batch sent 9 Prompt2 cases through the documented
+  `/webhook/openrouter-direct-test` using model
+  `google/gemini-3.1-flash-lite-preview` and the current V6 gateway. All 9
+  returned usable JSON. The deterministic queue stopped at C002 /
+  `current_question_relevance` because the returned question did not match the
+  fixture policy question. Per-case inspection found the same exact-question
+  miss in the three C002 cases and required-phrase misses in all six C003–C005
+  cases. Structural JSON, trusted-index and forbidden-claim checks passed.
+  One grounded-card answer additionally stated comfort class, walking distance
+  and infrastructure although those values were not present in trusted facts;
+  this is a semantic grounding risk not caught by the current parser.
+- **Contract:** The orchestrator-selected route and code-owned state remain
+  final. Prompt2 may only write `intro`, `cards`, and one `question` from its
+  supplied `search_result`, `trusted_mcp` and `question_policy`; it must not
+  select a route, extract a phone, infer operator consent, resolve conflicting
+  facts or invent unavailable fields. Baseline and candidate must use identical
+  dynamic user/state/plan/trusted-facts input; only the TEST prompt variant may
+  differ.
+- **Desired:** On the same 9 cases, retain strict JSON and all existing safety
+  checks, follow the route-provided question policy, preserve exact clarification
+  questions, and make no unsupported factual claims. A candidate is not accepted
+  for merely changing wording or producing a plausible answer.
+- **Owner layer:** Prompt2 instruction for presentation and claim refusal;
+  parser/validator remains code-owned for structural safety; route/state/phone
+  behavior remains outside this hypothesis.
+- **Baseline input / payload:** The exact case plans and trusted-facts objects
+  from `tests/fixtures/nmbot_v6_logic_contour.json`, with baseline payload hashes
+  recorded in `/tmp/opencode/v6-prompt2-batch-20260811T153942Z-13251/`.
+  Candidate rerun must report matching dynamic query/input hashes for all cases
+  and a distinct prompt hash only if the TEST override is active.
+- **Acceptance:** Candidate returns 9/9 responses with no transport failure;
+  all deterministic structural/trusted-index/forbidden-claim checks pass;
+  current-question and stale-context cases satisfy their policy assertions;
+  no candidate output contains a claim forbidden by its fixture. Any change in
+  route/state/operator/phone behavior, payload mismatch, missing receipt or
+  unexplained transport failure is a regression and blocks the hypothesis.
+- **Baseline / RED:** Current baseline fails the deterministic queue at C002
+  `exact_question`; full per-case matrix also records C002 question misses and
+  C003–C005 required-phrase misses. This is an explained baseline behavior
+  failure, not a transport failure.
+- **Minimal candidate change:** Create a TEST-only prompt override and runner
+  support for selecting it; do not edit `prompts/v6_answer_writer.txt`,
+  `nmbot_v6/gateway.py`, runtime/state or deployment artifacts. Keep raw model
+  responses ephemeral and receipts hash-only.
+- **Comparison:** The candidate batch returned 9/9 with no transport failure.
+  Offline preflight and the report prove equal stage, model, parameters, dynamic
+  input and query hashes for every case; only the prompt hash changed. The
+  candidate deterministic matrix had exactly the same nine diagnostic failures
+  as baseline: three `exact_question` misses and six `required_phrase_0`
+  misses. It introduced no structural, trusted-index, forbidden-claim, route or
+  state regression. In the grounded-card raw artifact, the candidate removed
+  the baseline's unsupported class/distance/infrastructure additions and kept
+  only the supplied object facts; this is a qualitative partial improvement,
+  not a pass of the full hypothesis.
+- **Result:** `partial` — transport and same-payload comparison passed; claim
+  restraint improved in the observed grounded-card case; question-policy
+  fidelity did not improve under the current payload contract. Candidate report:
+  `/tmp/opencode/v6-prompt2-candidate-20260811T154512Z-13251/batch-report.json`.
+  Candidate receipt:
+  `/tmp/opencode/v6-prompt2-candidate-20260811T154512Z-13251/deterministic-contour-receipt.json`.
+- **Conclusion:** Prompt-only wording is insufficient to make Prompt2 produce a
+  fixture-specific exact next question when the payload supplies only
+  `question_policy.question_goal`; the model selected plausible but different
+  questions. The minimal grounding instruction is useful for claim restraint,
+  but adding more phrasing rules would be prompt overfitting until a canonical
+  question contract exists in the payload. Exact fixture questions and required
+  phrases remain diagnostic labels unless the product contract confirms them.
+- **Boundary:** This evidence concerns isolated Prompt2 presentation only. It
+  does not prove live Jivo behavior, semantic grounding for every factual claim,
+  or production readiness. The parser still cannot mechanically prove prose
+  grounding. No main prompt/runtime/state/VPS/Jivo change was made.
+- **Reusable rule:** A question goal is not a canonical question. If exact
+  wording is required, the owner layer must supply an explicit bounded field;
+  Prompt2 can copy it but should not infer it from a goal. Prompt-only claim
+  restraint can reduce unsupported prose but cannot repair missing payload
+  semantics.
+- **Do not repeat:** Do not keep adding generic prompt wording to force an
+  exact question absent from the dynamic payload. Do not call the candidate
+  better from one qualitative output or aggregate fixture counts.
+- **Unknowns:** Whether a TEST-only explicit `question_policy.next_question`
+  field improves exact-question fidelity; whether those fixture questions are
+  product-canonical; and whether a deterministic claim-grounding guard is
+  required beyond the current parser.
+- **Next hypothesis:** H058 — TEST-only bounded `next_question` payload field
+  plus one prompt instruction to copy it exactly, using H057 candidate as the
+  baseline and changing no route/state/phone behavior.
+
+### H058 — TEST-only canonical next-question field (2026-08-11, **accepted narrow; H057 partial**)
+
+- **Opened / stage / evidence:** 2026-08-11; isolated V6 Prompt2 TEST batch;
+  H057's candidate is the baseline. This is a payload+prompt diagnostic only;
+  no main pipeline, runtime, state, production, Jivo, MCP or Promptfoo/eval
+  execution is allowed.
+- **Hypothesis:** Supplying one explicit `question_policy.next_question` in
+  the TEST payload and instructing Prompt2 to copy it exactly will remove the
+  question-policy misses without changing route, state, cards, phone handling
+  or the strict JSON wire shape.
+- **Actual:** H057 showed that `question_policy.question_goal` alone does not
+  determine the fixture's expected question. The current builder exposes goal,
+  mode, card count and dialogue step but no canonical next-question text.
+- **Contract:** The orchestrator/payload owner may provide a bounded next-step
+  question; Prompt2 may present it but may not choose route/state/operator/phone
+  behavior or create facts. This hypothesis uses H057's already-tested prompt
+  claim boundary as its starting point and adds only an explicit TEST overlay
+  field plus its consumption instruction.
+- **Desired:** On the same 9 cases, preserve the H057 claim-restraint behavior,
+  return the supplied exact question where present, retain parser/trusted-index
+  guards, and show no route/state/operator/phone drift.
+- **Owner layer:** payload contract plus Prompt2 presentation instruction;
+  parser/validator remains code-owned and is not expanded here.
+- **Baseline / input:** H057 candidate prompt and its 9 case payloads/outputs;
+  candidate overlay may change only `question_policy.next_question` and the
+  TEST prompt's explicit copy instruction. The report must show exactly which
+  dynamic field changed and retain stage/model/parameters equality.
+- **Acceptance:** 9/9 TEST responses, no transport failure; explicit
+  next-question cases satisfy their supplied question; structural/trusted-index/
+  forbidden checks pass; H057's grounded-card claim restraint is not regressed;
+  any route/state/operator/phone drift, payload change outside the declared
+  field, or unsupported claim blocks H058.
+- **GREEN / comparison:** The bounded candidate batch returned 9/9 with no
+  transport failure. The report proves `declared_field_overlay_ab` with only
+  `question_policy.next_question` added: base dynamic input, stage, model and
+  parameters remained equal; the prompt hash changed as declared. The full
+  per-case matrix passes `exact_question`, structural Prompt2, trusted-index and
+  forbidden checks for all 9 cases. The grounded-card output retained the H057
+  claim restraint and did not repeat the observed unsupported class/distance/
+  infrastructure additions.
+- **Result:** `accepted (narrow)` — all 9 supplied next questions were copied
+  exactly, with no route/state/operator/phone or transport regression. The
+  contour still reports six `required_phrase_0` diagnostic misses in C003-C005;
+  these are independent of H058 because those routes require empty `intro` and
+  the phrases are not supplied by the payload contract.
+- **Conclusion:** An explicit bounded `question_policy.next_question` field is
+  sufficient for exact-question fidelity; a question goal alone is not. H058
+  proves a payload-contract requirement and a minimal Prompt2 copy rule, not a
+  production prompt change. H057 claim restraint was preserved in the observed
+  grounded-card case, but prose grounding remains outside the parser contract.
+- **Boundary:** This is isolated Prompt2 TEST evidence only. It does not prove
+  live Jivo behavior, full semantic grounding, production readiness or that the
+  nine fixture questions are product-canonical. Main prompt, gateway,
+  runtime/state, VPS/Jivo and production were untouched; no MCP/eval/Promptfoo
+  call was made.
+- **Reusable rule:** If exact next-question wording matters, the owner layer
+  must provide one bounded canonical string and Prompt2 must copy it; do not
+  try to infer exact wording from an abstract goal or keep adding generic prompt
+  prose.
+- **Do not repeat:** Do not classify H058 as a full 9/9 dialogue-quality pass
+  because the unrelated advisory phrase diagnostics remain. Do not turn those
+  fixture phrases into a new static Prompt2 contract without product evidence.
+- **Unknowns:** Whether an explicit field should become part of the real
+  `build_question_policy` contract; which questions are product-canonical; and
+  whether a deterministic claim-grounding guard is required beyond the current
+  parser.
+- **Next hypothesis:** H059 — separate blocking contract assertions from
+  advisory style phrases so clarify/recover routes do not fail on intro text
+  that their own contract forbids.
+
+### H059 — TEST contour contract: blocking vs advisory phrases (2026-08-11, **accepted; H058 accepted narrow**)
+
+- **Opened / stage / evidence:** 2026-08-11; isolated V6 Prompt2 TEST contour;
+  H058 real artifact batch and receipt are the baseline. No model, MCP, eval,
+  Promptfoo, production, VPS or Jivo execution is part of this hypothesis.
+- **Hypothesis:** Required-intro phrases that are absent from the dynamic payload
+  and conflict with the `clarify`/`recover_dialogue` empty-intro contract should
+  be recorded as advisory diagnostics, not blocking failures. Separating them
+  will make the contour's first-failure gate measure the actual route/output
+  contract instead of an incompatible fixture prose preference.
+- **Actual:** H058 copied all 9 canonical questions exactly and passed the
+  structural/trusted/forbidden checks, but C003-C005 stopped on six phrase checks.
+  H058's candidate prompt explicitly requires empty `intro` for those routes;
+  the phrases only occur in fixture `baseline_output` and are not in the
+  payload's `clarification_question` or `question_policy`.
+- **Contract:** For `clarify` and `recover_dialogue`, the answer contract owns
+  empty `intro`, empty `cards` and exact `clarification_question`; optional
+  style observations must not override that contract. Blocking checks remain
+  exact question, wire shape, trusted indices, forbidden phrases/claims and
+  owner invariants.
+- **Desired:** Preserve the six phrases as visible advisory results while
+  allowing an otherwise contract-valid H058 artifact to complete the queue.
+  No prompt/model/runtime/main-pipeline change is allowed.
+- **Owner layer:** TEST contour/fixture contract; not Prompt2 behavior.
+- **Acceptance:** Manifest validates; advisory phrase misses are emitted but do
+  not set `first_failure`; the H058 raw artifact runs through all five
+  hypotheses with no blocking failure; raw output remains absent from the
+  receipt; focused tests stay green.
+- **Minimal change:** Added optional `advisory_phrases` to Prompt2 fixture
+  assertions and surfaced `advisory_checks` in receipts without including them
+  in `_first_failure`. Moved the six noncanonical intro expectations out of
+  blocking `required_phrases`; no Prompt2/main source was changed.
+- **GREEN / comparison:** The existing H058 raw artifacts replayed through the
+  updated contour across all 5 hypotheses / 12 cases with `exit_code=0` and no
+  blocking failures. All six former phrase misses remain visible as advisory
+  misses. Focused tests: 10 passed; compile and manifest validation passed. The
+  immutable replay receipt is
+  `/tmp/opencode/v6-prompt2-h058-20260811T160112Z-13251/v6-logic-receipt-d14591fae7217ab9362a.json`.
+- **Result:** `accepted` for the TEST-gate correction. The contour now measures
+  the actual route/output contract while preserving incompatible style
+  expectations as diagnostics.
+- **Conclusion:** A false blocking assertion can make a valid hypothesis look
+  like a first failure. Required facts, exact route questions, wire shape,
+  trusted indices and forbidden claims remain blocking; optional prose style
+  remains advisory unless the product contract explicitly promotes it.
+- **Boundary:** This fixes the test contour only. It does not make the six
+  phrases product requirements, improve the model, prove semantic prose
+  grounding or authorize a main-pipeline change. The H058 raw artifacts remain
+  ephemeral; the receipt stores hashes and advisory booleans only.
+- **Reusable rule:** Every assertion must declare whether it is contract,
+  safety, or advisory style evidence. First-failure must stop only on contract
+  or safety failures; advisory misses must be reported without advancing a
+  false RED.
+- **Do not repeat:** Do not use a baseline-output phrase as a blocking product
+  requirement when the dynamic payload and route contract do not provide it.
+- **Unknowns:** A real canonical `next_question` field is still only tested in
+  the TEST overlay; semantic claim grounding remains unvalidated beyond the
+  observed H057/H058 card artifact; fixture questions still need product-owner
+  confirmation before any source change.
+- **Next hypothesis:** H060 — TEST-only semantic claim-grounding guard for
+  selected trusted-card fields, or stop if no source-backed guard can be made
+  general without overfitting.
+
+### H060 — TEST grounding guard feasibility (2026-08-11, **blocked/inconclusive**)
+
+- **Opened / stage / evidence:** 2026-08-11; read-only analysis of the existing
+  baseline, H057 and H058 Prompt2 artifacts. No new model/eval/MCP/Jivo request
+  was made.
+- **Question:** Can a general deterministic guard prove that every prose claim
+  in a Prompt2 card is supported by the selected trusted facts, without a
+  growing regex/denylist or a second semantic judge?
+- **Evidence:** The original baseline grounded-card response contained observed
+  unsupported markers for comfort class and infrastructure, while H057 and
+  H058 did not repeat those markers. All three runs retained the trusted object
+  name/metro signal. This is useful regression evidence, but marker presence is
+  not a general claim proof.
+- **Source-backed boundary:** Existing validation can prove typed card identity
+  and exact field/value containment in trusted evidence, but Prompt2 returns
+  free prose. The project rule explicitly rejects modeling natural dialogue as
+  an expanding list of words, regexes and phrase exceptions. A deterministic
+  prose checker would therefore either miss paraphrased claims or overreject
+  valid language.
+- **Result:** `blocked/inconclusive`. No safe general H060 guard was added. The
+  observed H057/H058 improvement remains qualitative and case-local; it cannot
+  authorize a production validator or prompt change.
+- **Conclusion:** To make grounding mechanically testable, the owner layer must
+  provide typed claims/field references (or a separately approved semantic
+  adjudicator). Prompt2 prose plus current trusted-card indices is insufficient
+  for proof. Do not continue with a denylist-based H060 variant.
+- **Boundary:** Main prompt, gateway, runtime/state and production remain
+  untouched. Raw outputs remain ephemeral; only safe boolean diagnostics were
+  used.
+- **Reusable rule:** Typed evidence can be validated deterministically; free
+  prose requires separate semantic adjudication. A parser pass is not grounding
+  proof.
+- **Next hypothesis:** Stop behavioral Prompt2 iterations until product/owner
+  contract defines typed claim references or explicitly accepts qualitative
+  semantic review. No further automatic TEST hypothesis is justified from the
+  current evidence.
+
+### H061 — TEST-only Prompt2 model A/B (2026-08-11, **blocked: transport**)
+
+- **Opened / stage / evidence:** 2026-08-11; isolated V6 Prompt2 TEST batch;
+  model-only diagnostic. Baseline is the H058 candidate prompt and its 9-case
+  payload set. Candidate model: `google/gemini-2.5-flash`, which is already
+  documented in project chat/presenter and model-comparison sources; this is
+  not a V6 production-model change.
+- **Hypothesis:** Some observed logical-response failures may be model-specific.
+  With identical Prompt2 prompt, dynamic input, stage, parameters and cases,
+  changing only the model may change exact-question fidelity, claim restraint
+  or structural validity.
+- **Acceptance:** At most 9 requests per model; documented TEST webhook only;
+  prompt/parameters/base dynamic hashes equal; model hash/value is the sole
+  declared difference; no transport failure; compare all returned outputs with
+  the same deterministic contour and advisory rules. No production inference
+  is allowed.
+- **Runner / preflight:** Added TEST-only model override and field-level
+  comparison. Local focused suite after the change: 14 passed; model overlay
+  preflight proved equal prompt, parameters, base dynamic input and query, with
+  only the model changed.
+- **Attempted batch:** Candidate run used 9 requested cases and the documented
+  TEST webhook with `google/gemini-2.5-flash`. The first transport attempt
+  failed with `ProbeError` before any response was returned; the safe report
+  contains zero returned calls and no raw output. Report:
+  `/tmp/opencode/v6-prompt2-h061-gemini25-20260811T-164521/batch-report.json`.
+- **Retry diagnostic:** Added a TEST-runner-only allowlist for transport
+  fallback metadata; it exposes only boolean `_upstream_error` and
+  `_safe_fallback` flags, never secrets or upstream details. Local focused tests
+  remained 14 passed. The retry again failed on the first case before any
+  response, now with both flags true. Retry report:
+  `/tmp/opencode/v6-prompt2-h061-retry-20260811T165352Z/batch-report.json`.
+- **Result:** `blocked` — acceptance is not met because no candidate artifact
+  exists and no model A/B comparison is possible. The repeated safe-fallback
+  flags identify an upstream TEST transport failure, not evidence that Gemini
+  2.5 is better or worse.
+- **Conclusion:** The TEST contour can isolate a model change correctly, but the
+  available TEST transport failed twice before returning a model response. H061
+  is conclusively transport-blocked for this session; do not infer model quality
+  or continue blind retries.
+- **Boundary:** No production, Jivo, VPS, MCP, eval or main-pipeline call was
+  made. Existing pre-dirty main files were not touched.
+- **Next step:** Resume only after the exact TEST transport failure is explained
+  and a fresh approved bounded run is possible. Until then, the model-root-cause
+  question remains unknown.
+
+### H062 — TEST-only V6 Prompt2 model smoke: Gemini 2.5 Flash Lite (2026-08-11, **blocked: transport**)
+
+- **Opened / stage / evidence:** 2026-08-11; isolated one-case Prompt2 TEST
+  smoke. Candidate `google/gemini-2.5-flash-lite` is explicitly named as the
+  separate V6 Prompt2 model in `docs/NMBOT_V6_INDEPENDENT_RUNTIME_TZ.md:284-297`;
+  this is source-backed availability, not proof of current transport health.
+- **Hypothesis:** The previous `google/gemini-2.5-flash` fallback may be specific
+  to that model route. The V6-documented Flash Lite candidate may return a
+  response through the same TEST webhook.
+- **Acceptance:** One request for the same H058 case/prompt and parameters;
+  no safe upstream fallback; valid response artifact. If smoke succeeds, a
+  bounded 9-case model A/B may be considered. If it fails, stop without model
+  quality inference.
+- **Boundary:** TEST-only; no prompt, gateway, runtime/state, VPS/Jivo,
+  production, MCP, eval or Promptfoo changes.
+- **Attempt / result:** One bounded smoke request was sent with the same case and
+  H058 prompt. It stopped before any response with
+  `_upstream_error=true` and `_safe_fallback=true`; `request_count=0`. Report:
+  `/tmp/opencode/v6-prompt2-smoke-gemini25lite-20260811T170113Z/batch-report.json`.
+  The candidate did not reach a model-quality comparison.
+- **Conclusion:** H062 is transport-blocked. Together with H061, both
+  `google/gemini-2.5-flash` and the V6-documented
+  `google/gemini-2.5-flash-lite` fail at the TEST route while current Gemini 3.1
+  succeeds. This narrows the issue to the candidate model/provider route, but
+  does not prove either model's answer quality. Stop further blind model retries.
+
+### H063 — TEST-only Prompt2 gateway smoke: Gemini 3.5 Flash (2026-08-11, **blocked: transport**)
+
+- **Actual:** Current `google/gemini-3.1-flash-lite-preview` returns through the
+  Prompt2 gateway TEST route; both tested Gemini 2.5 IDs return safe fallback
+  before model output.
+- **Contract:** Model smoke changes only the model ID and uses the same isolated
+  Prompt2 case, H058 candidate prompt, parameters and gateway transport. Exact
+  project-backed candidate ID is `google/gemini-3.5-flash`.
+- **Desired / acceptance:** One request returns a usable Prompt2 artifact with
+  no `_upstream_error`/`_safe_fallback`. Success proves route availability only;
+  quality requires a later same-payload batch. Failure stops the hypothesis.
+- **Boundary:** TEST-only; no main prompt/runtime/state, MCP, Jivo, VPS,
+  production, deploy, eval or Promptfoo mutation.
+- **Result:** The single bounded request stopped before model output with
+  `_upstream_error=true`, `_safe_fallback=true`, and `request_count=0`.
+  Report: `/tmp/opencode/v6-prompt2-smoke-gemini35-20260811T173206Z/batch-report.json`.
+- **Owner diagnostic:** A correlated owner-first reproduction proved that the
+  n8n TEST webhook itself returned HTTP `500`, status `submit_http_error`, body
+  `{code: 0, message: "No item to return was found"}` and no `task_id`. The
+  request therefore failed before Overmind task creation; this evidence does
+  not establish an OpenRouter/model rejection.
+- **Conclusion:** `google/gemini-3.5-flash` is not currently reachable through
+  this Prompt2 TEST gateway route. This is transport/provider-route evidence,
+  not an answer-quality result. Do not run the 9-case A/B until route ownership
+  explains or fixes the rejection.
+
+### H064 — Safe owner error in Prompt2 TEST report (2026-08-11, **accepted**)
+
+- **Actual:** Prompt2 TEST reports retained only generic safe-fallback flags, so
+  the n8n owner error required an extra correlated diagnostic reproduction.
+- **Contract:** Ordinary reports may contain only bounded safe owner fields:
+  task ID/status, HTTP status and structured error code/message. They must not
+  contain request payload, model output, credentials or unrestricted response.
+- **Desired:** Capture these allowlisted fields from the gateway forensic event
+  in memory and include them in `transport_failure` on the first failed request.
+- **Boundary:** TEST runner only; no transport, retry, prompt, runtime, n8n,
+  Overmind, provider or production behavior change.
+- **Result:** `_TransportMetadataProbe` now captures only bounded
+  `task_id`/`task_status`, integer `http_status`, and structured scalar
+  `code|error_code|error_message|message|status`. Request payload, unrestricted
+  body, model output and credentials are excluded. The original forensic logger
+  is restored after each request.
+- **Verification:** Focused TEST suites: `16 passed`; `py_compile` and
+  `git diff --check` passed. Synthetic coverage proves HTTP 500 + n8n message is
+  retained while a private request field is absent.
+- **Conclusion / reusable rule:** First-failure TEST reports must expose the
+  bounded immediate-owner error on the first attempt. Restricted forensic logs
+  are reserved for details not representable by this safe allowlist.
+
+### H065 — Direct gateway-agent Prompt2 TEST transport (2026-08-11, **accepted**)
+
+- **Actual:** H061-H063 used the n8n `/webhook/openrouter-direct-test` adapter.
+  That is not the direct runtime gateway-agent contour and H063 failed in n8n
+  before Overmind task creation.
+- **Contract:** Direct contour submits to Overmind `/api/v1/tasks/api` with
+  `agent_name=gateway-agent`, `endpoint=/process`, then polls task status/result.
+  Prompt2 payload/model/parameters and all TEST safety limits remain unchanged.
+- **Desired:** Add an explicit TEST runner transport mode that bypasses n8n and
+  re-run one Gemini 3.5 smoke through direct gateway-agent. Report must state
+  route and safe first-owner diagnostics.
+- **Boundary:** TEST runner only; no main gateway/runtime/prompt/state, n8n,
+  Overmind, provider, Jivo, VPS, production, deploy, eval or Promptfoo changes.
+- **Result:** Direct one-case Gemini 3.5 smoke returned a model artifact through
+  `/api/v1/tasks/api`; `request_count=1`, `transport_failure=null`. The remaining
+  `exact_question` diagnostic miss is answer behavior because the smoke omitted
+  the H058 question overlay, not transport failure. Report:
+  `/tmp/opencode/v6-prompt2-direct-gateway-gemini35-20260811T174333Z/batch-report.json`.
+- **Verification:** Direct proxy hides `_run_test_webhook_request_once`, invokes
+  only `_run_gateway_request_once`; focused suites `17 passed`, `py_compile` and
+  diff-check passed.
+- **Conclusion:** Direct gateway-agent is the correct model-comparison contour.
+  H061-H063 n8n transport failures do not describe candidate model availability
+  on this direct route.
+
+### H066 — Direct gateway-agent Prompt2 Gemini 3.1 vs 3.5 (2026-08-11, **partial: 3.5 cleaner but slower**)
+
+- **Hypothesis:** On the same 9 H058 Prompt2 cases, prompt, explicit
+  `next_question`, parameters and direct gateway-agent transport, Gemini 3.5 may
+  improve or preserve logical answer quality relative to current Gemini 3.1.
+- **Baseline / candidate:** `google/gemini-3.1-flash-lite-preview` versus
+  `google/gemini-3.5-flash`; one 9-request batch per model.
+- **Acceptance:** 9/9 returned per batch, no transport failure, fingerprints
+  prove only model differs, blocking deterministic contracts do not regress,
+  and semantic claim observations are reported separately.
+- **Boundary:** Isolated TEST only; no main pipeline, prompt/runtime/state,
+  n8n, Jivo, VPS, production, deploy, eval or Promptfoo mutation.
+- **Result:** Both direct gateway-agent batches returned `9/9`, with no
+  transport failure and no blocking deterministic failure. Comparison proves
+  equal prompt, parameters, query and dynamic input for every case; only model
+  differs. Reports:
+  - baseline 3.1: `/tmp/opencode/v6-prompt2-direct-baseline31-20260811T174420Z/batch-report.json`;
+  - candidate 3.5: `/tmp/opencode/v6-prompt2-direct-candidate35-20260811T174500Z/batch-report.json`.
+- **Semantic comparison:** Eight cases are semantically equivalent. In the
+  grounded-card case, Gemini 3.1 added unsupported `в пешей доступности`, while
+  Gemini 3.5 stayed within supplied Moscow/metro facts. No candidate forbidden
+  claim, route, question, phone/operator or structural regression was observed.
+- **Latency observation:** The 9-case baseline batch took about 33 seconds;
+  Gemini 3.5 took about 71 seconds on this run. This is a batch observation, not
+  a stable latency benchmark.
+- **Conclusion:** Gemini 3.5 is reachable and at least contract-equivalent on
+  this small Prompt2 set, with one observed grounding improvement, but roughly
+  twice the batch latency. The evidence is insufficient to replace the current
+  model; expand the human-labelled logical-response set before any main-source
+  decision.
+- **Reusable rule:** Model comparisons must use direct gateway-agent for this
+  architecture. Do not infer candidate availability from the n8n TEST adapter.
+
+### H067 — TEST runner failure signaling and raw lifecycle (2026-08-11, **accepted**)
+
+- **Actual:** The isolated runner could report `first_failure` while returning
+  process exit code `0`; raw response files and `outputs.json` also remained in
+  the selected work directory after a run.
+- **Contract:** A blocking deterministic failure must be visible to automation;
+  raw model responses are ephemeral and must not remain in the safe report
+  directory. TEST-only behavior, direct gateway-agent selection and model
+  comparison hashes remain unchanged.
+- **Desired:** Return non-zero for transport or contour failure and remove raw
+  response files after the batch, including the failure path, while retaining
+  only hash-based receipts/reports.
+- **Boundary:** TEST runner and focused tests only; no main pipeline, prompt,
+  runtime/state, provider, Jivo, VPS, production, eval or Promptfoo changes.
+- **Result:** The runner now returns exit code `2` for either transport failure
+  or blocking deterministic contour failure. Raw response files are removed in
+  the runner `finally` path, and the raw `outputs.json` artifact is no longer
+  written; reports remain hash-only.
+- **Verification:** Focused TEST suites: `19 passed`; both TEST scripts compile;
+  `git diff --check` passed. Added coverage for failure exit signaling and raw
+  directory cleanup.
+- **Conclusion / reusable rule:** A TEST batch is successful only when transport
+  and deterministic contour both pass. Raw outputs must not survive the batch;
+  retain only safe reports and receipts.
+
+### H068 — Historical real-dialogue golden set (2026-08-11, **accepted: fixture prepared**)
+
+- **Actual:** The existing historical `data/response_eval/cases.jsonl` contains
+  real development cases covering wrong context, missing data, unsupported
+  regions, off-topic input, near matches and unsupported claims.
+- **Desired:** Preserve ten redacted scenario cases as TEST-only labels for the
+  V6 Prompt2 contour, without copying raw model outputs or secrets.
+- **Result:** Added
+  `tests/fixtures/nmbot_v6_real_dialogue_golden.json` with 10 source-linked
+  cases, expected behavior, owner layer and forbidden behavior. The fixture is
+  a labeled source pack, not yet a V6 runtime payload and not a model result.
+- **Boundary:** Historical evidence only; no production status inference and
+  no main pipeline/prompt/runtime change.
+- **Next step:** Map these labels to privacy-safe V6 typed payload fixtures,
+  then run at most 10 direct `gateway-agent` cases with Gemini 3.1.
+
+### H069 — Correct historical golden projection for no-result cases (2026-08-11, **accepted: TEST batch supported**)
+
+- **Actual:** The first 10-case direct `gateway-agent` batch returned 10/10
+  responses with no transport failure, but stopped on `real_geo_empty_001` because
+  the fixture required an explanatory intro while its `clarify` action contract
+  requires an empty intro.
+- **Contract:** A completed search with no exact result must remain a `search`
+  presentation case so Prompt2 may state the boundary and ask one question.
+  `clarify` cases must keep empty `intro`/`cards` and only copy the question.
+- **Minimal TEST change:** Reclassify no-result cases `real_geo_empty_001` and
+  `real_missing_constraints_010` as `search`; keep off-topic and region-switch
+  cases as `clarify` without intro-required assertions.
+- **Boundary:** TEST manifest/fixture only; no main prompt, gateway, runtime/state,
+  production, Jivo, MCP, n8n, eval or Promptfoo changes.
+- **Next:** Run one replacement 10-case direct Gemini 3.1 batch and record the
+  deterministic result. The first batch report remains evidence of transport
+  success and a fixture-contract mismatch, not a model-quality conclusion.
+- **Result:** Reclassified the two no-result cases as `search` and kept
+  clarify-only cases free of blocking intro phrases. Replacement batch returned
+  `10/10`, with no transport failure and no blocking deterministic failure.
+  Report: `/tmp/opencode/v6-prompt2-real-golden-rerun2-20260811T181248Z/batch-report.json`.
+- **Conclusion:** The TEST contour supports all 10 historical projections for
+  JSON contract, expected action, exact question, trusted indices and forbidden
+  claims. Advisory wording is not a semantic proof; raw output was deleted by
+  the runner, so human adjudication still requires a separately approved safe
+  retention mechanism or a typed claim contract.
+
+### H070 — Boundary between MCP facts and unrelated questions (2026-08-11, **open: fixture prepared**)
+
+- **Actual:** Historical logs contain both property-specific follow-ups with
+  explicit evidence (`Можно ли забронировать?`, `Точно есть двор без машин?`)
+  and questions whose needed evidence is absent (`А ипотека по ним есть?`), plus
+  an off-topic/general question (`Расскажи анекдот`) during a search context.
+- **Desired:** Classify the question before deciding the answer source: trusted
+  MCP facts, current dialogue context, a separately allowed harmless-general
+  answer, or an honest boundary/route response.
+- **Result:** Added
+  `tests/fixtures/nmbot_v6_answer_boundary_golden.json` with 8 redacted,
+  source-linked historical cases. It contains no raw model outputs and is not a
+  production or semantic-quality claim.
+- **Boundary:** TEST-only fixture and ownership hypothesis; no prompt, gateway,
+  runtime/state, MCP, Jivo, VPS, production, eval or Promptfoo change.
+- **Next:** Obtain PromptMaster design for the smallest typed relevance/scope
+  contract, then run a bounded TEST batch. Do not let Prompt2 use model memory as
+  evidence for property facts or call MCP/search itself.
+
+### H071 — Typed answer basis for boundary decisions (2026-08-11, **partial: output contract still fails**)
+
+- **Actual:** Prompt2 receives facts and policy, but no typed indication of
+  whether the current question is answerable from property facts, dialogue
+  context, general knowledge or neither. The existing parser cannot verify that
+  distinction semantically.
+- **Contract:** Property claims remain MCP/card-only. Route/state/search remain
+  orchestrator-owned. General answers are not product-approved yet; until that
+  decision, unrelated questions are `unsupported` and must receive an honest
+  boundary response.
+- **Minimal TEST artifact:** Added
+  `tests/fixtures/nmbot_v6_answer_boundary_basis.json` with one enum field
+  `answer_basis`: `property_facts | dialogue_context | general | unsupported`.
+  The sunlight/windows example is explicitly marked `manual_synthetic`, because
+  no matching historical dialogue was found.
+- **Boundary:** TEST fixture only; no prompt, gateway, runtime/state, model,
+  MCP, Jivo, VPS, production, eval or Promptfoo change.
+- **Next:** Add the typed basis to a TEST payload projection and run a bounded
+  RED→GREEN comparison. Do not enable `general` behavior until product policy
+  explicitly approves it.
+- **Result:** Added the TEST-only answer-basis overlay and ran two bounded direct
+  batches of 10 Gemini 3.1 requests. Transport returned `10/10` both times.
+  The first case passed; `real_unsupported_region_002` failed deterministically
+  with the safe parse error `ContractError: Prompt 2 card shape is invalid`.
+  Exact raw output was not retained. Report:
+  `/tmp/opencode/v6-prompt2-h071-basis-rerun-20260811T184113Z/batch-report.json`.
+- **Conclusion:** Typed `answer_basis` is not enough by itself: the model still
+  produced an output that violated the existing `cards` JSON contract in a
+  boundary case. This is a TEST finding, not a reason to change the main
+  pipeline. Keep the typed boundary design as a candidate and investigate a
+  separate output-contract/failure-repair hypothesis only after preserving raw
+  output through an explicitly approved safe review path.
+
+### H073 — Exact Prompt2 card object schema (2026-08-11, **accepted: TEST supported**)
+
+- **Actual:** H071 had 10/10 transport responses but one response failed the
+  existing parser with `ContractError: Prompt 2 card shape is invalid`.
+- **Contract:** Every card must contain exactly two keys: `index` and `text`;
+  `index` is a non-negative integer and `text` is a non-empty string.
+- **Hypothesis:** The H071 prompt did not state the exact card key set. Adding
+  that one explicit instruction in a TEST-only candidate may remove this
+  structural failure without changing answer-basis, route, state or parser.
+- **Acceptance:** Same 10 cases, direct `gateway-agent`, no transport failure,
+  all outputs pass `prompt2_contract`, trusted indices, exact questions and
+  forbidden checks. Any failure remains TEST evidence only.
+- **Boundary:** TEST prompt fixture and `docs/EXPERIMENTS.md` only; no main
+  prompt, gateway, runtime/state, production, Jivo, MCP, eval or Promptfoo.
+- **Result:** The TEST-only candidate returned `10/10` responses through direct
+  `gateway-agent`, with no transport failure. All blocking checks passed:
+  Prompt2 JSON contract, exact card indices, exact questions and forbidden
+  claims. Report:
+  `/tmp/opencode/v6-prompt2-h073-card-schema-20260811T184942Z/batch-report.json`.
+- **Conclusion:** Explicitly stating the existing exact card schema removed the
+  observed structural failure in this 10-case TEST batch. This supports the
+  TEST hypothesis only; it does not prove universal semantic grounding or
+  justify changing the main prompt without a broader regression set.
+
+### H074 — Semantic answer-boundary regression set (2026-08-11, **accepted: fixture prepared**)
+
+- **Actual:** H073 proves only the JSON/card shape. It does not prove that the
+  answer addresses the user question or that every property claim has evidence.
+- **Desired:** Check the semantic boundary separately: property questions use
+  MCP facts, dialogue questions use only curated dialogue context, unsupported
+  questions do not receive invented answers, and route-owned actions are not
+  silently performed by Prompt2.
+- **Result:** Added
+  `tests/fixtures/nmbot_v6_semantic_answer_cases.json` with 10 redacted cases,
+  source links, expected `answer_basis`, allowed source classes, required
+  evidence markers and forbidden claims. It includes the synthetic sunlight/
+  windows case because no matching historical log was found.
+- **Boundary:** TEST fixture and local assertions only; no main prompt, gateway,
+  runtime/state, model, MCP, Jivo, VPS, production, eval or Promptfoo change.
+- **Acceptance:** The fixture is structurally valid, contains no raw outputs, and
+  each case has an explicit owner/source/boundary. Model execution is a later
+  bounded hypothesis; passing JSON alone must not mark semantic grounding green.
+- **Verification:** Fixture contains 10 cases, including the manual synthetic
+  sunlight/windows case marked `unsupported`; raw outputs are absent. TEST/local
+  suites pass `22`; `py_compile` and `git diff --check` pass.
+- **Conclusion:** The semantic test set is ready. It separates property facts,
+  dialogue context and unsupported questions. A future model run can now fail
+  for a meaningful reason (wrong source, invented claim or wrong owner), not just
+  because the JSON format is malformed.
+
+### H072 — Единый файл результатов TEST-контура (2026-08-11, **accepted**)
+
+- **Правило:** все выводы, результаты гипотез, ошибки, границы и следующие
+  шаги TEST-контура записываются в этот файл: `docs/EXPERIMENTS.md`.
+- **Не меняется:** основной pipeline, production, Jivo и runtime-код.
+- **Технические отчёты:** `/tmp/opencode/...` используются только как
+  первичные receipts запуска; итог всегда переносится сюда.
+- **Безопасность:** raw-ответы моделей не переносятся в журнал; сохраняются
+  только безопасные hashes, статусы, owner и выводы.
+
+### H075 — Executable semantic boundary batch (2026-08-11, **accepted: blocking checks supported**)
+
+- **Actual:** H074 has 10 typed semantic cases, but its assertion fixture is
+  not directly consumable by the V6 Prompt2 runner.
+- **Desired:** Project the same cases into V6 `plan`/`trusted_facts` payloads,
+  preserve the typed `answer_basis`, and run all 10 through direct
+  `gateway-agent` without changing route/runtime/main Prompt2.
+- **Boundary:** TEST manifest, overlays and receipts only; no n8n, MCP, Jivo,
+  production, eval or Promptfoo calls.
+- **Acceptance:** 10/10 returned, no transport failure, existing JSON/card/
+  index/question/forbidden checks pass. Semantic claims remain separately
+  advisory until a typed claim verifier exists.
+- **Result:** Direct `gateway-agent` batch returned `10/10` Gemini 3.1 responses,
+  with no transport failure and no blocking deterministic failure. All three
+  hypotheses and all 10 cases were supported by the existing JSON/card/index/
+  exact-question/forbidden checks. Report:
+  `/tmp/opencode/v6-prompt2-h075-semantic-20260811T190229Z/batch-report.json`.
+- **Conclusion:** The typed boundary cases are executable and the current TEST
+  prompt preserved the mechanical contract for property facts, missing mortgage
+  evidence, route-owned requests, the synthetic sunlight case and near-match
+  distinction. This is not proof of general semantic grounding: raw output is
+  deleted and the natural-language evidence markers remain advisory.
+
+### H076 — TEST raw-response retention policy (2026-08-11, **accepted: retention default**)
+
+- **Actual:** The TEST runner previously deleted raw model responses after every
+  batch, which prevented exact response review.
+- **Contract:** TEST raw responses are retained in the caller-selected workdir
+  by default with directory mode `0700` and file mode `0600`. Reports and this
+  durable ledger contain only hashes, statuses and the relative raw directory;
+  raw text is never copied into them.
+- **Change:** Added explicit `--cleanup-raw` as the only deletion switch. Without
+  it, raw responses remain available for review. Main pipeline and production
+  logs are untouched.
+- **Boundary:** TEST runner only; no prompt, gateway, runtime/state, Jivo, MCP,
+  n8n, VPS, production, eval or Promptfoo change.
+- **Result:** Re-ran the 10-case semantic batch with default retention through
+  direct `gateway-agent` using Gemini 3.1. All `10/10` responses returned, with
+  no transport failure and no blocking deterministic failure. Raw files remain
+  in `/tmp/opencode/v6-prompt2-h076-retained-20260811T190804Z/raw/`; the report
+  contains no raw text.
+- **Conclusion:** Exact response review is now possible in TEST without changing
+  the main pipeline. Deletion is opt-in only via `--cleanup-raw`.
+
+### H077 — Sales wording for unconfirmed mortgage conditions (2026-08-11, **accepted: wording rule**)
+
+- **Problem:** The technically honest phrase «Проверить ипотечные условия по
+  конкретному ЖК?» sounded dry and did not present the object’s value.
+- **Contract:** Mortgage, rate, down payment, bank approval and availability are
+  client-facing facts only when confirmed by MCP. Do not say «я уточню» or make
+  an asynchronous promise. The assistant may offer specialist handoff only when
+  the current route/payload authorizes that action.
+- **Reusable sales formula:** First show the confirmed value of the object, then
+  name the missing mortgage confirmation, then offer one concrete next step.
+- **Recommended wording:** «По самому ЖК вариант подходит, а условия семейной
+  ипотеки нужно подтвердить отдельно. Подключить специалиста?»
+- **Alternatives:**
+  - «Сам ЖК подходит вам по условиям. По семейной ипотеке нужна отдельная
+    проверка. Передать этот вариант специалисту?»
+  - «Этот ЖК можно рассмотреть. Осталось проверить, подходит ли семейная
+    ипотека. Подключить специалиста?»
+- **Boundary:** Do not use «карточка», internal system terms, invented rates,
+  banks, down payments or approval. If specialist handoff is unavailable, use a
+  truthful bounded question instead of promising a check.
+- **Evidence:** Project UX requires honest boundary → useful action and forbids
+  «я уточню»/«потом сообщу»; HubSpot consultative-selling guidance supports
+  concise relevant insight, conversational tone and a specific next question:
+  `https://blog.hubspot.com/sales/consultative-selling`.
+- **Change:** Documentation and NotebookLM note only; no main prompt, gateway,
+  runtime/state, production or Jivo change.
+
+### H078 — Historical dialogue review expansion (2026-08-11, **accepted: cases collected**)
+
+- **Actual:** The historical development file
+  `data/response_eval/cases.jsonl` contains additional boundary cases beyond
+  the first semantic set: no exact result, missing price for near matches,
+  vague location requests, long result lists, exact-vs-near separation,
+  premature operator handoff and missing budget.
+- **Result:** Added
+  `tests/fixtures/nmbot_v6_dialogue_review_cases.json` with 10 redacted,
+  source-linked TEST cases. Each records the user question, available data,
+  observed problem, owner layer, desired behavior and forbidden claims.
+  Raw historical responses are not copied.
+- **Coverage:** cases 0013, 0015, 0019, 0020, 0021, 0022, 0024, 0025,
+  0026 and 0027 from the historical development set.
+- **Boundary:** Historical evidence only; this is not current production proof.
+  Main prompt, gateway, runtime/state, Jivo, MCP, VPS, production, eval and
+  Promptfoo remain untouched.
+- **Next:** Project these labels into executable V6 payloads in batches of at
+  most 10, keeping natural-language evidence checks advisory until a typed
+  claim-to-source contract exists.
+
+### H079 — TEST Prompt2 sales and relevance wording (2026-08-11, **open: review required**)
+
+- **Actual:** H076/H075 boundary outputs are technically safe, but some are dry
+  or too implicit: missing mortgage confirmation, missing window orientation,
+  near apartments and selection rationale. Historical cases also show vague
+  requests, long lists, no exact result and premature operator handoff.
+- **Desired:** A TEST-only Prompt2 candidate should answer the current question,
+  use only the allowed evidence basis, explain a missing fact in plain customer
+  language, preserve the exact question/route contract and sound like a useful
+  real-estate consultant rather than an internal checker.
+- **Hypothesis:** Explicit instructions for relevance, evidence boundary,
+  concise benefit-led presentation and one concrete next step improve semantic
+  usefulness without inventing property, mortgage or availability facts.
+- **Owner boundary:** Orchestrator owns route/search/filter/operator decisions;
+  Prompt2 owns presentation, relevance to the supplied route, honest missing-data
+  wording and sales tone; parser owns JSON/card/phone/internal guards.
+- **Acceptance:** PromptMaster review first; then a TEST-only candidate prompt and
+  comparable batch of at most 10 cases. Blocking contract checks must not regress;
+  natural-language semantic claims remain separately labeled and advisory.
+- **Boundary:** No edit to `prompts/v6_answer_writer.txt`, gateway, runtime/state,
+  model, production, Jivo, VPS, MCP, eval or Promptfoo.
+
+### H080 — TEST A/B baseline fingerprint preserves declared overlays (2026-08-11, **accepted: runner fix**)
+
+- **Actual:** H079 A/B was blocked before any candidate model call because the
+  runner replayed the baseline prompt without the same `question_policy` and
+  `answer_basis` overlays used to create the baseline report.
+- **Contract:** A prompt A/B must compare identical payload projections; every
+  declared TEST overlay used by the baseline must be present in its offline
+  fingerprint replay.
+- **Minimal change:** TEST runner only: when a prompt candidate is compared,
+  apply the selected question overlay to the baseline fingerprint replay. No
+  main gateway, prompt, runtime or state change.
+- **Boundary:** TEST infrastructure only; no production, Jivo, MCP, n8n, eval or
+  Promptfoo change.
+- **Result:** Baseline replay now retains the selected question overlay for
+  prompt-only comparisons; local focused tests remained green.
+
+### H081 — TEST prompt A/B with unchanged overlays (2026-08-11, **accepted: runner fix**)
+
+- **Actual:** After H080, the runner still classified an unchanged question
+  overlay as a dynamic candidate change during prompt-only A/B.
+- **Contract:** If `--prompt-override` is used with the same question/answer-basis
+  overlays, comparison must allow only the prompt hash to differ.
+- **Minimal change:** TEST comparison classification only; do not alter payload
+  construction, main prompt, gateway, runtime, state or production.
+- **Result:** Prompt-only H079 comparison now treats overlays as unchanged and
+  proves the only intended change is the prompt hash.
+
 ### H011 — Restore _chat_with_retry to OvermindClient (2026-06-25, **закрыта: accepted**)
 - **Гипотеза:** `AttributeError: 'OvermindClient' object has no attribute '_chat_with_retry'` в работающем боте (15:27). Метод случайно вложен внутрь `_strip_markdown` при правке H004-bug-fix (потеря отступа).
 - **Что сделано:**
@@ -1140,3 +2036,799 @@ NotebookLM source note: `Session 2026-07-01 — selected complex formatting depl
 |---|---|---|---|
 | P001-search | chat_tester_bot.py:36-45 | 2026-06-24 | поиск с MCP, JSON `{facts, missing, params}` |
 | P001-chat   | chat_tester_bot.py:47-54 | 2026-06-24 | «Ирина», 2-4 предложения, JSON `{response, params}` |
+### H100 — isolated Prompt2 question-only refinement (2026-08-12, **deployed off; enable blocked by audit**)
+
+- **Actual:** H096 is restored and search works. H099-r2 removed the contour
+  coupling, but its candidate prompt still generates `intro`, `cards` and
+  `question` together, so the experiment can still alter presentation and does
+  not prove that only the next question changed.
+- **Contract:** The first Prompt2 call remains the exact H096 baseline and owns
+  `intro` plus trusted card selection/text. A second optional model call may
+  return only `{question}`. Prompt1, MCP/search, route, state, transport profile,
+  baseline answer and card indices remain unchanged.
+- **Desired:** With `NMBOT_V6_PROMPT2_QUESTION_REFINEMENT=question_only`, validate the
+  baseline Prompt2 response first, ask a question-only prompt for one improved
+  question, validate it, and replace only the baseline `question`. On any
+  question-call transport, JSON or validation error, return the untouched H096
+  response. With the flag off, execute the exact H096 path with no extra call.
+- **Owner layer:** static question wording only. Intro/cards, facts/near,
+  Prompt1/MCP, route/action/target/search policy, state, phone/operator activation
+  and contour remain baseline/code-owned.
+- **RED / acceptance:** prove before implementation that current H099 can change
+  intro/cards. GREEN requires deterministic tests for off-path call/payload
+  identity, intro/cards byte-equivalent JSON values, question-only successful
+  replacement, invalid/phone/internal/extra-question fallback, no MCP/tool
+  evidence and unchanged Prompt1/trusted-MCP projections.
+- **Release boundary:** no TEST deploy until focused and compatible H096 baseline
+  gates are green. Any immutable release is deployed with the flag off first;
+  live enablement requires separate confirmation and same-dialogue verification.
+- **RED result:** the H099 full-output path accepted a valid replacement object
+  containing different `intro`, `cards` and `question`; therefore it could not
+  prove question-only ownership and was superseded without deployment.
+- **GREEN result:** isolated source
+  `/tmp/opencode/nmbot-h100-question-only-prepared`, commit
+  `66f59c7058a4979f02aadb5518e86592f1f90d72`, keeps H099 full-prompt
+  substitution disabled and adds an independently gated second call only after
+  baseline validation. Focused H100 tests passed `17/17`; compatible V6 tests
+  passed `35/35`; compile and diff checks passed. The guards prove no extra call
+  when off, unchanged baseline Prompt2 payload, question-only replacement,
+  baseline fallback on transport/JSON/shape/internal/phone/multiple-question
+  failures, no MCP/tool evidence and baseline-owned state/operator semantics.
+- **Dry-run receipt:** immutable build `v6-test-h100-66f59c7-20260812` succeeded
+  without deployment. Archive SHA256
+  `65cb3cccbe73b952a49bb1d4bcbc5589c11d9664cb5271dc92a6d8f098a30fc6`;
+  manifest SHA256
+  `f320b617997f3bbdd3f737c512a744bda9ebbd40e5441f1d030bd4eeef59ac6a`;
+  fresh TEST source snapshot `vps-source-20260812-120848-24b9092580b0`,
+  manifest SHA256
+  `3ad5f20516903d94f2c05209a71bb800c704902024fd411cbf09cd9acc7706dc`.
+  H096 remained active, healthy and release-matched after the dry-run.
+- **Integration audit:** full review approved TEST deploy only with H100 absent/off.
+  Enablement remains blocked until semantic compatibility with `question_goal`,
+  a privacy-safe refiner attempt/status trace, a bounded question-length guard,
+  and a guarded env helper/status/rollback path are implemented and tested.
+- **H100-r2 acceptance before enablement:** the refined question must remain in
+  the code-owned `question_goal` class and must fail closed for incompatible
+  search/viewing/selection/layout/operator wording; operator/phone questions are
+  locked to the baseline. The parser must enforce an explicit length bound.
+  Runtime evidence must expose only bounded refiner fields (`called`, gateway,
+  parse/validator and fallback reason) and include the extra call in the safe
+  attempt count without storing prompt/output text. The TEST env route must
+  allow only `off|question_only`, retain a backup, atomically replace `.env`,
+  restart only the API, and verify health/release/readback with rollback on the
+  first failure. Same-dialogue baseline and enabled checks must preserve
+  Prompt1/MCP projections, cards, state and search results.
+- **TEST deploy-off receipt:** immutable release
+  `v6-test-h100-66f59c7-20260812` was deployed from commit
+  `66f59c7058a4979f02aadb5518e86592f1f90d72` after privacy-safe readback
+  reported `NMBOT_V6_PROMPT2_QUESTION_REFINEMENT` absent. Fresh deploy snapshot
+  `vps-source-20260812-121523-f06a6a667b1a` had manifest SHA256
+  `9380512efc798e6ee753896e5cdc4e83583b06e62adeb0ce39f9ecfab82a87d8`.
+  Post-cutover status was V6 publish, API active/healthy, release identity matched,
+  and two remote baseline smokes returned HTTP 200 with release gate accepted.
+  H100 remained absent/off and H096 release was retained for atomic rollback.
+
+### H101 — V6 central-location preservation (2026-08-12, **open: RED first**)
+
+- **Actual:** live V6 Prompt1 loses `центр Москвы` / `ЦАО` before MCP: the
+  observed safe MCP projection contains only `rooms=2, district=msk`, with
+  `facts=[]` and `near=[]`. The isolated Prompt1 parser rejects a valid
+  `params.location` field, while the existing search normalizer already maps
+  `ЦАО` and `центр Москвы` to the central districts.
+- **Contract:** preserve explicit location separately from the broad region:
+  `district=msk`, `location=ЦАО`. Do not change H100, Prompt2, MCP transport or
+  result presentation. Existing locations such as Люблино must remain unchanged.
+- **Desired:** `центр Москвы`, `ЦАО` and obvious center wording reach MCP as a
+  supported location constraint; follow-up turns retain `location` instead of
+  collapsing back to `district=msk`.
+- **Owner layer:** Prompt1 params schema, Prompt1 instructions and V6 trusted
+  constraint overlay. The search normalizer remains the owner of expanding
+  `ЦАО` into supported central districts.
+- **RED / acceptance:** parser rejection of `params.location` and live trace
+  loss of center are the RED evidence. GREEN requires deterministic acceptance
+  of short `location`, canonical center instruction, state overlay retention,
+  `ЦАО` normalization, unchanged Люблино behavior, compatible V6 tests and
+  compile/diff checks. No TEST deploy until these checks pass.
+- **GREEN result:** isolated source `/tmp/opencode/nmbot-h100-r2-audit-guards`
+  accepts bounded `location` strings/lists, preserves `location` through the
+  trusted V6 overlay, and instructs Prompt1 to emit `district=msk` separately
+  from `location=ЦАО`. Focused H101 tests passed `10/10`; compatible V6
+  constraint/exact-detail/H100 tests passed `57/57`; compile and diff checks
+  passed. No TEST mutation or H100 enablement was performed for H101.
+
+### H102 — V6 center normalization before MCP (2026-08-12, **open: RED first**)
+
+- **Actual:** H101 schema and prompt are present in the deployed TEST artifact,
+  but the live Prompt1 model still returns only `rooms=2, district=msk` for
+  `двушка в центре Москвы`; H100 is not called and MCP receives no location.
+- **Contract:** when the user explicitly says `центр Москвы`/`ЦАО` (including
+  the existing bounded center aliases), code must add only `location=ЦАО`
+  while preserving `district=msk`; the existing search normalizer expands it
+  to supported central districts. Other locations and user/model constraints
+  remain unchanged.
+- **Desired:** the real V6 Prompt1→MCP path retains center location even when
+  Prompt1 omits the optional location field.
+- **Owner layer:** V6 runtime before MCP request, using existing
+  `nmbot_v2.search_contract._is_cao_alias`; no Prompt2/H100/transport change.
+- **RED / acceptance:** local same-payload path must show Prompt1 output with
+  only `district=msk` becomes MCP constraints with `location=ЦАО` and the
+  normalizer produces central districts; non-center locations remain unchanged.
+  Then compatible tests, immutable deploy and live trace must prove the same
+  constraint before any client-facing claim.
+
+### H103 — Prompt1 center JSON contract only (2026-08-12, **open: RED first**)
+
+- **Actual:** H101 prompt mentions `location=ЦАО`, but live Prompt1 still
+  returned only `district=msk`; async transport exposes no code-owned MCP trace
+  that can repair this after the model call.
+- **Contract:** Prompt1 must return `params.location="ЦАО"` together with
+  `params.district="msk"` for explicit center-Moscow requests. This hypothesis
+  changes only static Prompt1 instructions; runtime, gateway, MCP, state, H100
+  and transport remain untouched.
+- **Desired:** a stricter JSON contract and minimal examples make the model
+  preserve the human location separately from the regional district code.
+- **Owner layer:** `prompts/v6_search_agent.txt` only.
+- **RED / acceptance:** the same Prompt1 payload must produce both fields for
+  center wording, preserve Люблино/Новую Москву/МО as non-center locations, and
+  reject `district=msk` without `location=ЦАО` in the local contract fixture.
+  If model behavior is not proven, do not deploy H103.
+
+### H104 — code-owned center constraint in Prompt1 input (2026-08-12, **open: RED first**)
+
+- **Actual:** H103 strengthened static Prompt1 instructions, but live V6 still
+  emitted only `district=msk`; H103 was deployed and rolled back. H102 already
+  carries `explicit_search_constraints` in JSON, but the model still omitted
+  location, so JSON-only emphasis was insufficient.
+- **Contract:** explicit center Moscow input carries code-owned
+  `district=msk, location=ЦАО`; the model may preserve these values but must
+  not omit or reinterpret them. Prompt2/H100/search/state/transport stay
+  unchanged.
+- **Desired:** real V6 Prompt1 output retains the code-owned center location
+  without relying on general prose alone.
+- **Owner layer:** Prompt1 input/prompt boundary only.
+- **Acceptance:** same-payload test proves the constraint is present in the
+  model-facing input; candidate model probe returns both fields twice;
+  compatible tests pass; then immutable TEST deploy and exact center smoke.
+  If live MCP still omits location, rollback immediately.
+
+### H099-r2 — isolated Prompt2 next-question decision (2026-08-12, **superseded by H100 before deploy**)
+
+- **Actual:** H099 first deployment coupled the Prompt2 experiment to the shared
+  `NMBOT_CONTOUR_PROFILE=test` setting. Enabling that setting correlated with a
+  search regression; H099 was disabled and TEST was atomically restored to
+  `v6-test-h096-budget-criteria-20260812`.
+- **Contract:** Prompt1, MCP/search, transport, state, contour profile and
+  release mode remain unchanged. Prompt2 may present only confirmed
+  `search_result`/`trusted_mcp` data and select only the next user question.
+- **Desired:** H099-r2 uses only the independent
+  `NMBOT_V6_PROMPT2_DECISION_MODE=next_question` opt-in. `off` is byte-equivalent
+  to baseline Prompt2 payload construction; `api_production` remains unchanged.
+- **Owner layer:** static Prompt2 presentation and question wording only. Route,
+  action, target, search policy, MCP, state, phone/operator activation and
+  contour are code-owned and untouched.
+- **Acceptance:** same-payload RED → minimal owner-layer change → GREEN; verify
+  exact Prompt1 projection and trusted MCP projection are identical between
+  baseline and candidate, candidate remains fail-closed when off, and an
+  `api_production + next_question` diagnostic payload does not alter search
+  inputs. No promptfoo/eval or deploy flag enablement without explicit approval.
+- **Boundary:** candidate is not production proof. H099-r2 must first be built
+  on the verified H096 baseline, deployed with the flag off, and compared via
+  TEST smoke before any enablement.
+
+### H105 addendum — advisory location assistance (2026-08-12, **open: local GREEN first**)
+
+- **Actual:** the bounded local location dictionary resolves a few known aliases,
+  but currently gives Prompt1 no useful location text for unknown explicit places.
+- **Contract:** resolved dictionary results remain code-owned hints and may be
+  applied by the existing sync merge. Unknown explicit locations remain Prompt1's
+  responsibility; they must not be copied by code into MCP params. Ambiguous
+  geographies must not select one location automatically.
+- **Desired:** pass a bounded, user-text-derived advisory `location_hint` for
+  unknown explicit locations. Prompt1 may use it to produce its own bounded
+  `params.location`; runtime must never overlay the hint or overwrite model params.
+- **Owner layer:** local location payload plus Prompt1 instruction; no n8n,
+  transport, MCP trace, Prompt2/H100 or active release changes.
+- **Acceptance:** known center/Люблино/New Moscow/MO remain resolved; unknown
+  Раменки/Сокол is visible only as an advisory hint; generic metro and conflicts
+  produce no forced constraint; model `location` is preserved for unresolved
+  hints; oversized or untrusted text is omitted; focused tests and local preview
+  pass. This does not prove MCP execution or live search because n8n returns no
+  authoritative MCP trace.
+
+### H136 — Register V6-simple adapter as release-owned API source (2026-08-14, **deploy-tool allowlist only**)
+
+- **Actual:** H134 immutable artifact preflight stopped before deploy because `scripts/nmbot_v6_simple_adapter.py` was omitted by the fixed `API_RUNTIME_SCRIPT_FILES` allowlist; importing `scripts.nmbot_runtime_adapter` then failed. VPS remained unchanged and H108 stayed active.
+- **Contract:** Add exactly `scripts/nmbot_v6_simple_adapter.py` to the existing atomic API release allowlist and focused release test. Do not weaken exclusions, allow arbitrary scripts, change candidate behavior, service, env, release identity or deployment target.
+- **Desired:** A full H134 artifact contains the imported simple adapter and passes existing atomic preflight. This infrastructure correction is verified separately before rebuilding/deploying the unchanged candidate.
+- **Status:** opened before release-tool edit; no deploy performed.
+
+### H135 — V6-simple final practical baseline rerun (2026-08-14, **isolated TEST diagnostic; no deploy/production run**)
+
+- **Actual:** H134 locally freezes a shorter identity-first prompt pair after H133 reached practical 9/10 with only C07 blocked.
+- **Contract:** Rerun the unchanged effective v2 ten-case batch with H134 prompts, unchanged code/runtime/gateway/phone/outbox, max 30 model transports / 10 P1. Practical GREEN requires C07 no wrong named-object answer and preservation of H133 C01/C02/C03/C04/C05/C06/C08/C09/C10. Minor style defects are non-blocking.
+- **Boundary:** isolated temporary source only, authorization `conversation:m0586` and practical threshold `conversation:m0760`; no service/release/production mutation, holdout or eval.
+- **Status:** prepared; no H135 external call yet.
+
+### H134 — V6-simple concise identity-first prompt pair (2026-08-14, **isolated atomic prompt revision; no model/TEST/deploy run**)
+
+- **Actual:** H133 meets the practical baseline in 9/10 cases, but C07 repeats the same hard named-object substitution despite long identity rules in both prompts. The payload exposes `params.name="Семейный"` and fact name `Семейный Дом «Олива»`; no parser/code guard is permitted by the owner boundary.
+- **Contract:** Keep identity semantic ownership exclusively in P1/P2. Replace both prompts once with the shorter PromptMaster pair `ses_000b7ca17ffed1nnu6afgs000e`, placing the named-object invariant first and removing duplicated low-priority wording. Preserve schemas, payloads, runtime, models, one P1 attempt, P2 repair, broad/strict scope, max three/one question and operator C09/C10 behavior. No code validator/router/classifier.
+- **Desired:** Close C07 without changing any non-prompt owner or regressing the practical 9/10 pass set.
+- **Boundary:** isolated `/tmp/opencode/nmbot-v6-simple-H134/source`; zero external calls during revision. Rerun requires a separate card/budget.
+- **Local result:** exact shorter P1/P2 replacements applied only to both H134 prompt files; 62 focused tests and compileall pass; every non-prompt file matches H132. Prompt hashes: P1 `61793bddf1aa24803ada04c772a655008f5bf7cdcbe314e6a4d4eab415d85837`, P2 `54c63ded8c384eb1cbc8425b8fe8c82f24bb9d1c79afbb3d55fea0c00c09cfc6`; tree SHA `b27549229c7445ef963bcb226017887bbacba5f7f66644c42f80507ae6336824`. Practical rerun remains required.
+
+### H133 — V6-simple practical baseline rerun after H132 (2026-08-14, **isolated TEST diagnostic; no deploy/production run**)
+
+- **Actual:** H132 is locally green but model behavior is unmeasured. The owner explicitly prioritizes a credible working bot over endless stylistic perfection: small wording defects are acceptable, while technical failure, wrong named object, invented facts, phone request without consent and broken operator conversion are blockers.
+- **Contract:** Rerun the same effective ten-case v2 batch with H132 prompts and unchanged runtime/gateway/parser/state/phone/outbox. Maximum 30 model transports / 10 MCP-enabled P1; stop on hard failure. Practical pass requires no technical failures, no named-object substitution, no unsupported central factual claim, no phone request inside reply, C09/C10 request_phone, maximum three shown objects and one question. Conservative or slightly dry wording is non-blocking.
+- **Boundary:** isolated temporary copy only under user authorization `conversation:m0586` and practical-threshold clarification `conversation:m0760`; no service/release/production mutation, holdout access or Promptfoo/eval.
+- **Result:** completed 10/10 with 20 calls and no hard stop. Practical passes: C01/C02/C03/C04/C05/C06/C08/C09/C10; C04 no longer asks for a phone in `reply`, C06/C08 no longer promise transfer, and C09/C10 preserve exact `request_phone`. The only release-blocking semantic RED is C07: P1 returns `Семейный Дом «Олива»` as a fact for named `ЖК Семейный`, and P2 repeats the substitution. Evidence: `/tmp/opencode/nmbot-v6-simple-H133/evidence/remote-result/`. No service/release/production mutation.
+
+### H132 — V6-simple operator consent and independent identity safeguard (2026-08-14, **isolated atomic prompt revision; no model/TEST/deploy run**)
+
+- **Actual:** H131 completed 10/10 mechanically and improved C01/C02/C03/C05 while preserving C09/C10, but C04 asks for a phone inside `reply`, C06/C08 use premature connection wording, and C07 still substitutes a longer similar-name project for the named ЖК in both prompts.
+- **Contract:** Apply exactly one full PromptMaster replacement event to P1 and P2 only. P1 enforces literal full determining-name identity; P2 independently repeats identity/scope checks. `reply` never asks for a phone or claims connect/transfer/call; it may make at most one optional specialist offer as the only question. Only a direct specialist request or related consent returns `request_phone` with empty model response. Preserve all H130 payload/schema/runtime/gateway/model/repair/state/phone/outbox/selector contracts.
+- **Desired:** Close C04/C06/C07/C08 while preserving C01/C02/C03/C05/C09/C10 and all mechanical gates.
+- **Owner/boundary:** static P1+P2 pair only, PromptMaster response `ses_000c8817cffezDF6mcmi7y1At5`; isolated candidate `/tmp/opencode/nmbot-v6-simple-H132/source`; zero model/MCP/network/eval/TEST/deploy/production calls during revision. A rerun requires a separate card and budget.
+- **Acceptance:** exact full replacements and hashes frozen; every non-prompt file equals H130; focused tests/compile/static checks pass; no semantic/live/production claim before rerun.
+- **Stop:** any partial/private patch, non-prompt diff, test failure, external call, holdout exposure or deployment/production mutation.
+- **Local result:** exact full P1/P2 replacements applied only to the two H132 prompt files; 62 focused tests and compileall pass; every non-prompt file matches H130. Prompt hashes: P1 `885013129d27caca572cbff54fb702d89df0a913c84da14bd49dec6536c9e5b8`, P2 `fdfbf113128e829f340cf4f715b812da5a810e33ed6ea470e9feb63705491411`; candidate tree SHA `df226689d3d235ae7025ce4ea8c1bccaf5ac0cd0e86dd18f248d5500725af23e`. This proves local contract only; practical model quality requires rerun.
+
+### H131 — V6-simple same-batch rerun after atomic H130 prompt revision (2026-08-14, **isolated TEST diagnostic; no deploy/production run**)
+
+- **Actual:** H130 froze one coherent P1/P2 pair revision after H128 source-linked semantic REDs and H129 corrected the defective future C01 oracle. Local contract checks are green, but no model behavior has been measured against the revised pair.
+- **Contract:** Run only the frozen ten-case development batch with H129 C01 v2 substituted for v1 C01, H130 prompt hashes, unchanged H130 runtime/gateway/parser/state/phone/outbox and a fresh max 30 model transports / 10 MCP-enabled P1 turns. Hard payload/privacy/source/transport/state/terminal/budget failure stops immediately; safe semantic outcomes are recorded for the whole authorized batch. No prompt/code/service/release/production mutation.
+- **Desired:** Measure whether the coherent revision closes the H128 identity, scope, max-three, suitability and internal-wording clusters without regressing direct operator/related consent.
+- **Boundary:** User authorization `conversation:m0586`; isolated temporary source only; separate dry-run must match C01 v2, remaining v1 cases and H130 prompt hashes before calls. TEST service files, release selector and production remain untouched. Holdout remains external to writer scope.
+- **Acceptance:** one new batch receipt/ledger; no more than 30/10 calls; source-linked semantic review against v2 oracle; no claim of TEST or production GREEN from this diagnostic.
+- **Stop:** hash mismatch, failed dry-run, any hard failure, external-budget overrun, holdout exposure, deployment or production mutation.
+- **Result:** H131 completed all 10 cases with 20 calls (10 P1, 10 P2), no repair, hard stop or budget overrun. Source-linked review preserves C01/C02/C03/C05/C09/C10 as anti-regression passes and records semantic REDs: C04 names project-level options for an unconfirmed three-room/budget match and asks for a phone inside `reply` without consent; C07 substitutes `Семейный Дом «Олива»` for named `ЖК Семейный`; C06/C08 use premature live-transfer wording (`соединить/свяжем`) rather than an explicit optional specialist offer. This is diagnostic evidence only; no service/release/production mutation and no semantic GREEN claim. Evidence: `/tmp/opencode/nmbot-v6-simple-H131/evidence/06-promptmaster-pack.json` and `remote-result/`.
+
+### H130 — V6-simple atomic P1/P2 identity and scope revision (2026-08-14, **isolated prompt revision; no model/MCP/TEST/deploy run**)
+
+- **Actual:** H128 completed 10/10 mechanics but source-linked review found independent P1 and P2 semantic failures: exact-vs-alternative and named-object identity (C03/C05/C07), project-to-unit price/scope and max-three limits (C01/C04/C05), unsupported family suitability (C02), and internal third-step wording (C08). H129 corrected only the defective C01 future oracle; it does not reclassify H128.
+- **Contract:** Apply exactly one coherent PromptMaster replacement event to both static prompt files in a new isolated candidate. Keep exact schemas/payloads, H108 gateway, one P1 research attempt, P2-only format repair, models, parser, state, phone/outbox, selector, no-INVITE_AGENT contract and call budget unchanged. Prompt 1 owns literal identity/exact-versus-alternative selection; Prompt 2 owns bounded grounded answer/scope/operator decision. No code, payload, tool, retry, model, TEST service, release or production change.
+- **Desired:** Ensure similar names or locations do not replace a named object; literal project price does not become a requested apartment price/availability; broad search shows at most three project-level orientations; no unsupported family suitability or internal counter text; direct specialist/related consent stays `request_phone`.
+- **Owner layer:** static P1+P2 prompt pair only, supported by PromptMaster response `ses_0010c799affewQKHu3cyBZCUdH` after H129 correction.
+- **Baseline/provenance:** H128 candidate `/tmp/opencode/nmbot-v6-simple-H128/source`; H128 safe batch evidence/ledger/updated PromptMaster pack; H129 correction `/tmp/opencode/nmbot-v6-simple-H129/evidence/04-development-corpus-v2-correction.json`; PromptMaster full replacements are the only prompt input.
+- **Authorization/boundary:** isolated candidate only; no model/provider/MCP/network/eval/TEST/production calls in H130. A same-batch rerun requires a new explicit run card/budget and must use the H129 effective C01 v2 oracle. Holdout remains untouched outside writer scope.
+- **Acceptance:** exact full P1/P2 replacements are frozen with before/after hashes; no runtime/payload/parser/gateway/state/phone/outbox diff; focused tests/compile/static prompt-schema check pass; C09/C10 operator/consent anti-regressions remain local-green. No semantic, TEST or production GREEN is claimed before rerun.
+- **Stop:** any change outside both prompt files/evidence, prompt replacement fragment/private exception, payload/schema drift, test failure, external call, holdout exposure or claim of semantic/live/production GREEN.
+- **Local result:** exact full P1/P2 PromptMaster replacements were applied only in `/tmp/opencode/nmbot-v6-simple-H130/source/prompts/`. H130 preserves every non-prompt file byte-for-byte from H128; 62 focused V6-simple tests and compileall pass. Prompt hashes: P1 `1512bfe76c93f714eff0c9c5657d8fe02522879938d07ec86c05c7ee65c9de30`, P2 `6105b6e443fd73276af1f0d3f4de64bdcd33181dd191919bc4b5fdd61e8df5c8`; candidate tree SHA `9bd60c40bbcc7d077d2664a13626b2dbafca4908c70b683e2c0b4c9acde14443`. No external call. This is local prompt-contract verification only; semantic rerun, holdout, TEST and production remain unproven.
+
+### H129 — V6-simple C01 oracle correction and corpus v2 freeze (2026-08-14, **fixture/oracle only; no model/MCP/TEST/deploy run**)
+
+- **Actual:** H128 completed the frozen v1 batch mechanically, but C01's current message is a broad Moscow two-room search while its v1 fixture/oracle requires an answer about synthetic ЖК Сокол. The real H128 C01 returned different literal material, so the v1 oracle cannot truthfully judge prompt behavior.
+- **Contract:** Preserve H122 corpus v1 and every H124-H128 receipt unchanged. Create a separately identified v2 corpus plus correction record: C01 evaluates only returned material, at most three shown facts, no claim that an entry/project price proves a two-room match, no metro or availability invention, and at most one useful question. No prompt, parser, runtime, gateway, model, state, phone/outbox, service or production change.
+- **Desired:** Restore a source-linked, non-contradictory oracle before any PromptMaster prompt decision, without tuning an oracle to the observed client text.
+- **Owner layer:** fixture/oracle only.
+- **Baseline/provenance:** immutable v1 `/tmp/opencode/nmbot-v6-simple-H122/evidence/04-development-corpus.json`; H128 C01 safe same-attempt evidence `/tmp/opencode/nmbot-v6-simple-H128/evidence/private/sanitized-case-evidence/C01.json`; H128 failure/pass ledger.
+- **Authorization/boundary:** offline H129 correction under owner authorization `conversation:m0586`; model/provider/MCP/network/eval/TEST/production calls equal zero. Holdout remains outside writer scope and is not created or read.
+- **Acceptance:** correction records old/new case content, reason, source refs and both corpus hashes; v2 retains 10 cases and coverage; C01 oracle has no hard-coded project/location and does not convert params/project entry price into unit or availability evidence; JSON/privacy preflight passes.
+- **Stop:** any prompt/code/model/corpus-v1 rewrite, private-data leak, invented expected fact, coverage regression, external call or claim of semantic/live/production GREEN.
+- **Status:** correction started; no external call.
+
+### H128 — V6-simple named query-context parameter reconciliation (2026-08-14, **isolated interface revision; no additional external call**)
+
+- **Actual:** H127 froze the complete finite union known before its batch and C01-C04 reached Prompt 2. C05 then stopped because the working H108 gateway returned `params.name="Сокол"` for a named property context. The value is not property evidence and is not in H127's old-H108/V2 params lists, but the key `name` is already source-backed in canonical `COMMON_FACT_FIELDS` and the safe C05 receipt proves current gateway use.
+- **Contract:** Add only literal `name` to `PARAM_FIELDS` as bounded non-factual query context. Preserve existing PII/internal-key, size/depth and JSON validation. Prompt 2 must not treat any `params`, including `name`, as proof that a returned fact is the named property. Do not add a router, named-object state, synthetic normalization, prompt/model/gateway/runtime/phone/outbox/corpus change or a retry.
+- **Desired:** Let the exact H127 C05 material reach Prompt 2, which can honestly explain that several similarly named objects were returned and ask one clarifying question, instead of emitting a technical error.
+- **Owner layer:** mechanical Prompt 1 material parser/interface only.
+- **Baseline/provenance:** H127 candidate `/tmp/opencode/nmbot-v6-simple-H127/source`; H127 C05 safe receipt `/tmp/opencode/nmbot-v6-simple-H127/evidence/private/sanitized-case-evidence/C05.json`; canonical `nmbot_v2/search_contract.py:65-81` includes `name` in `COMMON_FACT_FIELDS`; named-object query source uses an explicit entity reference in `nmbot_v2/search_contract.py:1029-1042`.
+- **Authorization/boundary:** isolated candidate `/tmp/opencode/nmbot-v6-simple-H128/source`; user authorization `conversation:m0586`. This revision consumes zero external calls. A separate batch, if locally green, retains its own 30 model/10 MCP-enabled Prompt 1 maximum.
+- **Acceptance:** C05 parses and reaches exact Prompt 2 handoff; `params.name` remains under `property_material.params` and not `facts`; unknown/PII/internal/oversized params still fail; prompts, gateway, runtime, state, phone/outbox and corpus remain unchanged; focused tests stay green.
+- **Stop:** any key outside stated provenance, factual use of params, semantic normalization, privacy regression, unexpected candidate diff, test failure or external call.
+- **Local result:** bounded named-context correction is green in the isolated candidate: 62 focused V6-simple tests and compileall passed; the saved H127 C05 material now parses and reaches the exact Prompt 2 handoff, where `params.name` remains separate from returned facts. Prompts, gateway, runtime, adapter and phone/outbox paths are byte-identical to H127. A separate frozen H128 batch has its own 30 model/10 MCP-enabled Prompt 1 maximum and receipt; no H128 external call has occurred yet.
+- **Live batch result:** batch completed with 10/10 mechanical P1→P2 turns, 20 calls (10 P1, 10 P2), no hard stop, no retry/deploy/production mutation. Semantic source-linked review is RED/unknown: P1 loses exact-vs-alternative/named-object identity in C03/C07; P2 exceeds three options and overstates project price scope in C01/C05, overstates family suitability in C02 and exposes an internal third-step phrase in C08; C04 is mixed no-result handling; C06 repeat-exclusion is unproven because the frozen history lacks shown names. Operator C09 and related-consent C10 pass exact request_phone/fixed-question gates. Receipt: `/tmp/opencode/nmbot-v6-simple-H128/evidence/04-red-batch-report.json`; full ledger/PromptMaster pack are stored beside it.
+
+### H127 — V6-simple complete source-backed H108 parameter vocabulary (2026-08-14, **isolated interface revision; no additional external call**)
+
+- **Actual:** H125 and H126 proved the literal facts path and stopped only because real H108 `params` used `only_with_flats` then `location_name` outside the hand-curated simple list. Continuing one key per model result would be an invalid patch loop.
+- **Contract:** Freeze one finite mechanical `PARAM_FIELDS` union from: (1) old immutable H108 `_PARAM_FIELDS` (`nmbot_v6/prompt1_contract.py:28-42`), (2) V2 response schema `params.propertyNames` (`schemas/v2_search_mcp_response.schema.json:13`), and (3) observed returned H108 keys `only_with_flats` and `location_name` in H125/H126 receipts. Existing safe key, value size/depth and PII/internal-key checks still apply. `params` stay non-factual request context under Prompt 2.
+- **Desired:** Accept the full known working H108 parameter vocabulary in one bounded contract, while unknown parameter keys still fail closed and no scenario/semantic normalizer is added.
+- **Owner layer:** mechanical Prompt 1 material parser/interface only.
+- **Baseline/provenance:** H126 candidate `/tmp/opencode/nmbot-v6-simple-H126/source`; H125/H126 reports and receipts; immutable H108 `nmbot_v6/prompt1_contract.py:28-42`; local V2 response schema `schemas/v2_search_mcp_response.schema.json:13`.
+- **Authorization/boundary:** isolated candidate `/tmp/opencode/nmbot-v6-simple-H127/source`; user authorization `conversation:m0586`. This revision uses zero external calls. Any H127 diagnostic batch uses a separate 30 model/10 MCP-enabled Prompt 1 maximum and receipt.
+- **Acceptance:** every key in the frozen union passes mechanical params validation; unknown/PII/internal/oversized keys still fail; C01-C03 returned material parses and reaches P2; no prompts/models/gateway/runtime/state/phone/outbox/corpus diff; focused suite remains green.
+- **Stop:** any key outside stated sources, factual use of params, semantic normalization, privacy regression, unexpected candidate diff, test failure or external call.
+- **Local result:** finite vocabulary correction is green in the isolated candidate: 61 focused V6-simple tests and compileall passed; saved real H124 C01, H125 C02 and H126 C03 material all parse and reach the exact Prompt 2 handoff. Prompts, gateway, runtime, adapter and phone/outbox paths are byte-identical to H126. A separate frozen H127 batch has its own 30 model/10 MCP-enabled Prompt 1 maximum and receipt; no H127 external call has occurred yet.
+- **Live result:** **HARD STOP** after C01-C04 completed P1→P2 and C05 used one Prompt 1 call. Total 9 calls (5 P1, 4 P2), no retry/deploy/production mutation. C05 parser failure is `invalid_param_key` for literal gateway `params.name="Сокол"`. This is a bounded named-context interface issue; H128 must prove its treatment before another batch. Receipt: `/tmp/opencode/nmbot-v6-simple-H127/evidence/04-red-batch-report.json`.
+
+### H126 — V6-simple returned H108 parameter allowlist correction (2026-08-14, **isolated interface revision; no additional external call**)
+
+- **Actual:** H125 made C01 complete through Prompt 1 → Prompt 2, then stopped at C02. The real H108 Prompt 1 material had allowed literal fact fields but returned `params.only_with_flats=true`; H121's bounded `PARAM_FIELDS` omitted that source-backed search parameter and rejected the envelope as `invalid_param_key`.
+- **Contract:** Add only `only_with_flats` to `PARAM_FIELDS`. It remains an input/search parameter passed to Prompt 2 only as non-factual request context; it does not prove any project matches or availability. Keep all fact allowlists, PII/internal-key denial, prompts, models, gateway, runtime, state, phone/outbox and corpus unchanged.
+- **Desired:** Preserve the working H108 literal result envelope including its observed search parameter, while retaining fail-closed behavior for all unknown params and without creating a semantic normalizer.
+- **Owner layer:** mechanical Prompt 1 material parser/interface only.
+- **Baseline/provenance:** H125 candidate `/tmp/opencode/nmbot-v6-simple-H125/source`; H125 C02 receipt `/tmp/opencode/nmbot-v6-simple-H125/evidence/private/sanitized-case-evidence/C02.json`; H125 report `/tmp/opencode/nmbot-v6-simple-H125/evidence/04-red-batch-report.json`.
+- **Authorization/boundary:** isolated candidate `/tmp/opencode/nmbot-v6-simple-H126/source`; user authorization `conversation:m0586`. This revision consumes no further external call. Any separate H126 frozen batch retains its own 30 model/10 MCP-enabled Prompt 1 maximum and receipt.
+- **Acceptance:** real H125 C02 material parses and reaches the exact Prompt 2 handoff; P2 prompt still treats params as non-factual context; unknown/PII/internal/oversized params remain rejected; focused tests remain green; no prompt/runtime/gateway/phone/outbox diff.
+- **Stop:** any additional param invention, factual use of params, semantic normalization, privacy regression, prompt/runtime/gateway change, unexplained local failure or external call.
+- **Status:** isolated correction started; no H126 external call.
+- **Live result:** **HARD STOP** after C01 and C02 passed P1→P2 and C03 used one Prompt 1 call. Total 5 calls (3 P1, 2 P2), no retry/deploy/production mutation. C03 parser failure is `invalid_param_key` for literal H108 `location_name`; a complete source-backed parameter vocabulary is required before another batch. Receipt: `/tmp/opencode/nmbot-v6-simple-H126/evidence/04-red-batch-report.json`.
+
+### H125 — V6-simple returned H108 field allowlist correction (2026-08-14, **isolated interface revision; no additional external call**)
+
+- **Actual:** H124 stopped on its first authorized Prompt 1 call. The unchanged H108 gateway returned valid literal material, but H121 rejected the source-backed `location_name` field because its mechanical `FACT_FIELDS` union did not include that real H108 result key. `id` was already allowed; no Prompt 2 call, retry or semantic review ran.
+- **Contract:** Add only `location_name` to the candidate's bounded literal material allowlist, with existing JSON depth/size and PII/internal-key rejection unchanged. Do not normalize values, add route/state semantics, change prompts/models/gateway/runtime, or relax any denylist. The field is an observed H108 result field and has a local source mapping in `nmbot_v2/semantic_planner.py` (`location_name` → `location`).
+- **Desired:** Accept the same literal H108 material that the working gateway already returns, then let the unchanged Prompt 2 grounding policy use it; retain fail-closed behavior for all other unknown keys.
+- **Owner layer:** mechanical Prompt 1 material parser/interface only.
+- **Baseline/provenance:** H121 candidate `/tmp/opencode/nmbot-v6-simple-H121/source`; H124 C01 safe receipt `/tmp/opencode/nmbot-v6-simple-H124/evidence/private/sanitized-case-evidence/C01.json`; H124 report `/tmp/opencode/nmbot-v6-simple-H124/evidence/04-red-batch-report.json`; source mapping `nmbot_v2/semantic_planner.py`.
+- **Authorization/boundary:** isolated candidate `/tmp/opencode/nmbot-v6-simple-H125/source`; user authorization `conversation:m0586`. This revision consumes no further model/MCP/network/eval/TEST/production calls. H124 is closed as a hard stop and will not be rerun from the old baseline.
+- **Acceptance:** literal C01 H108 output parses and reaches the exact Prompt 2 material handoff; unknown/PII/internal/oversized keys remain rejected; focused V6-simple and parser tests remain green; prompts, gateway, runtime and operator/phone/outbox flow remain byte-identical to H121.
+- **Stop:** any additional field invention, semantic normalization, prompt/runtime/gateway change, privacy regression, unexplained local failure or external call.
+- **Local result:** allowlist correction is green in the isolated candidate: 59 focused V6-simple tests and compileall passed; the saved real H124 C01 gateway result now parses and reaches the exact Prompt 2 handoff. Prompts, models, gateway, runtime and phone/outbox paths are unchanged. A separate frozen H125 batch may use the existing owner authorization `conversation:m0586` and the same maximum 30 model/10 MCP-enabled Prompt 1 turns; it is not a continuation of H124 and must retain its own receipt/ledger.
+- **Live result:** **HARD STOP** after H125 C01 passed P1→P2 and C02 used one Prompt 1 call. Total 3 calls (2 P1, 1 P2), no retry/deploy/production mutation. C02 parser failure is `invalid_param_key` for literal H108 `only_with_flats`; all returned fact fields were already allowed. Receipt: `/tmp/opencode/nmbot-v6-simple-H125/evidence/04-red-batch-report.json`.
+
+### H124 — V6-simple frozen 10-case live development RED batch (2026-08-14, **authorized TEST-only diagnostic; no deploy/production mutation**)
+
+- **Actual:** H121 is locally verified and H122 has ten source-backed integrated cases, but no model-quality evidence exists. The user explicitly ordered work to start after the exact proposed budget of up to 30 model calls and 10 MCP-enabled Prompt 1 turns; TEST and production have not been changed.
+- **Contract:** Run the unchanged H121 prompt pair and runtime against exactly the frozen H122 case content. Maximum 10 Prompt 1 calls, 20 Prompt 2 calls including at most one P2 format repair per case, 30 total model transports and 10 MCP-enabled Prompt 1 turns. Hard privacy, source/hash, model/route, payload/schema, transport, state or terminal-integrity failure stops further calls immediately. Safe semantic RED is recorded across the already authorized fixed batch without patching prompts or fixtures.
+- **Desired:** Produce one privacy-safe failure/pass ledger that attributes each failure to Prompt 1, Prompt 2, interface/payload, non-prompt, fixture/oracle, mixed or unknown, while preserving all passes as anti-regression contracts for a later PromptMaster decision.
+- **Owner layer:** diagnostic batch only. Prompt, parser, runtime, model IDs, transport, corpus cases, TEST services and production are immutable during H124.
+- **Baseline/provenance:** H121 isolated candidate `/tmp/opencode/nmbot-v6-simple-H121/source`, tree manifest SHA `933782f7fef197ddd7aa5c17a5ec5b365bd108f2cc882a724f0a3c25e1f2c8ca`; H122 corpus `/tmp/opencode/nmbot-v6-simple-H122/evidence/04-development-corpus.json`; frozen current `cases` canonical SHA `fa6e8842d80a071c5662991cea675ec3b7542630540f369afdb6000651e1f44e`; H121 prompt hashes P1 `8714263b7844ad7a15360227276461f33f5c14abdcc570b4f1d013bfb3205014`, P2 `2b7e6f0a0254caec84b6251fa167a262b582d80ab35cf2807f007ad2002678b4`.
+- **Authorization/boundary:** owner confirmation `conversation:m0586`, following the explicit budget proposed in `conversation:m0579`; TEST-only diagnostic model/MCP/network calls are authorized within the stated limits. Promptfoo/eval, source mutation, service restart, release switch, TEST deploy and every production mutation remain forbidden in H124.
+- **Acceptance:** offline dry-run validates hashes, exact case IDs, privacy and budgets before network; each live case records bounded sanitized per-stage input/output references, model calls, optional exact tool observation, parser/state/terminal status and oracle acceptance IDs; aggregate report preserves every failure and pass; no raw secrets, phone values or real customer data are stored.
+- **Stop:** first hard failure, any call-budget overrun, prompt/corpus/model/source drift, private data, unexpected fallback/extra model, ambiguous transport, state corruption, fixture mutation or attempt to patch from one output.
+- **Result:** **HARD STOP** after C01: 1 Prompt 1 call, 0 Prompt 2 calls, 1/30 total budget used. The gateway returned literal H108 material, but the H121 parser rejected source-backed `location_name` as `invalid_fact_field`. This is an interface allowlist failure, not a prompt-quality result. No retry, deploy, service mutation or production action occurred. Receipt: `/tmp/opencode/nmbot-v6-simple-H124/evidence/04-red-batch-report.json`.
+
+### H123 — Reconcile V6-simple TZ with working H108 material contract (2026-08-14, **docs-only reconciliation; no model/MCP/TEST/deploy run**)
+
+- **Actual:** H122 oracle preparation is structurally green for ten integrated cases, but model execution is blocked by a contradiction between the active TZ and the proven H108 result path. The TZ still requires normalized `cards`, correlated MCP trace for non-empty results and a possible P1 format-repair call; H121 uses the literal H108 result `facts / near / missing / params`, has no source-backed exact trace producer and intentionally makes one P1 gateway attempt.
+- **Contract:** For the isolated H121/H122 candidate lineage, the existing H108 gateway result is the only reusable research material boundary. Prompt 1 returns a bounded literal `{facts,near,missing,params}` envelope; Prompt 2 receives separate `current_message`, `dialogue_history`, `property_material={facts,near,params}` and `missing`. Optional exact transport trace is observation-only; `mcp=unknown` is honest and does not reject returned material. Prompt 1 performs at most one research attempt and has no research retry; Prompt 2 may use the single format-repair budget. No synthetic `scope/requested/actual/provenance`, scenario/router/follow-up/refiner/fallback or fourth semantic owner is introduced.
+- **Desired:** Make the documented candidate contract match the working contour without restoring H108's old semantic graph, so the fixed ten-case batch can be compared against the actual H121 payload and prompt pair rather than an impossible schema.
+- **Owner layer:** documentation contract/interface reconciliation only. No runtime, prompt, model, transport or production mutation is authorized by H123.
+- **Baseline/provenance:** H121 isolated candidate `/tmp/opencode/nmbot-v6-simple-H121/source`; H122 corpus `/tmp/opencode/nmbot-v6-simple-H122/evidence/04-development-corpus.json`, SHA `006e603bd9cc82b9f09548e557ffa28c92fc4ce61810bea78f333d474b02b2fb`; immutable H108 source manifest SHA `33f5eddae133908196859beed3f2f109fc9e45a4a99a720a625cf99360cac066`.
+- **Authorization/boundary:** docs-only H123 amendment under owner confirmation `conversation:m0452`; model/provider/MCP/network/eval/TEST/production calls equal zero. H121 prompt hashes and H122 corpus remain frozen. Holdout remains `not_created` outside writer scope.
+- **Acceptance:** The active TZ names one authoritative candidate material envelope, does not require unavailable trace metadata for business material, separates operational material from MCP provenance, aligns P1/P2 payload names, and marks H122 eligible for a later separately authorized model batch only after holdout isolation and exact call budget.
+- **Stop:** Any code/prompt/model change, call, holdout exposure, silent historical rewrite, or claim of semantic/live/production GREEN.
+- **Status:** reconciliation recorded; implementation/model execution remains blocked by missing exact model-call authorization and untouched holdout.
+
+### H121 — V6-simple literal H108 material handoff (2026-08-14, **isolated revision; no model/MCP/TEST/deploy run**)
+
+- **Actual:** H120 removed the mistaken `v6_tool_trace` gate, but its parser and fixtures still required synthetic `{field, scope, value}` items. The working H108 result is literal `facts / near / missing / params`: facts are named property objects, near objects carry literal `is_near`, `why_close` and `differences`, and nested values such as `ads` may be present.
+- **Contract:** Preserve the bounded literal H108 material without deriving `scope`, `requested`, `actual`, provenance or semantic claims. Prompt 2 receives exactly `current_message`, `dialogue_history`, `property_material={facts,near,params}`, and `missing`. Optional exact transport trace is observation-only; absent trace is `mcp=unknown` and never blocks material. Reject PII/internal keys, oversized values, old scenario/card envelopes and malformed JSON. Keep exactly the simple semantic owners and H118 operator/phone/outbox mechanics.
+- **Desired:** The simple candidate accepts the same useful material shape as the working bot and sends it intact to Prompt 2, without restoring H108 action/target/search-policy/follow-up/refiner/fallback layers or inventing a new transport.
+- **Owner layer:** mixed Prompt 1 contract, Prompt 1→Prompt 2 payload and static prompt pair. Phone guard, state, outbox, selector and terminal mechanics are preserved.
+- **Baseline/provenance:** H120 candidate `/tmp/opencode/nmbot-v6-simple-H120/source`; immutable H108 release `v6-test-h108-direct-gateway-cdf3cb1-20260812`; source manifest SHA `33f5eddae133908196859beed3f2f109fc9e45a4a99a720a625cf99360cac066`.
+- **Authorization/boundary:** H121 candidate `/tmp/opencode/nmbot-v6-simple-H121/source`; offline-only revision, model/provider/MCP/network/eval/TEST/production calls equal zero. PromptMaster advisory is recorded in the H121 evidence pack; no live quality or production claim is allowed.
+- **Acceptance:** Real H108-shaped fixtures with named facts, nested ads, near differences and missing string/category/object forms pass and reach P2 literally; diagnostics are dropped; synthetic field/scope/value cards and old scenario roots remain rejected; empty material reaches P2; malformed/PII/oversized material fails closed; operator/phone/outbox/selector focused regressions remain green; simple path contains no legacy semantic graph.
+- **Stop:** Any external call, prompt/model/schema change outside this revision, field invention, privacy regression, old scenario layer, unexplained focused-test failure or source-integrity drift.
+- **Status:** **local verified**; 58 focused tests passed, compileall/static/prompt-contract checks passed, real H108-shaped literal handoff/privacy check passed, and the full P1/P2 replacement is frozen in `08-revision-receipt.json`. This proves only the isolated offline contract/mechanics; model quality, TEST behavior and production readiness remain unproven. H120 RED was fixture/contract incompatibility, not evidence that the H108 gateway lacks usable material.
+
+### H122 — V6-simple frozen development corpus and oracle preflight (2026-08-14, **offline preparation; no model/MCP/TEST/deploy run**)
+
+- **Actual:** H121 has a locally verified literal H108 material contract and a coherent full P1/P2 prompt replacement, but no model-quality evidence exists. The TZ requires a fixed integrated 10-case development batch before any prompt quality conclusion.
+- **Contract:** Freeze exactly 10 redacted integrated P1→P2 cases, with source-backed oracle expectations, acceptance IDs, coverage tags, bounded H108-shaped material fixtures and no client secrets. Do not create or inspect the independent holdout in this writer-owned workspace.
+- **Desired:** A deterministic corpus/oracle manifest that can be run later only with a separately authorized exact model/MCP call budget; no one-case prompt patching and no claim of GREEN from fixture validation alone.
+- **Owner layer:** `fixture/oracle` preparation only. Prompt, runtime, transport, model and production owners are unchanged.
+- **Baseline/provenance:** H121 candidate `/tmp/opencode/nmbot-v6-simple-H121/source`; H108 source manifest SHA `33f5eddae133908196859beed3f2f109fc9e45a4a99a720a625cf99360cac066`; H121 prompt hashes are frozen in `/tmp/opencode/nmbot-v6-simple-H121/evidence/08-revision-receipt.json`.
+- **Authorization/boundary:** Offline-only H122 card and evidence root `/tmp/opencode/nmbot-v6-simple-H122/evidence/`; model/provider/MCP/network/eval/TEST/production calls equal zero. Holdout is `not_created` and must be supplied later by the owner/custodian outside this root.
+- **Acceptance:** Exactly 10 cases, at least 5 with history and at least 3 multi-turn; aggregate coverage includes first search, one/multiple ЖК, exact/near/no-result, named follow-up, changed conditions/more, missing fact, third substantive answer, direct specialist request, related/unrelated agreement and off-topic continuity. Oracle assertions are split into contract/safety/semantic/advisory and contradictions block the case.
+- **Stop:** Any oracle contradiction, leaked/private data, unspecified expected behavior, model/network/eval call, holdout exposure or attempt to alter prompts/code from H122.
+- **Status:** **prepared after H123 reconciliation, blocked before model calls**; 10/10 fixtures parse against H121, coverage is 8 history/4 multi-turn, privacy/JSON preflight is green, corpus hash is `006e603bd9cc82b9f09548e557ffa28c92fc4ce61810bea78f333d474b02b2fb`. The exact model-call budget and isolated owner/custodian holdout are still absent. No model-quality, TEST or production claim.
+
+### H120 — V6-simple reuse of working H108 material path (2026-08-14, **isolated revision; no model/MCP/TEST/deploy run**)
+
+- **Actual:** The H118 simple candidate rejects non-empty Prompt 1 results unless the gateway supplies a new `v6_tool_trace`. The verified H108 contour does not expose that field: it returns the usable Prompt 1 JSON material `facts / near / missing / params`, and the existing H108 runtime projects that material before passing it to Prompt 2. The new candidate therefore blocked ordinary search by imposing a contract absent from the working contour.
+- **Contract:** Reuse the existing H108 gateway request/result path. Prompt 1 may produce only bounded material from the returned H108 JSON; Prompt 2 receives that material plus bounded dialogue history. Do not add a transport, do not restore H108 scenario/follow-up/refiner/fallback layers, and do not claim that gateway task metadata proves an authoritative MCP call count or raw backend trace. Empty/invalid material remains an honest Prompt 2 input or a technical safe failure according to the simple contract.
+- **Desired:** Make the simple candidate use the same operational material path as the working bot while preserving exactly three semantic owners: phone guard, Prompt 1, Prompt 2. Ordinary factual search must no longer be blocked solely by absent `v6_tool_trace`; operator/phone/outbox guarantees remain unchanged.
+- **Owner layer:** mixed Prompt 1/result projection and Prompt 1→Prompt 2 interface. No new transport, classifier, scenario layer, model fallback, semantic runtime validator or production change.
+- **Baseline/provenance:** H118 candidate `/tmp/opencode/nmbot-v6-simple-H118/source`, tree manifest SHA `2accd3c275194d3a75bdffba8c6dc7f39a8e909ece30b5e4b4faaeb1d1607413`; immutable H108 release `v6-test-h108-direct-gateway-cdf3cb1-20260812`; source manifest SHA `33f5eddae133908196859beed3f2f109fc9e45a4a99a720a625cf99360cac066`.
+- **Authorization/boundary:** H120 candidate `/tmp/opencode/nmbot-v6-simple-H120/source`; owner confirmation `conversation:m4064`; model/provider/MCP/network/eval/TEST/production call budget is zero for this revision. PromptMaster advisory is required before changing model-facing prompts or payload semantics. H108, canonical runtime and production remain untouched.
+- **Acceptance:** Existing H108-shaped `facts / near / missing / params` fixtures reach the new P2 input without a `v6_tool_trace`; cards/material remain bounded and privacy-safe; no model-derived field is presented as authoritative transport telemetry; focused operator/phone/outbox tests remain green; no legacy scenario graph re-enters the V6-simple call path.
+- **Stop:** missing source-backed H108 result shape, accidental prompt/model change, third semantic owner, phone/privacy regression, or any external call. A semantic quality claim requires a later frozen development batch and separate model-call authorization under the TZ cycle.
+- **Status:** revision started; no live or production claim.
+
+### H119 — V6-simple MCP trace producer evidence blocker (2026-08-14, **offline evidence only; no code/model/MCP/TEST/deploy run**)
+
+- **Actual:** H118 proves the simple candidate accepts only an exact transport-owned `v6_tool_trace`, but the immutable H108 gateway result path returns only response text, gateway task identity and generic result metadata. No local source or saved artifact proves a producer of typed MCP trace/material; the historical artifact explicitly records that the former TEST path used model projection.
+- **Contract:** Never treat gateway task/status metadata, diagnostics, prompt text or model output as MCP provenance. Do not invent a tool, arguments, result schema or per-field types. Keep non-empty factual cards fail-closed until a backend/Overmind trace contract or real sanitized request/response fixture is available.
+- **Desired:** Establish whether a source-backed transport seam exists without external calls. If it does not, record the blocker precisely and preserve the verified operator → phone → durable outbox path instead of creating a false GREEN search path.
+- **Owner layer:** `non-prompt` evidence/transport boundary only. No prompt, model, schema, semantic state, phone or legacy-runtime change is allowed in H119.
+- **Baseline/provenance:** H118 candidate tree manifest SHA `2accd3c275194d3a75bdffba8c6dc7f39a8e909ece30b5e4b4faaeb1d1607413`; immutable H108 source manifest SHA `33f5eddae133908196859beed3f2f109fc9e45a4a99a720a625cf99360cac066`; H118 receipt `/tmp/opencode/nmbot-v6-simple-H118/evidence/08-revision-receipt.json`.
+- **Authorization/boundary:** Offline-only H119 card `/tmp/opencode/nmbot-v6-simple-H119/evidence/00-run-card.json`; model/MCP/network/eval/TEST/production calls equal zero. No semantic corpus or holdout is created. A real producer contract or sanitized fixture requires a new exact owner authorization before code or live work.
+- **Acceptance:** `_run_gateway_request_once` and saved H108 manifest are inspected; authoritative local MCP documentation is reconciled; generic/model-derived metadata is rejected; H118 operator/phone/outbox mechanical GREEN remains reusable; no runtime mutation is made to unblock search by assumption.
+- **Result:** **BLOCKED** for ordinary factual search: no source-backed transport-owned producer or typed material contract was found. H118 operator/phone/outbox mechanics remain the only verified candidate capability. H119 changed no application source, prompts, schemas or models; no external call occurred. Receipt: `/tmp/opencode/nmbot-v6-simple-H119/evidence/08-revision-receipt.json`.
+
+### H118 — V6-simple mechanical graph/trace repair (2026-08-14, **isolated revision; no model/MCP/TEST/deploy run**)
+
+- **Actual:** The isolated H117 candidate has a new linear V6-simple dispatcher, but the adapter file still contains a dead old `_run_v6_authoritative` graph and old consent/state imports. The simple direct gateway also has no verified producer of the transport-owned `v6_tool_trace`; accepting model output or generic gateway metadata would violate the simple contract.
+- **Contract:** Remove only the unreachable old V6 semantic graph while preserving V0/V1/V2/V3/V4/V5 dispatch and namespaces. Keep ordinary factual cards fail-closed until a real transport-owned `novostroym/get_flat_info` trace/material producer is proven. Do not fabricate provenance from model output, prompt text, generic task metadata or diagnostics. No prompt/model/schema semantic revision, fallback, MCP/network call, TEST or production mutation.
+- **Desired:** Candidate import/call graph contains the simple V6 path without dead legacy V6 semantic owners; mechanical tests prove operator/phone/outbox behavior remains isolated and the ordinary-search blocker is explicit rather than falsely GREEN.
+- **Owner layer:** `non-prompt` mechanical adapter/import graph and transport boundary only. Prompt1, Prompt2, phone semantics, legacy runtime implementations and production are out of scope.
+- **Baseline/provenance:** H117 candidate tree manifest SHA `2f6ef0448f3485f1687ba1362935132ad29d1820974479f969944942fbe56ca5`; immutable H108 release `v6-test-h108-direct-gateway-cdf3cb1-20260812`; source snapshot manifest SHA `33f5eddae133908196859beed3f2f109fc9e45a4a99a720a625cf99360cac066`.
+- **Authorization/boundary:** Isolated candidate only at `/tmp/opencode/nmbot-v6-simple-H117/source`; exact H118 revision card is under `/tmp/opencode/nmbot-v6-simple-H118/`; model/MCP/eval/network/TEST/production call budget is zero. No prompt replacement or semantic RED/GREEN claim is authorized by this entry. A real MCP producer and any model/TEST proof require a new exact owner authorization.
+- **Acceptance:** Candidate V6 call graph excludes `_run_v6_authoritative`, `_is_phone_consent`, old V6 state/runtime/fallback/refiner imports and calls; V0/V1/V2/V3/V4/V5 selector tests remain green; transport trace tests accept only a transport-owned typed trace and reject model/generic metadata; operator direct/mixed/consent/phone/outbox/replay tests remain green; ordinary non-empty factual search remains explicitly `blocked` until producer evidence exists.
+- **Result:** H118 mechanical acceptance is independently GREEN in the isolated candidate: 51 focused tests passed; compileall passed; AST checks show the dead old V6 graph is absent and V0–V6 dispatch remains reachable; a separate adapter test passed operator request → phone capture → durable queued outbox → duplicate replay with no phone in safe context/trace. The gateway source still has no verified producer of `v6_tool_trace` or typed transport-owned property material, so ordinary factual search remains fail-closed and H118 promotion is blocked. No model/MCP/network/eval/TEST/production call occurred. Receipt: `/tmp/opencode/nmbot-v6-simple-H118/evidence/08-revision-receipt.json`.
+
+### H117 — V6-simple operator-first candidate from immutable H108 (2026-08-13, **offline intake; no model/TEST/deploy run**)
+
+- **Actual:** The H108-derived V6 path contains multiple scenario/follow-up/state owners and model fallback branches. Recent TEST dialogues returned HTTP success but failed in later Prompt1/Prompt2 turns, so ordinary answers were not reliable and the operator path was not a universal blocking guarantee.
+- **Contract:** Build a separate candidate with exactly `phone guard → Prompt 1 → Prompt 2 → state/publish`. Prompt1 returns bounded grounded `{cards,missing}` from the existing MCP boundary; Prompt2 receives separate current message/history/cards/missing and returns only `{action: reply|request_phone, response}`. Code owns only phone privacy, mechanical validation, state, durable callback outbox and fixed phone texts. Direct operator request, valid semantic consent, valid phone, replay and outbox failure are blocking acceptance paths. No scenario router, classifier, third semantic model, provider fallback, hidden legacy path or production mutation.
+- **Desired:** A candidate that gives useful grounded ordinary replies when data exists, states limits honestly when it does not, and reliably reaches phone capture for every supported operator entry path without inventing facts or duplicating callbacks.
+- **Owner layer:** Initial intake is `unknown|mixed`; the intended semantic owners are only Prompt1, Prompt2 and the pre-model phone guard. Mechanical state/outbox/transport work is not allowed to become a fourth semantic owner.
+- **Baseline/provenance:** Immutable H108 release `v6-test-h108-direct-gateway-cdf3cb1-20260812`, baseline commit `cdf3cb1ab0f082d42820cb2b9da80f56df2f0f23`, source snapshot manifest SHA `33f5eddae133908196859beed3f2f109fc9e45a4a99a720a625cf99360cac066`, archive SHA `cce2f22069908884e565622e7621baa8937b936d470c4f0a473170eb1dad40a9`. H108 is a source/transport baseline only; its old semantic scenario/fallback behavior is not inherited.
+- **Offline gate:** Start card `H117` is recorded under `/tmp/opencode/nmbot-v6-simple-H117/` with `authorized_action=offline_only`, maximum model/MCP/eval/TEST/production calls equal to zero. No development batch or holdout exists yet. This entry does not claim model quality, live TEST behavior, production readiness or deployment.
+- **Next boundary:** Before any model/MCP/TEST call, freeze the source-backed corpus, holdout and exact budget under the TZ §13 process; any prompt revision requires the exact PromptMaster pack/response contract and one atomic revision event.
+
+### H115 — modular operator-flow baseline from stable H108 (2026-08-13, **local GREEN; deploy not run**)
+
+- **Actual:** Operator-contact helpers are split between V6 state, runtime and adapter, so a small behavioral change repeatedly creates divergent producer/consumer contracts and long review cycles.
+- **Contract:** Refactor only. Extract pure bounded operator-flow helpers into one module while preserving the exact H108 state projection, consent vocabularies and runtime/adapter behavior. Do not change prompts, models, state schema, gateway, search, MCP, transport, n8n, deployment or client-visible behavior.
+- **Desired:** A stable modular baseline where future operator hypotheses change one owner module and its consumers, while each release remains one full immutable artifact.
+- **Owner layer:** `nmbot_v6/operator_flow.py` with minimal imports from `nmbot_v6/state.py`, `nmbot_v6/runtime.py` and `scripts/nmbot_runtime_adapter.py`.
+- **GREEN:** Isolated candidate `/tmp/opencode/nmbot-h115-modular`, final commit `709747ef1aa00d4eab16d49975401fd5ca0bf616`; exact H108 helper and real runtime/adapter consumer parity focused **9 passed**, compatible suite **134 passed**, compileall/diff-check GREEN, tracked worktree clean. Final integration review PASS, low risk, no findings.
+- **Boundary:** H115 intentionally preserves known H108 operator semantics, including its distinct short-consent sets and current offer-state projection. It does not claim to fix offer → consent → phone behavior. No TEST deploy or live smoke performed.
+
+### H114 — clean operator offer/consent state contract (2026-08-13, **local GREEN; deploy not run**)
+
+- **Actual:** The active H108 baseline has no isolated operator-consent transition. Prior H112/H113 work mixed offer and phone-waiting semantics and accumulated unrelated lineage.
+- **Contract:** `operator_offer` is persisted with `pending_phone=false`; only a current `operator_contact` offer plus a short code-owned consent transitions atomically to `pending_phone=true`, clears the pending interaction, increments revision and asks for the phone. Unrelated `pending_phone` state goes through ordinary runtime. Direct phone remains private and code-owned.
+- **Desired:** A clean H108-based candidate with only the state/adapter contract, no Prompt1/MCP/Prompt2/search/transport/n8n changes.
+- **Owner layer:** `nmbot_v6/state.py`, `scripts/nmbot_runtime_adapter.py`, focused operator test.
+- **RED/GREEN:** Initial implementation RED: consent branch passed `awaiting_phone` to a baseline public helper that did not accept it. Fixed locally; clean candidate gate is **129 passed**, compileall and diff-check GREEN.
+- **Provenance:** Candidate `/tmp/opencode/nmbot-operator-clean`, base H108 `cdf3cb1ab0f082d42820cb2b9da80f56df2f0f23`, baseline release `v6-test-h108-direct-gateway-cdf3cb1-20260812`, snapshot manifest SHA `33f5eddae133908196859beed3f2f109fc9e45a4a99a720a625cf99360cac066`.
+- **Boundary/unknowns:** No TEST deploy or live operator smoke yet; callback enqueue and real phone flow require a separate API-only verification. This candidate does not repair MCP/search.
+
+### H112 — operator consent survives safe MCP fallback (2026-08-13, **open: RED first**)
+
+- **Actual:** H110 correctly stops Prompt2 when required MCP returns an accepted empty envelope and publishes a safe question offering an operator, but the adapter leaves the old state unchanged. A following `да` therefore has no durable operator-consent context and can re-enter the model path.
+- **Contract:** If the published safe fallback asks `Передать оператору запрос?`, the next short consent (`да`, `ага`, `хорошо`, `давайте`) must deterministically request a phone number without Prompt1/P​​rompt2. Direct phone input remains code-owned. Consent must not trigger this path when the last bot question was unrelated.
+- **Desired:** Preserve the operator-offer pending state on this specific safe fallback and add a history/state fallback guard; callback is created only after a valid phone.
+- **Owner layer:** V6 publish adapter/state, with focused runtime/adapter tests. Prompt1 is a diagnostic fallback only, not the phone-flow owner.
+- **Acceptance:** RED reproduces empty MCP → safe operator question → `да` without phone request; GREEN returns the exact phone question with no gateway calls, unrelated `да` does not enter phone flow, direct phone remains unchanged, H110 empty-evidence and operator regressions pass. No Prompt2/search/transport/n8n change.
+- **Boundary:** This does not repair empty MCP retrieval or claim center availability; it repairs only the state/consent transition after the safe fallback.
+
+### H113 — isolate non-operator pending phone consent (2026-08-13, **open: RED first**)
+
+- **Actual:** H112 correctly handles a current operator offer, but its fallback
+  branch can still answer a short consent with a phone request when `pending_phone`
+  belongs to an unrelated question.
+- **Contract:** Only a current, state-validated `operator_contact` offer may
+  transition consent to phone capture. An unrelated pending interaction must
+  return to the ordinary runtime path without a phone request or state transition.
+- **Desired:** Close this consent boundary without changing Prompt1, MCP, Prompt2,
+  search, transport, callback privacy or the H112 operator-offer path.
+- **Owner layer:** `scripts/nmbot_runtime_adapter.py` and its focused test.
+- **Acceptance:** RED reproduces unrelated `pending_phone + да` as a phone
+  request; GREEN routes it through the ordinary runtime, keeps `awaiting_phone`
+  false, performs no consent transition, and preserves all H112/H110 tests.
+- **Boundary:** This does not repair empty MCP retrieval and does not change the
+  valid operator offer → consent → phone flow.
+
+### H111 — V6 Prompt2 literal grounding boundary (2026-08-13, **local/model GREEN; deploy not run**)
+
+- **Actual:** exact H110 Prompt2 (`0794093`, prompt SHA256
+  `e830118c09b0706e529482145063d9debffa8e049748c5fbbdd16e5a34a22f26`)
+  was called through the direct gateway for ten source-linked historical cases
+  plus two semantic boundary cases. All twelve calls completed and passed the
+  JSON/card-index contract. Eight cases were fully green. Three historical
+  cases failed only a test-owned exact-question comparison although runtime
+  supplies an abstract `question_goal`, not locked wording. One boundary case
+  made an unsupported safety inference from `yard_without_cars`.
+- **Contract:** ordinary search questions remain Prompt2-owned natural wording
+  constrained by code-owned `question_goal`; exact copying is required only
+  when code supplies a locked clarification/recovery/operator question. Card
+  prose may restate confirmed fields and their literal meaning, but must not
+  convert an amenity or boolean attribute into safety, quality, availability or
+  another unsupported conclusion. Prompt1, MCP, state, H105, H106 fallback,
+  H108 direct transport and H110 empty-evidence guard remain unchanged.
+- **Desired:** minimally strengthen the static Prompt2 grounding instruction and
+  re-run the same twelve model payloads against the exact candidate. All
+  structural, trusted-index and forbidden-claim checks must pass without
+  treating byte-exact ordinary-question wording as a grounding requirement.
+- **Owner layer:** static V6 Prompt2 grounding instruction. No parser regex,
+  runtime route, question policy, provider, state, search or transport change.
+- **RED evidence:** exhaustive receipts under
+  `/tmp/opencode/nmbot-h111-v6-batch/real-10-exhaustive/` and
+  `/tmp/opencode/nmbot-h111-v6-batch/boundary-2-exhaustive/`: three
+  `exact_question`-only failures and one unsupported `безопасность` claim from
+  `yard_without_cars`; transport and parse failures were absent.
+- **Acceptance:** `yard_without_cars` is presented literally and never as proof
+  of safety; the same 10+2 direct-gateway batch passes structural,
+  trusted-index and forbidden-claim checks; compatible V6 tests, compile/diff
+  and automatic integration review pass. No deploy without a separate decision
+  after immutable dry-run. Question-goal and byte-exact locked-question checks
+  are explicitly outside this grounding hypothesis.
+- **Boundary:** this experiment proves Prompt2 behavior only. It does not prove
+  Prompt1, MCP retrieval, state evolution, Jivo delivery or production status.
+- **Result:** exact candidate prompt SHA256
+  `4f22ba73ef5495968c2a4515b0b2ba18dd94670aba778d683719dd8215ec45f4`
+  passed the same ten historical plus two semantic direct-gateway Prompt2 cases
+  (`10/10` and `2/2`, no transport or parse failure). The grounding boundary
+  case now states the literal «двор без машин», does not infer safety and keeps
+  trusted card indices. The initial broader gate passed `91` tests; after
+  question ownership was explicitly removed from H111 scope, final reviewed
+  commit `aa7ad1e96146d2dba60c9c65ffcf071bc81e626f` passed `89` focused and
+  compatible tests;
+  compile/diff checks passed; integration review returned
+  `pass_with_findings` with no code finding. Raw model outputs were removed;
+  privacy-safe reports remain under
+  `/tmp/opencode/nmbot-h111-v6-batch/h111-real-10-r2/` and
+  `/tmp/opencode/nmbot-h111-v6-batch/h111-boundary-2-r2/`.
+- **Reusable rule:** a confirmed amenity or boolean field supports its literal
+  statement, not an inferred safety, quality, availability, suitability,
+  benefit or causal claim. Structural/grounding checks and runtime-owned
+  question checks are separate gates.
+- **Remaining unknowns:** three historical model calls differed only in ordinary
+  question wording; this is test-policy drift and is not counted as a grounding
+  RED. Code-owned byte-exact enforcement for `clarify/recover` conflicts with
+  the older optional H100 fixture contract and remains a separate unresolved
+  runtime hypothesis. Full Prompt1→MCP→Prompt2→state→Jivo behavior remains
+  untested until a separately approved immutable TEST deploy.
+- **Deploy-ready receipt:** isolated source commit
+  `aa7ad1e96146d2dba60c9c65ffcf071bc81e626f`; immutable dry-run release
+  `v6-test-h111-grounding-aa7ad1e-20260813`; archive SHA256
+  `687b7ff64154bf60ba02953d2fac799b6e03e5906b84b94d0d0139e23b96aa1f`;
+  manifest SHA256
+  `a2285c68d1ef0d8f7a5c6ba1dd1df667c3af24bbe68271efef8c2eb0f5db9790`;
+  source snapshot `vps-source-20260813-075748-a17f5804db72`, manifest SHA256
+  `eeaeb8f1740a3c65fb1b569354859821ec01eeeddc62a03541b4a0a255c773a3`.
+  Portable patch `/tmp/opencode/nmbot-h111-grounding-aa7ad1e.patch`, SHA256
+  `cdd11e93f2641806998c587a6dfa2d0b6dceb6853f42eb07c1a6fa00bd41c3c2`.
+  Dry-run only: no cutover, restart or TEST/Jivo behavior claim.
+
+### H110 — overnight twelve-case first-failure gate and safe publication (2026-08-13, **local GREEN; deploy not run**)
+
+- **Actual:** the redacted historical dialogue set contains twelve recurring
+  failure classes across location/state persistence, hard constraints,
+  exact-vs-near separation, empty evidence, Prompt2 presentation and provider
+  failure. Existing offline gates validate contracts, but do not execute one
+  bounded V6 first-failure report over the real source-linked cases.
+- **Contract:** run independent deterministic cases in parallel, classify the
+  first unmet stage as `prompt1`, `mcp`, `state`, `prompt2`, `provider` or
+  `operator`, and keep historical replay separate from live evidence. Facts,
+  hard constraints, exact/near labels, operator consent and safe fallback stay
+  code-owned; payload text is not MCP evidence. A safety patch may prevent an
+  unsupported publication, but must not claim to repair an unavailable
+  upstream MCP result.
+- **Desired:** produce a privacy-safe JSON receipt with all twelve case
+  outcomes, owner-layer hypotheses and reproducible local checks; prove or
+  refute each minimal hypothesis; prepare one isolated, immutable deployable
+  patch from the known-good H108 source without changing TEST, production,
+  n8n, Promptfoo/eval or external gateway contracts.
+- **Owner layer:** offline first-failure runner plus the smallest proven V6
+  publication boundary. State/request, search-contract, Prompt2 parser and
+  operator tests remain separate hypotheses and are not silently folded into
+  one patch.
+- **Acceptance:** twelve independent cases run with stable IDs and no raw
+  outputs; each result has first stage, evidence status, owner and hypothesis;
+  empty required evidence makes zero normal Prompt2 calls; non-empty evidence
+  preserves the existing Gemini→GPT fallback; focused, compatible, compile and
+  diff checks pass; automatic review is GREEN; no deployment occurs in this
+  experiment unless separately requested after the receipt is inspected.
+- **Boundary:** historical/offline results are not live TEST proof. No n8n or
+  MCP trace invention, no production mutation, no secrets/raw client data in
+  receipts, and no unrelated runtime/model/prompt changes.
+- **Result:** twelve independent offline cases completed with stable IDs and
+  `network=false`; all twelve contract projections were green, while runtime
+  first-failure status remained explicitly unproven because replay does not call
+  V6/MCP/provider. The isolated H110 candidate from H108 passed 20 focused and
+  105 compatible tests, compile/diff checks, and automatic integration review
+  (`pass`, low risk). Required search with an accepted envelope and empty
+  `facts/near` now stops before Prompt2, preserves state and `state_commit=false`,
+  while near-only evidence and legacy MCP contract failures retain their prior
+  paths. `mcp_contract_violation` survives adapter/API/journal sanitization.
+- **Reusable rule:** this patch prevents unsupported Prompt2 publication; it does
+  not repair or prove the upstream MCP result. TEST deployment remains a separate
+  decision requiring a fresh immutable dry-run and live behavioral evidence.
+- **Remaining unknowns:** external MCP retrieval, provider output and Jivo
+  behavior were not exercised in this offline cycle; no production or TEST
+  mutation was performed.
+
+### H109 — empty evidence must not publish invented options (2026-08-12, **open: RED first**)
+
+- **Actual:** H108 direct gateway reached Prompt1/MCP/Prompt2, but the concrete
+  `двушка в центре Москвы` turn had empty `facts/near` and Prompt2 published a
+  Зеленоград answer not supported by evidence.
+- **Contract:** when a required search has no trusted facts or near options,
+  V6 must not call/publish a normal option-presenting Prompt2 answer. It must
+  return the existing safe no-results/clarification fallback. Location helper,
+  Prompt1, MCP transport and H105 remain unchanged.
+- **Desired:** `/start` → `двушка в центре Москвы` produces either grounded
+  central options or an honest no-results clarification; it never invents
+  another location. Follow-up `давай зеленоград` is then handled as a new
+  user request, not inferred from the previous empty answer.
+- **Owner layer:** V6 runtime publication gate before Prompt2; no n8n, trace,
+  Prompt1 or H105 changes.
+- **Acceptance:** local deterministic scenario with empty trusted evidence
+  makes zero Prompt2 calls and returns safe failure; non-empty evidence keeps
+  existing Prompt2 Gemini→GPT fallback behavior; no unrelated location appears
+  in published text; focused and regression gates pass before deployment.
+- **Boundary:** no Promptfoo/eval and no TEST deploy before automatic review-gate
+  GREEN plus immutable dry-run.
+
+### H106 — Prompt2 Gemini → GPT-4.1-mini fallback (2026-08-12, **open: RED first**)
+
+- **Actual:** live H105 evidence shows Prompt2 can return invalid JSON twice on
+  the same Gemini route; the second call is currently another Gemini retry.
+- **Contract:** call Gemini once for `v6_answer_writer`; on transport failure or
+  structured Prompt2 parse failure, call `openai/gpt-4.1-mini` once. Parse both
+  responses with the unchanged Prompt2 contract. If GPT-4.1-mini also fails,
+  preserve the existing safe runtime fallback; make no third call.
+- **Desired:** reduce Prompt2 failures without changing Prompt1, MCP, H105
+  location assistance, state, schema, or safe fallback behavior.
+- **Owner layer:** Prompt2 gateway and async/sync runtime orchestration only.
+- **Acceptance:** valid Gemini means exactly one call; invalid/transport Gemini
+  means exactly Gemini then GPT-4.1-mini; invalid/transport fallback means safe
+  failure with exactly two calls; captured payloads prove model order and the
+  same prompt/schema; Prompt1/MCP/H105 regression suites remain green.
+- **Boundary:** no H100 enablement, no n8n/transport changes, no Promptfoo/eval,
+  and no TEST deploy before focused GREEN plus integration review.
+
+### H107 — direct gateway path for GPT-4.1-mini fallback (2026-08-12, **open: RED first**)
+
+- **Actual:** a direct TEST gateway diagnostic with `openai/gpt-4.1-mini`
+  returned successfully, while the deployed H106 fallback through the TEST
+  webhook ended in transport error. The H106 route therefore did not prove the
+  fallback model itself unavailable.
+- **Contract:** keep Gemini Prompt2 and Prompt1 on the existing documented TEST
+  webhook. Only the GPT-4.1-mini fallback uses the direct gateway request path;
+  it keeps the same Prompt2 query, prompt, schema and parameters. Parser and
+  safe fallback remain unchanged.
+- **Desired:** make the already reachable GPT fallback usable without changing
+  search, MCP, H105 location assistance, state or n8n.
+- **Owner layer:** V6 transport selection for the Prompt2 fallback only.
+- **Acceptance:** primary Gemini uses the TEST webhook; fallback GPT uses direct
+  gateway once; valid fallback completes; failed fallback produces the existing
+  safe response with no third call; H105/location regressions stay green.
+- **Boundary:** no active release change until automatic review-gate and a
+  TEST deploy with mandatory stage/fallback diagnostics are green.
+
+### H108 — direct gateway path for all V6 calls (2026-08-12, **open: RED first**)
+
+- **Actual:** the TEST webhook path returns Prompt2 fallback transport errors;
+  a direct gateway request with GPT-4.1-mini succeeded. V6 currently selects
+  the TEST webhook adapter whenever it is available.
+- **Contract:** Prompt1, MCP-bearing Prompt1 transport, primary Gemini Prompt2
+  and GPT-4.1-mini fallback all use the direct gateway request path. No V6 call
+  uses the TEST n8n webhook. Prompt1/MCP/H105 semantics and Prompt2 parsing stay
+  unchanged; no trace is invented.
+- **Desired:** remove the transport split so local and TEST calls use one
+  reachable gateway path and fallback failures become diagnosable.
+- **Owner layer:** V6 transport adapter selection only.
+- **Acceptance:** every V6 payload uses `_run_gateway_request_once`; Prompt1 and
+  both Prompt2 models preserve payload/schema; tool evidence remains absent unless
+  an actual typed trace exists; focused and H105 regressions pass; no third call.
+- **Boundary:** no n8n changes, no H100 enablement, no Promptfoo/eval, and no
+  TEST deploy before automatic review-gate and dry-run GREEN.
+
+### H082 — TEST Prompt2 operator handoff and sales presentation (2026-08-11, **open: candidate preparation**)
+
+- **Actual:** H079 improved relevance, near-match labeling and missing-fact wording,
+  but booking still exposed internal «карточка», unsupported mortgage/sunlight
+  branches did not offer a clear operator step, and route-owned search/refine
+  replies sounded bureaucratic. The current main prompt also requires empty
+  `intro` for clarify/recover and forbids operator presentation, while the new
+  product request requires an operator offer when confirmed data is insufficient.
+- **Contract:** Prompt2 presents only the final route and supplied `search_result`/
+  `trusted_mcp` facts. It must not change route/state, capture a phone, or invent
+  mortgage, booking, availability, property or general-knowledge claims. Operator
+  wording must be permitted by payload and must not itself mean client consent.
+- **Desired:** In a TEST-only candidate, preserve the user's exact rule: «Если для
+  ответа клиенту не хватает подтверждённых данных, не придумывай ответ: коротко
+  назови, чего не хватает, и предложи передать вопрос оператору.» Also improve
+  benefit-led, natural sales wording, near-match clarity, missing-data explanation,
+  route-owned search/refine acknowledgement, and removal of internal terms.
+- **Owner layer:** Prompt2 presentation only. A future `operator_offer_allowed`
+  flag and exact `next_question` belong to payload/orchestrator; phone/state
+  activation remains code-owned and is not changed by this hypothesis.
+- **Change:** Add a new TEST-only candidate derived from H079. Do not edit the
+  main prompt, gateway, runtime, state, parser, model or production contour.
+- **Acceptance:** PromptMaster handoff is reflected; same 10-case payloads can be
+  compared with H079; strict JSON/card/index/question/forbidden checks do not
+  regress; unsupported branches name the missing fact and use only an authorized
+  operator CTA; confirmed facts are connected to the client's criterion; near
+  differences are explicit; no internal language, promises or invented claims.
+- **Boundary:** This hypothesis is not production proof and cannot authorize a
+  main-pipeline prompt edit. A real batch requires the old question overlay to be
+  reconciled with the new operator CTA before execution.
+- **Result:** Two independent 10-case direct `gateway-agent` smoke batches were
+  run in parallel with the same H082 manifest, answer-basis overlay, operator
+  overlay and question overlay. Baseline H079 returned `10/10`, no transport
+  failure and no blocking deterministic failure. H082 returned `10/10`, no
+  transport failure, but stopped at the first blocking failure in
+  `semantic_fact_check_001`: the card said the car-free courtyard «обеспечивает
+  безопасность и тишину», while MCP only confirmed `yard_without_cars`.
+  Reports: `/tmp/opencode/v6-prompt2-h082-baseline-20260811T1945Z/batch-report.json`
+  and `/tmp/opencode/v6-prompt2-h082-candidate-20260811T1945Z/batch-report.json`.
+- **Conclusion:** H082 is **RED / not accepted**. The operator CTA and more
+  explicit missing-data wording worked in booking, mortgage and sunlight cases,
+  but the sales-benefit rule is too permissive: it allowed a causal lifestyle
+  claim not present in MCP. The candidate must not be promoted or used for a
+  main-prompt change. The next minimal hypothesis must constrain benefit wording
+  to a direct restatement or explicitly mapped field, not infer safety, quietness,
+  comfort or other consequences from a property fact.
+
+### H083 — Prompt2 operator offer → consent → phone flow (2026-08-11, **open: RED first**)
+
+- **Owner decision:** The owner accepts H082 sales wording, including natural
+  interpretations such as safety/quietness, for the separate TEST contour. This
+  supersedes only H082's wording rejection; it does not relax MCP rules for
+  prices, mortgage, booking, availability or other concrete property facts.
+- **Actual:** Runtime detects operator words in Prompt2 text and sets
+  `pending_phone=true`, but the pending interaction is still created from the
+  ordinary `question_goal` and may retain `accept_action="normal_prompt1"`.
+- **Contract:** A visible operator offer must persist one typed pending action.
+  The next standalone consent (`да`) must resolve to `operator_contact`; Prompt2
+  must be skipped and runtime must ask «На какой номер вам позвонить?». A visible
+  offer is not itself consent and must not enqueue or expose a phone.
+- **Desired:** Prove the full two-turn flow with one deterministic same-flow test:
+  Prompt2 operator CTA → pending `operator_contact` → client `да` → code-owned
+  phone question. Only after focused regression and review may a clean immutable
+  TEST artifact be committed and deployed.
+- **Boundary:** No production/Jivo deploy before GREEN. No regex scenario routing;
+  the existing bounded operator-question detector may only persist typed pending
+  intent after the model-visible CTA.
+- **RED:** The same-flow test reached the real defect: after Prompt2 returned
+  «Передать вопрос об ипотеке оператору?», runtime completed the turn with
+  `pending_phone=true` but `pending_interaction.accept_action="normal_prompt1"`.
+  Therefore the next standalone `да` was not typed as operator consent.
+- **Minimal change:** In both V6 runtime entrypoints, reuse the existing bounded
+  `_question_requests_operator()` result and, after normal completed-state
+  evolution, call the existing `mark_operator_pending()` helper. This preserves
+  the completed dialogue state while replacing only the pending interaction with
+  typed `operator_contact`; it does not treat the visible offer as consent.
+- **GREEN:** `tests/test_nmbot_v6_operator_offer_flow.py` proves the full sequence:
+  Prompt2 CTA → `pending_phone=true` and typed `operator_contact` → client `да` →
+  Prompt1 sees `dialogue_context.pending_action="operator_contact"` → Prompt2 is
+  skipped → runtime asks exactly «На какой номер вам позвонить?». Focused result:
+  `1 passed`.
+- **Regression status:** The remaining V6 selection produced `63 passed`; three
+  pre-existing main-prompt literal-contract failures remain around
+  `expanded_detail`. Full collection also remains blocked by the unrelated
+  existing `SelectedEntity` import mismatch in `nmbot_runtime_adapter.py`.
+  Neither blocker was changed under H083. Git/deploy remain gated on isolated
+  review and a clean immutable source artifact.
+### H141 — V6-simple semantic question-answer linkage (2026-08-14, **TEST deployed**)
+
+- **Actual:** H140 makes the ordinary Люблинский парк query reach Prompt 2, but live TEST showed the next plain `Да` after the ordinary question `Подсказать вам подробнее…?` returned `request_phone`. This is an unsafe false-positive: no specialist was offered.
+- **Contract:** Prompt 2 must interpret a short answer against the last still-relevant assistant question and continue that question's meaning. Acceptance of a details question means provide details; acceptance of a layouts question means provide layouts; acceptance of an explicit specialist-contact offer means `request_phone`. This is one semantic dialogue rule, not a list of phrases, routes or scenarios. `request_phone` remains Prompt-2-owned and is allowed only for a direct current specialist/call request or semantic acceptance of a relevant specialist-contact offer. Code must not add consent vocabulary, regex, classifier, question taxonomy or state machine.
+- **Desired:** every short answer follows the proposition it answers. Ordinary answer → `Да` continues the requested information as `reply`; technical specialist offer → `Да` returns `request_phone`; direct specialist request and valid phone/outbox behavior remain unchanged.
+- **Owner layer:** Prompt 2 only; prompt review/full replacement required. No payload, parser, runtime, state, gateway, model, phone/outbox, selector or legacy change.
+- **Baseline:** H140 failed TEST release retained; active rollback H138 `v6-test-h138-remember-offer-20260814t092720z` is healthy.
+- **Acceptance:** source-linked P2 fixtures cover multiple different preceding questions and prove that the same `Да` continues each question's meaning rather than matching a phrase. Live isolated probes show ordinary detail-question `Да` remains `reply`, fixed specialist-offer `Да` becomes `request_phone`, and refusal/new topic follow their own meaning. Direct request/phone privacy regressions stay green.
+- **Stop:** any phone request after a generic question, false code classifier, phone leak, terminal failure or test regression blocks TEST deploy.
+- **Result:** full Prompt-2 replacement passed six isolated live semantic fixtures under one general proposition-linkage rule: ordinary details/layout acceptance, refusal and new topic returned `reply`; explicit specialist offer acceptance and direct specialist request returned `request_phone`. Full isolated two-turn P1→P2 dialogue also kept `Да` after an ordinary question in `reply`. Immutable TEST release `v6-test-h141-semantic-linkage-20260814t095748z` deployed. Fresh Jivo TEST proved: Люблинский парк query returned three literal two-room options; following `Да` continued information dialogue without phone; direct specialist request returned the fixed phone question; valid synthetic phone produced fixed confirmation with no phone in public journal. API/bridge healthy, V6 active, no new error event. No production action or production proof.
+
+### H140 — V6-simple observed H108 project-and-unit fact vocabulary (2026-08-14, **rolled back from TEST**)
+
+- **Actual:** H139 safe shape probe for `двушка в люблинском парке` exposed two literal H108 result shapes. Alongside project facts, it returns a unit-level object with safe keys `area`, `floor`, `floors_total`, `fullprice`, `id`, `novos_id`, `price`, `renovation`, `rooms`, `status`, `title`. H138 rejects the first unknown key `title` and publishes the specialist boundary before Prompt 2.
+- **Contract:** Add this complete observed finite H108 project-and-unit key set as literal fact vocabulary in one bounded change. Existing size/depth/privacy/internal-key rejection stays. These fields are material only; Prompt 2 remains responsible for scope and must not infer availability or matching from unrelated project/unit fields.
+- **Desired:** The tested Люблинский парк result parses and reaches Prompt 2. Future unknown keys remain fail-closed with a safe key-only receipt rather than raw output or generic dead-end.
+- **Owner layer:** mechanical parser vocabulary/diagnostics only. No identity guard, semantic classifier, prompt, gateway, model, state, phone, outbox, selector or legacy change.
+- **Baseline:** active TEST `v6-test-h138-remember-offer-20260814t092720z`; H108 rollback retained.
+- **Acceptance:** all observed project/unit objects parse literally; unknown key is safe-key-only; H138 operator consent→phone→outbox tests remain green; isolated P1 probe accepts material before a new immutable TEST deploy.
+- **Stop:** broadened arbitrary-key acceptance, privacy leak, operator/phone regression, or P1 probe failure blocks deploy.
+- **Result:** isolated P1→P2 probe and live TEST ordinary query returned three literal Люблинский парк two-room options. But live TEST then interpreted generic `Да` after an ordinary question as `request_phone`; H140 was atomically rolled back to H138. H141 owns Prompt-2-only correction. No production action.
+
+### H139 — V6-simple observed H108 fact vocabulary and safe field receipt (2026-08-14, **isolated probe complete**)
+
+- **Actual:** H138 makes the technical fallback and related consent path work on live TEST, but the same first query still reaches that fallback because its H108 Prompt 1 material includes the observed safe fact key `new_building_class`, absent from the finite literal fact allowlist. The `invalid_fact_field` receipt did not carry the key name.
+- **Contract:** Add only the observed source result key `new_building_class` to the finite literal H108 fact vocabulary. When a literal fact/near key is rejected, retain only its safe key name as `error_field`; never retain its value, raw model output, client text, phone or identifiers. No semantic identity guard, query router, prompt/model/gateway/state/outbox change.
+- **Desired:** The tested Люблинский парк response may reach Prompt 2 when its material is otherwise valid; any later unknown fact key produces an honest specialist offer plus a safe journal field receipt for the next bounded hypothesis.
+- **Owner layer:** mechanical contract/diagnostics only.
+- **Baseline:** active TEST `v6-test-h138-remember-offer-20260814t092720z`, H108 rollback retained.
+- **Acceptance:** focused parser accepts `new_building_class`; unknown fact key returns `invalid_fact_field` with key only; privacy tests, operator consent→phone→outbox remain green. Fresh isolated probe first; immutable TEST deploy only after green.
+- **Stop:** any privacy leak, broad allowlist, semantic filter, parser/phone/operator regression or failed probe blocks deploy and rolls TEST to H108 on live failure.
+- **Result:** local contract exposes safe rejected key name. One isolated P1 shape probe found the full safe key sets recorded in H140; no H139 deploy, TEST release or production action.
+
+### H138 — V6-simple remembered technical specialist offer (2026-08-14, **TEST deployed**)
+
+- **Actual:** H137 correctly publishes the fixed technical specialist offer on a live TEST first query, but deliberately does not commit failed turns to dialogue history. Consequently the immediately related client answer `Да` reaches Prompt 2 without the preceding offer and is treated as unrelated, so it does not return `request_phone`.
+- **Contract:** Preserve the three semantic owners. Store only the already-published fixed technical specialist offer as bounded assistant dialogue history, with no intent/consent classifier, no operator state machine and no automatic phone request. Prompt 2 alone interprets a related consent from this visible history. Technical failure still does not commit property material or a successful semantic answer.
+- **Desired:** On TEST: technical failure → fixed offer → related `Да` → exact code-owned phone question → valid phone → durable outbox/confirmation; unrelated content remains an ordinary Prompt 1 → Prompt 2 turn.
+- **Owner layer:** mechanical history persistence/publication only. No prompt, gateway, selector, model, phone parser, outbox schema, semantic routing or legacy-runtime change.
+- **Baseline:** active TEST `v6-test-h137-failure-offer-20260814t091343z`; immutable H108 rollback remains available.
+- **Acceptance:** focused runtime/adapter tests prove history contains only the public fixed offer and current safe input, `Да` is forwarded to Prompt 2 with that history, no P1 material commits, and phone/outbox replay/privacy regressions remain green. Fresh TEST synthetic consent→phone→outbox smoke is required before any readiness claim.
+- **Stop:** any phone leak, automatic phone request without Prompt 2 `request_phone`, state/history serialization failure, or terminal failure rolls TEST back to H108.
+
+### H137 — V6-simple technical failure business fallback (2026-08-14, **TEST deployed**)
+
+- **Actual:** H134 failed on the first real `двушка в люблинском парке` turn. Prompt 1 returned a useful H108-shaped result but added the source-backed `params.novos_id`; the parser rejected the whole result as `invalid_param_key`, skipped Prompt 2, and published a generic technical text. The public journal retained only `runtime_failure`, not safe `stage/error_code/field`.
+- **Contract:** Keep semantic ownership in Prompt 1/Prompt 2. Add `novos_id` to the finite source-backed parameter contract. On Prompt 1 technical failure, do not claim no results: pass an accepted empty material plus an explicit technical boundary to Prompt 2. If Prompt 2 is also unavailable, use one fixed honest specialist-offer text; no automatic phone request. Persist safe diagnostic fields only: stage, error code, field name, no values/raw output/PII.
+- **Desired:** Every technical search failure gives a useful next step (specialist offer) instead of a dead-end generic error; accepted empty/no-result remains distinct from technical failure; operator consent still leads to phone/outbox.
+- **Owner layer:** contract/diagnostics plus mechanical failure publication; no semantic classifier, parser identity guard, router or new scenario layer.
+- **Baseline:** H134 candidate tree; active TEST rollback `v6-test-h108-direct-gateway-cdf3cb1-20260812`.
+- **Result:** local focused tests `69 passed`; immutable TEST release `v6-test-h137-failure-offer-20260814t091343z` deployed. Fresh TEST query `двушка в люблинском парке` published the fixed specialist offer rather than the generic dead-end. H137 did not prove the related-consent transition; H138 owns that repair. No production action.

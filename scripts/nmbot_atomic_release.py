@@ -207,6 +207,7 @@ API_RUNTIME_SCRIPT_FILES = frozenset({
     "scripts/nmbot_prompt_ledger.py",
     "scripts/nmbot_release_identity.py",
     "scripts/nmbot_runtime_adapter.py",
+    "scripts/nmbot_v6_simple_adapter.py",
     "scripts/planner_trace.py",
 })
 NMBOT_DIALOGUE_EXPORTER_SCRIPT = "scripts/nmbot_dialogue_sheet_exporter.py"
@@ -229,6 +230,7 @@ NMBOT_DIALOGUE_EXPORTER_TIMER_UNIT = "nmbot-dialogue-sheet-export.timer"
 OPTIONAL_API_RUNTIME_SCRIPT_FILES = frozenset({
     "scripts/bluesminds_v0_answer_writer.py",
     "scripts/gateway_v0_answer_writer.py",
+    "scripts/nmbot_v6_simple_adapter.py",
 })
 REMOTE_PREFLIGHT_PY_FILES = tuple(sorted((API_RUNTIME_SCRIPT_FILES - OPTIONAL_API_RUNTIME_SCRIPT_FILES) | {
     "followup_intent_classifier.py",
@@ -258,7 +260,7 @@ FIXED_DATA_ENV_PATHS = {
     "NMBOT_CALLBACK_OUTBOX_DIR": "data/private/callback-outbox",
     "NMBOT_RUNTIME_VERSION_FILE": "data/nmbot_runtime_version.json",
 }
-SNAPSHOT_ROOTS = ("nmbot_v0", "nmbot_v1", "nmbot_v2", "nmbot_v4", "scripts", "prompts", "schemas")
+SNAPSHOT_ROOTS = ("nmbot_v0", "nmbot_v1", "nmbot_v2", "nmbot_v4", "nmbot_v6", "scripts", "prompts", "schemas")
 SNAPSHOT_ROOT_FILES = tuple(sorted(ROOT_RUNTIME_FILES))
 SNAPSHOT_MANIFEST_NAME = "snapshot-manifest.json"
 SNAPSHOT_SOURCE_PREFIX = "source/"
@@ -486,6 +488,12 @@ def _has_secret_assignment_literal(text: str) -> bool:
             continue
         value = match.group("value").strip()
         name = match.group("name").upper().replace("-", "_")
+        # Lowercase locals such as ``token = os.getenv(...)`` are runtime
+        # plumbing, not embedded secret assignments. Secret/config names are
+        # conventionally uppercase; keep the detector strict for those.
+        raw_name = match.group("name")
+        if raw_name != raw_name.upper():
+            continue
         strong_name = any(marker in name for marker in ("SECRET", "PASSWORD", "PASSWD", "PRIVATE_KEY", "API_KEY", "API_TOKEN"))
         if value.startswith(("'", '"')) and len(value) >= 2:
             quote = value[0]

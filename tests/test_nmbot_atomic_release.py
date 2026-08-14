@@ -714,6 +714,7 @@ def test_local_preflight_requires_full_remote_preflight_source_closure(tmp_path:
         "scripts/gateway_v0_answer_writer.py",
         "scripts/bluesminds_v0_answer_writer.py",
     }
+    optional_api_paths = v0_writer_paths | {"scripts/nmbot_v6_simple_adapter.py"}
     adapter_source = (ROOT / "scripts" / "nmbot_runtime_adapter.py").read_text(encoding="utf-8")
     assert "gateway_v0_answer_writer" in adapter_source
     assert "bluesminds_v0_answer_writer" in adapter_source
@@ -721,10 +722,12 @@ def test_local_preflight_requires_full_remote_preflight_source_closure(tmp_path:
     v1_python_paths = {path for path in local_python_paths if path.startswith("nmbot_v1/")}
     assert v1_python_paths
     assert v1_python_paths <= set(rel._remote_preflight_py_files(artifact_paths))
-    assert rel.OPTIONAL_API_RUNTIME_SCRIPT_FILES == v0_writer_paths
+    assert rel.OPTIONAL_API_RUNTIME_SCRIPT_FILES == optional_api_paths
     assert v0_writer_paths <= rel.API_RUNTIME_SCRIPT_FILES
-    assert v0_writer_paths.isdisjoint(rel.REMOTE_PREFLIGHT_PY_FILES)
+    assert optional_api_paths.isdisjoint(rel.REMOTE_PREFLIGHT_PY_FILES)
     assert v0_writer_paths <= artifact_paths
+    assert "scripts/nmbot_v6_simple_adapter.py" in rel.API_RUNTIME_SCRIPT_FILES
+    assert "scripts/nmbot_v6_simple_adapter.py" not in artifact_paths
     assert f"py_compile={len(local_python_paths)}" in ok
     assert "scripts/nmbot_egress_policy.py" in artifact_paths
     assert "scripts/chat_tester_bot.py" not in artifact_paths

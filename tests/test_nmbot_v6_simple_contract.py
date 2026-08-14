@@ -281,6 +281,19 @@ def test_prompts_define_genuine_ambiguity_and_unique_typo_contract_statically():
     assert "д о509" not in prompt1
 
 
+def test_h150_prompt2_freezes_one_question_intent_by_priority_statically():
+    prompt2 = (ROOT / "prompts" / "v6_simple_answer_writer.txt").read_text(encoding="utf-8")
+    assert "До написания текста примени правила по приоритету" in prompt2
+    assert "offer_specialist_now=true, это высший приоритет" in prompt2
+    assert "обрабатывай только одно непосредственно предыдущее предложение" in prompt2
+    assert "если пригодные facts и near пусты, выбери ровно один следующий слот" in prompt2
+    assert "Заморозь выбранный внутренний intent вопроса" in prompt2
+    assert "Абсолютно запрещены слова «или» и «либо» в final_question" in prompt2
+    assert "Какой максимальный бюджет учитывать при повторном поиске?" in prompt2
+    assert "Рассмотреть альтернативные варианты в других районах или с другими параметрами?" in prompt2
+    assert "увеличить бюджет или рассмотреть другие типы планировок?" in prompt2
+
+
 @pytest.mark.parametrize("raw", [
     {"action": "continue", "facts": [{"field": "name", "scope": "project", "value": "ЖК А"}], "near": [], "missing": [], "params": {}, "ambiguity": None},
     {"action": "continue", "facts": [{"name": "ЖК А", "metadata": {"x": 1}}], "near": [], "missing": [], "params": {}, "ambiguity": None},

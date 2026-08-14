@@ -2781,6 +2781,15 @@ NotebookLM source note: `Session 2026-07-01 — selected complex formatting depl
   existing `SelectedEntity` import mismatch in `nmbot_runtime_adapter.py`.
   Neither blocker was changed under H083. Git/deploy remain gated on isolated
   review and a clean immutable source artifact.
+### H150 — V6-simple Prompt2 single-intent priority algorithm (2026-08-14, **TEST candidate**)
+
+- **Actual:** H149's full callback runner was technically green: all three scenarios reached the fixed phone question, confirmation and `nmbot.callback_sheet_outbox.v2` with `sheet_delivered`. The `clarification_then_operator` transcript nevertheless produced two Prompt 2 questions with independent goals: `Рассмотреть альтернативные варианты в других районах или с другими параметрами?`, followed by `Хотите изменить параметры поиска, например, увеличить бюджет или рассмотреть другие типы планировок?`. This is a Prompt 2 semantic failure, not a parser, runtime, callback or outbox failure.
+- **Contract:** Prompt 2 must first freeze one internal question intent, then write `response` and `final_question`. Priority is: exact specialist CTA when `offer_specialist_now=true`; typed ambiguity parameter; one immediately preceding single-goal offer; one concrete slot after an empty result; otherwise one useful next step or an empty question. `final_question` must contain one goal and no `или`/`либо`; `response` remains statements-only. The parser remains mechanical and unchanged.
+- **Desired:** Every callback dialogue remains coherent before the specialist offer. A short `да` answers one unambiguous preceding offer; the bot never asks the client to choose between district, budget, layout or alternative search in one question. Preserve grounding, max-three publication, state v2, third-turn CTA, phone privacy and callback/outbox contracts.
+- **Owner layer:** Prompt 2 only. No runtime, parser, state, gateway, adapter, retry, router, regex or new layer.
+- **Acceptance:** H150 candidate prompt/static regression; focused V6 tests and compileall; repeat the three callback scenarios with full redacted transcripts; clarification path has no two-goal question; specialist CTA remains exact and phone flow/outbox/privacy remain green. H150 is not verified until semantic callback acceptance passes.
+- **Result:** Isolated candidate passed **121 tests** and compileall; canonical focused contract/runtime/phone scopes passed **107 tests** and compileall. No H150 TEST deploy yet.
+
 ### H149 — V6-simple bounded near material and three-object Prompt2 projection (2026-08-14, **TEST candidate**)
 
 - **Actual:** H148's full callback matrix found a real Prompt1 failure on the follow-up `да` after a response naming five Lubertsy projects. In two of three identical direct TEST calls Prompt1 returned five grounded `near` alternatives; the mechanical `near<=3` bound rejected the document with `invalid_prompt1_bounds` before MCP or Prompt 2, producing a safe fallback. The same history also produced a valid zero-near document once, so the defect was a bounded material-shape failure rather than a proven search failure.

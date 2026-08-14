@@ -2781,7 +2781,29 @@ NotebookLM source note: `Session 2026-07-01 — selected complex formatting depl
   existing `SelectedEntity` import mismatch in `nmbot_runtime_adapter.py`.
   Neither blocker was changed under H083. Git/deploy remain gated on isolated
   review and a clean immutable source artifact.
-### H143 — V6-simple Prompt2 answer/question separation (2026-08-14, **isolated prompt revision**)
+### H145 — V6-simple one-goal final-question revision (2026-08-14, **isolated prompt repair**)
+
+- **Actual:** H144 removed the observed H108 parser hard stops and corrected the invalid phone fixture. The focused rerun T02/T04/T06/T10 had no technical failure and T10 outbox passed, but T02/T04/T06 still produced final questions with two independent goals joined by `или`.
+- **Contract:** Prompt 2 must choose one next action from the current dialogue meaning. `final_question` contains one question with one goal; it must never offer two independent directions through `или/либо`. This remains Prompt-2-owned semantics, not a parser detector or code scenario.
+- **Desired:** For a missing fact or alternatives, select one most useful next step; do not ask the client to choose between two different goals in the same question. Preserve answer body, proposition linkage, grounding, operator and phone behavior.
+- **Owner layer:** Prompt 2 only; full PromptMaster replacement required. H144 parser/phone/runtime mechanics stay unchanged.
+- **Baseline:** H144 TEST `v6-test-h144-observed-fields-20260814t115240z`; H143 rollback retained.
+- **Acceptance:** same T02/T04/T06 outputs have no `или/либо` and exactly one logical next goal; T10 remains queued/confirmed with no phone leak; no technical failures.
+- **Stop:** any parser/phone/operator regression or prompt change that introduces a new semantic layer.
+- **Result:** H145 full PromptMaster replacement passed the local **79-test** suite, compileall, static prompt checks and isolated P2 linkage probe. Full isolated P1→P2 T02/T04/T06 probe completed without technical failures, but semantic acceptance remained RED: T04 still emitted two independent final-question directions joined by `или` on both constraint turns. T02/T06 also showed mechanical `или` matches in answer/proposition text, so the gate was not promoted to TEST. No deploy; H144 TEST remains active baseline and rollback target.
+
+### H144 — V6-simple observed H108 fields and corrected phone regression (2026-08-14, **TEST technical GREEN; semantic RED**)
+
+- **Actual:** The ten-case H143 TEST batch stopped on real H108 material fields not in the finite candidate vocabulary: `mortgage_programs`, `zhk_name`, and query parameter `has_finishing`. The phone fixture `70000000001` is not a valid Russian number (`not_found`) and must not weaken the phone parser. The batch runner also failed to classify missing phone confirmation as a hard failure.
+- **Contract:** Add only these observed safe H108 keys: `mortgage_programs` and `zhk_name` to literal facts/near, `has_finishing` to bounded request params. Preserve privacy, depth, size and unknown-key rejection. Correct the regression fixture to a valid Russian number and require durable outbox confirmation. No arbitrary allowlist, semantic parser, classifier, router or prompt change.
+- **Desired:** T02/T04/T06 reach Prompt 2 when their material is otherwise valid; unknown fields remain honest specialist failures with safe key-only diagnostics; T10 accepts only a valid phone and proves one durable outbox outcome.
+- **Owner layer:** mechanical H108 material contract, safe diagnostics and test runner only.
+- **Baseline:** H143 active TEST `v6-test-h143-final-question-20260814t102754z`; H138/H108 rollback retained.
+- **Acceptance:** focused local tests, safe parser replay, valid-phone/invalid-phone tests, corrected T02/T04/T06/T10 TEST rerun. No production action.
+- **Stop:** arbitrary key acceptance, privacy leak, phone parser weakening, missing outbox proof, or any hard transport/schema failure.
+- **Result:** H144 local suite **79 passed**. Rerun T02/T04/T06/T10 completed without technical failures; the new fact/param vocabulary was accepted and valid `79990000001` produced one confirmed outbox record without public leak. T02/T04/T06 remain semantic RED because Prompt 2 still emitted two-goal final questions using `или`. H145 owns the prompt-only revision. No production action.
+
+### H143 — V6-simple Prompt2 answer/question separation (2026-08-14, **TEST active baseline**)
 
 - **Actual:** H142 mechanically separates `response` and `final_question`, but H141 Prompt 2 still describes the old two-key output and does not yet own the new body/question split.
 - **Contract:** Replace Prompt 2 as a whole. It returns exact `{action,response,final_question}`; `response` contains only the grounded answer body, `final_question` contains one semantically selected next question or empty string. No two independent goals joined by «или». Short replies continue the meaning of the last relevant proposition; only specialist-contact acceptance returns `request_phone`.
@@ -2790,6 +2812,7 @@ NotebookLM source note: `Session 2026-07-01 — selected complex formatting depl
 - **Baseline:** H142 isolated interface candidate; H141 TEST release remains active until H143 passes its isolated gates.
 - **Acceptance:** full PromptMaster replacement, local contract regression, isolated P2 linkage fixtures, same-payload model batch and then TEST deploy only after GREEN.
 - **Stop:** any payload/schema drift, question in `response`, two goals in `final_question`, phone/privacy regression or operator regression.
+- **Result:** H143 ten-case regression later exposed bounded H108 vocabulary gaps and an invalid bare-phone fixture; those are isolated under H144. H143 remains the rollback baseline during H144.
 - **Result:** H143 full Prompt 2 replacement passed local **77 focused tests** and compileall. Isolated live P2 probe passed details/layout acceptance, explicit specialist acceptance, direct specialist request, refusal and new topic: exact three-key JSON, `response` without a question, one `final_question` or empty, no `или/либо`. Immutable TEST release `v6-test-h143-final-question-20260814t102754z` deployed from fresh snapshot. Fresh Jivo TEST proved visual separation, exactly one question, ordinary `Да` continues the information topic without phone, direct specialist request asks for phone, valid phone confirms and remains absent from public record. No production action or production proof.
 
 ### H142 — V6-simple separated response and final question contract (2026-08-14, **isolated interface revision**)

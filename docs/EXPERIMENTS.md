@@ -2781,6 +2781,28 @@ NotebookLM source note: `Session 2026-07-01 — selected complex formatting depl
   existing `SelectedEntity` import mismatch in `nmbot_runtime_adapter.py`.
   Neither blocker was changed under H083. Git/deploy remain gated on isolated
   review and a clean immutable source artifact.
+### H143 — V6-simple Prompt2 answer/question separation (2026-08-14, **isolated prompt revision**)
+
+- **Actual:** H142 mechanically separates `response` and `final_question`, but H141 Prompt 2 still describes the old two-key output and does not yet own the new body/question split.
+- **Contract:** Replace Prompt 2 as a whole. It returns exact `{action,response,final_question}`; `response` contains only the grounded answer body, `final_question` contains one semantically selected next question or empty string. No two independent goals joined by «или». Short replies continue the meaning of the last relevant proposition; only specialist-contact acceptance returns `request_phone`.
+- **Desired:** Visually separate answer and question without adding a semantic code layer, while preserving grounding, identity, max three objects, operator timing and phone privacy.
+- **Owner layer:** static Prompt 2 only; H142 parser/runtime interface is fixed and unchanged.
+- **Baseline:** H142 isolated interface candidate; H141 TEST release remains active until H143 passes its isolated gates.
+- **Acceptance:** full PromptMaster replacement, local contract regression, isolated P2 linkage fixtures, same-payload model batch and then TEST deploy only after GREEN.
+- **Stop:** any payload/schema drift, question in `response`, two goals in `final_question`, phone/privacy regression or operator regression.
+- **Result:** H143 full Prompt 2 replacement passed local **77 focused tests** and compileall. Isolated live P2 probe passed details/layout acceptance, explicit specialist acceptance, direct specialist request, refusal and new topic: exact three-key JSON, `response` without a question, one `final_question` or empty, no `или/либо`. Immutable TEST release `v6-test-h143-final-question-20260814t102754z` deployed from fresh snapshot. Fresh Jivo TEST proved visual separation, exactly one question, ordinary `Да` continues the information topic without phone, direct specialist request asks for phone, valid phone confirms and remains absent from public record. No production action or production proof.
+
+### H142 — V6-simple separated response and final question contract (2026-08-14, **isolated interface revision**)
+
+- **Actual:** H141 Prompt 2 returns `{action,response}`. The response contains both the answer and the final question, so the renderer cannot reliably separate them and the model can combine two next steps with «или».
+- **Contract:** Prompt 2 output becomes exact `{action,response,final_question}`. `response` is the answer body without a client question; `final_question` is one question or `""`. For `request_phone`, both text fields are `""`; runtime publishes the fixed phone question. Parser remains mechanical: shape, types, size and privacy only.
+- **Desired:** Publish answer and final question as separate visual blocks while Prompt 2 semantically chooses one next step. No code question counter, `или` detector, consent classifier, scenario router or semantic validator.
+- **Owner layer:** interface/parser/runtime publication first; Prompt 2 full replacement is a subsequent linked revision after this contract is green.
+- **Baseline:** H141 TEST release `v6-test-h141-semantic-linkage-20260814t095748z`; isolated source `/tmp/opencode/nmbot-v6-simple-H141/source`.
+- **Acceptance:** exact three-key parser; empty final question accepted; request_phone has both fields empty; runtime publishes `response`, blank line, `final_question`; phone/privacy/operator/grounding regressions remain green.
+- **Stop:** any schema ambiguity, phone leak, state/history regression, broken request_phone, or semantic policy moved into code blocks the revision.
+- **Budget:** offline/local only until the interface revision is green; PromptMaster prompt replacement, same-payload batch and TEST deploy are separate gates.
+
 ### H141 — V6-simple semantic question-answer linkage (2026-08-14, **TEST deployed**)
 
 - **Actual:** H140 makes the ordinary Люблинский парк query reach Prompt 2, but live TEST showed the next plain `Да` after the ordinary question `Подсказать вам подробнее…?` returned `request_phone`. This is an unsafe false-positive: no specialist was offered.

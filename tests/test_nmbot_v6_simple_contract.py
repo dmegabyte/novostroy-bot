@@ -21,6 +21,30 @@ def test_exact_payloads_and_empty_p1():
     assert "текущее" not in [item["text"] for item in history]
 
 
+def test_continue_omitted_ambiguity_normalizes_to_null():
+    raw = {"action": "continue", "facts": [], "near": [], "missing": [], "params": {"district": "ЦАО", "rooms": 2}}
+    document = parse_prompt1(raw)
+    assert document.ambiguity is None
+    assert document.plain() == {**raw, "ambiguity": None}
+    assert build_prompt2_input("x", [], document, offer_specialist_now=False)["ambiguity"] is None
+
+
+def test_continue_explicit_null_ambiguity_is_accepted():
+    document = parse_prompt1({"action": "continue", "facts": [], "near": [], "missing": [], "params": {}, "ambiguity": None})
+    assert document.ambiguity is None
+
+
+@pytest.mark.parametrize("ambiguity", [False, 1, "none", {"parameter": "rooms", "reason_code": "multiple_interpretations"}])
+def test_continue_rejects_non_null_ambiguity(ambiguity):
+    with pytest.raises(SimpleContractError, match="unexpected_ambiguity"):
+        parse_prompt1({"action": "continue", "facts": [], "near": [], "missing": [], "params": {}, "ambiguity": ambiguity})
+
+
+def test_continue_omitted_ambiguity_still_rejects_unknown_root_key():
+    with pytest.raises(SimpleContractError, match="invalid_prompt1_variant_shape"):
+        parse_prompt1({"action": "continue", "facts": [], "near": [], "missing": [], "params": {}, "extra": True})
+
+
 @pytest.mark.parametrize("raw", [
     {"cards": [], "missing": []},
     {"action": "reply", "response": "x"},

@@ -2781,6 +2781,14 @@ NotebookLM source note: `Session 2026-07-01 — selected complex formatting depl
   existing `SelectedEntity` import mismatch in `nmbot_runtime_adapter.py`.
   Neither blocker was changed under H083. Git/deploy remain gated on isolated
   review and a clean immutable source artifact.
+### H148 — V6-simple continue nullable-ambiguity normalization (2026-08-14, **TEST candidate**)
+
+- **Actual:** After H147 deployment, ordinary TEST requests such as `двушка в Москве` sometimes returned a valid semantic `action=continue` document without the optional wire key `ambiguity`. The narrow parser rejected that harmless serialization variant with `invalid_prompt1_variant_shape` before MCP or Prompt 2, causing a safe fallback. Direct gateway refs `2541433`, `2541434`, `2541437` reproduced the omission; candidate-parser reruns `2541440`, `2541441`, `2541442` accepted the same outputs.
+- **Contract:** For `action=continue` only, an absent `ambiguity` key is mechanically canonicalized to `null`; an explicitly present value remains valid only when it is `null`. `clarify` keeps the strict `{action,ambiguity,params}` variant, and `request_phone` remains action-only. All bounds, allowlists, privacy and extra-key checks remain strict.
+- **Desired:** Do not turn an equivalent nullable-field serialization into a runtime failure. Preserve Prompt 1 semantic ownership, the existing linear Prompt 1 → MCP/Prompt 2 path, state v2, operator/phone/outbox and rollback contracts. No retry, semantic parser, router or new layer.
+- **Owner layer:** Existing mechanical parser boundary only; Prompt 1 still owns the semantic action and search material.
+- **Acceptance:** Candidate passed **115 tests** and compileall; canonical focused contract/runtime/phone scopes passed **101 tests** and compileall. Fresh TEST snapshot `vps-source-20260814-171118-abfaec999fc0` has manifest SHA-256 `c5d04fc7e255c3f562d12874482f3dc0007faf7db67f89b0cc1930a1309dba4a`. Commit, exact one-file runtime overlay, ordinary Jivo matrix, clarification follow-up and sequential specialist/phone regression remain required before promotion.
+
 ### H147 — V6-simple Prompt1 discriminated clarification contract (2026-08-14, **TEST verified**)
 
 - **Actual:** H146's first live clarification probe correctly understood `Ищу двушку в Москве до 8 или 18 млн` as `action=clarify` with `ambiguity.max_price=multiple_interpretations`, but added an irrelevant `missing` item. The flat parser rejected the semantically correct decision with `clarify_material_not_empty`, so Prompt 2 was never called and the user received a safe fallback. This exposed a Prompt-1/payload contract contradiction, not a search or runtime routing defect.

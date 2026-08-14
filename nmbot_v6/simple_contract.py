@@ -167,6 +167,11 @@ def parse_prompt1(raw: str | Mapping[str, Any]) -> Prompt1Document:
     if action not in {"continue", "clarify", "request_phone"}:
         raise SimpleContractError("invalid_prompt1_action")
 
+    # Prompt 1 may omit the nullable continue-only field. Normalize it before
+    # variant validation so every internal document still has ambiguity=None.
+    if action == "continue" and "ambiguity" not in root:
+        root = {**root, "ambiguity": None}
+
     optional = {"diagnostics"}
     if action == "request_phone":
         if set(root) - ({"action"} | optional):

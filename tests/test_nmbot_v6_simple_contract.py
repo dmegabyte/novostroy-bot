@@ -294,6 +294,56 @@ def test_h150_prompt2_freezes_one_question_intent_by_priority_statically():
     assert "увеличить бюджет или рассмотреть другие типы планировок?" in prompt2
 
 
+def test_h151_prompt2_orders_ownership_act_choice_and_short_answer_rules_statically():
+    prompt2 = (ROOT / "prompts" / "v6_simple_answer_writer.txt").read_text(encoding="utf-8")
+    ownership = prompt2.index("Ты владеешь только смыслом опубликованных response и final_question")
+    act_choice = prompt2.index("СНАЧАЛА ВЫБЕРИ ОДИН РЕЧЕВОЙ АКТ")
+    short_answers = prompt2.index("OPEN_SLOT И CLOSED_ACTION: КОРОТКИЕ ОТВЕТЫ")
+    grounding = prompt2.index("ИСТОЧНИКИ И GROUNDING")
+    output_format = prompt2.index("ФОРМАТ")
+    assert ownership < act_choice < short_answers < grounding < output_format
+    specialist = prompt2.index("offer_specialist_now=true, это высший приоритет")
+    ambiguity = prompt2.index("Иначе, если ambiguity не null")
+    empty_results = prompt2.index("если пригодные facts и near пусты, выбери ровно один следующий слот")
+    assert specialist < ambiguity < empty_results
+
+
+def test_h151_prompt2_has_exact_closed_speech_act_set_statically():
+    prompt2 = (ROOT / "prompts" / "v6_simple_answer_writer.txt").read_text(encoding="utf-8")
+    closed_set = prompt2[
+        prompt2.index("До написания response и final_question выбери ровно один акт из закрытого набора:"):
+        prompt2.index("До написания текста примени правила по приоритету")
+    ]
+    expected = {
+        "ANSWER_ONLY", "ASK_ONE_SLOT(parameter)", "CONFIRM_ONE_ACTION(action)",
+        "CLARIFY_PREVIOUS_SUBJECT", "EXACT_SPECIALIST_CTA",
+    }
+    assert {line.removeprefix("- ").removesuffix(";").removesuffix(".")
+            for line in closed_set.splitlines() if line.startswith("- ")} == expected
+    assert "Заморозь выбранный внутренний intent вопроса: речевой акт вместе с его единственным parameter, action или subject" in prompt2
+
+
+def test_h151_prompt2_open_slot_yes_handling_and_templates_are_static():
+    prompt2 = (ROOT / "prompts" / "v6_simple_answer_writer.txt").read_text(encoding="utf-8")
+    assert "«да» не является значением для OPEN_SLOT" in prompt2
+    assert "Выбери ASK_ONE_SLOT того же parameter" in prompt2
+    assert "Нужно назвать конкретный район." in prompt2
+    assert "Какой район вас интересует?" in prompt2
+    for speech_act in (
+        "ANSWER_ONLY:", "ASK_ONE_SLOT(max_price):", "CONFIRM_ONE_ACTION(expand_budget):",
+        "CLARIFY_PREVIOUS_SUBJECT:", "EXACT_SPECIALIST_CTA:",
+    ):
+        assert speech_act in prompt2
+
+
+def test_h151_prompt2_contains_known_negative_questions_and_two_slot_conjunction_guard():
+    prompt2 = (ROOT / "prompts" / "v6_simple_answer_writer.txt").read_text(encoding="utf-8")
+    assert "Какой район или бюджет на покупку недвижимости вас интересует?" in prompt2
+    assert "Рассмотреть варианты с другими параметрами, например, увеличить бюджет или изменить количество комнат?" in prompt2
+    assert "если они запрашивают два слота или два действия, например «район и бюджет»" in prompt2
+    assert "точности: «Подключить специалиста, чтобы он проверил актуальные варианты по вашему запросу?»" in prompt2
+
+
 @pytest.mark.parametrize("raw", [
     {"action": "continue", "facts": [{"field": "name", "scope": "project", "value": "ЖК А"}], "near": [], "missing": [], "params": {}, "ambiguity": None},
     {"action": "continue", "facts": [{"name": "ЖК А", "metadata": {"x": 1}}], "near": [], "missing": [], "params": {}, "ambiguity": None},

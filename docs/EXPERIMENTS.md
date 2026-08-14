@@ -2781,6 +2781,15 @@ NotebookLM source note: `Session 2026-07-01 — selected complex formatting depl
   existing `SelectedEntity` import mismatch in `nmbot_runtime_adapter.py`.
   Neither blocker was changed under H083. Git/deploy remain gated on isolated
   review and a clean immutable source artifact.
+### H151 — V6-simple Prompt2 closed speech-act contract (2026-08-15, **TEST candidate**)
+
+- **Actual:** H150's TEST callback path was technically green, but live dialogues still produced two-goal questions and repeated an unanswered open budget slot. Examples included `Какой район или бюджет на покупку недвижимости вас интересует?`, `Рассмотреть варианты с другими параметрами, например, увеличить бюджет или изменить количество комнат?`, and a repeated maximum-budget question after the client answered `да`.
+- **Contract:** Prompt 2 first chooses exactly one closed speech act: `ANSWER_ONLY`, `ASK_ONE_SLOT(parameter)`, `CONFIRM_ONE_ACTION(action)`, `CLARIFY_PREVIOUS_SUBJECT` or `EXACT_SPECIALIST_CTA`. A previous question is classified as an open slot or a closed action; `да` accepts only the latter and never fills an open slot. `final_question` contains zero or one goal, never two requested slots or independent directions through `или/либо`; `response` remains statements-only. The specialist CTA retains highest priority. Parser, payload, runtime, state, phone and callback contracts remain unchanged.
+- **Desired:** Every client turn has one clear next step. An open budget question followed by `да` repeats only the budget slot; empty results and off-topic turns ask for one parameter or one action; specialist consent continues the existing fixed phone/outbox flow.
+- **Owner layer:** Prompt 2 only. No semantic parser, runtime router, retry, regex, new state or new layer.
+- **Acceptance:** Candidate/static regression, canonical focused tests and compileall; repeated TEST dialogues for Lubertsy, Moscow, ambiguous-budget continuation and callback; semantic checker examines `final_question` only and rejects both `или/либо` and conjunctions requesting two slots. Technical callback/outbox, phone privacy, grounding and third-turn regressions must remain green.
+- **Result:** Candidate passed **125 tests** and compileall; canonical focused contract/runtime/phone scopes passed **111 tests** and compileall. H151 is committed as `327e17c01cb5b9cd3b378011f98f4402e625f7ee`; TEST deployment and live semantic verification are pending.
+
 ### H150 — V6-simple Prompt2 single-intent priority algorithm (2026-08-14, **TEST candidate**)
 
 - **Actual:** H149's full callback runner was technically green: all three scenarios reached the fixed phone question, confirmation and `nmbot.callback_sheet_outbox.v2` with `sheet_delivered`. The `clarification_then_operator` transcript nevertheless produced two Prompt 2 questions with independent goals: `Рассмотреть альтернативные варианты в других районах или с другими параметрами?`, followed by `Хотите изменить параметры поиска, например, увеличить бюджет или рассмотреть другие типы планировок?`. This is a Prompt 2 semantic failure, not a parser, runtime, callback or outbox failure.

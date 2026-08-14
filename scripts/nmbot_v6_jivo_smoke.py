@@ -106,6 +106,34 @@ def _read_chat_events(chat_id: str, *, journal: Path = JOURNAL_PATH) -> list[dic
     return events
 
 
+def _v6_simple_trace_accepted(event: dict[str, Any]) -> bool:
+    trace = event.get("v6_trace") if isinstance(event.get("v6_trace"), dict) else {}
+    stages = trace.get("stages") if isinstance(trace.get("stages"), list) else []
+    statuses = {
+        item.get("stage"): item.get("status")
+        for item in stages
+        if isinstance(item, dict) and isinstance(item.get("stage"), str)
+    }
+    return all(
+        statuses.get(stage) == expected
+        for stage, expected in {
+            "prompt1": "accepted",
+            "prompt2": "accepted",
+            "state": "accepted",
+            "bot_message": "returned",
+        }.items()
+    )
+
+
+def _is_query_bot_event(event: dict[str, Any]) -> bool:
+    if event.get("role") != "bot":
+        return False
+    if event.get("answer_kind") == "v6":
+        return True
+    response_model = event.get("response_model") if isinstance(event.get("response_model"), dict) else {}
+    return bool(response_model) or _v6_simple_trace_accepted(event)
+
+
 def evaluate_release_smoke(*, query_result: dict[str, Any], events: list[dict[str, Any]]) -> tuple[bool, list[str]]:
     """Require an accepted published result, not only fallback delivery."""
     failures: list[str] = []
@@ -116,7 +144,8 @@ def evaluate_release_smoke(*, query_result: dict[str, Any], events: list[dict[st
         return False, ["missing_bot_event"]
     latest = bot_events[-1]
     response_model = latest.get("response_model") if isinstance(latest.get("response_model"), dict) else {}
-    if response_model.get("status") != "valid" or response_model.get("published") is not True:
+    accepted = (response_model.get("status") == "valid" and response_model.get("published") is True) or _v6_simple_trace_accepted(latest)
+    if not accepted:
         failures.append("runtime_not_accepted")
     composer = latest.get("response_composer") if isinstance(latest.get("response_composer"), dict) else {}
     if composer.get("fallback_reason"):
@@ -191,7 +220,7 @@ def main() -> int:
             deadline = time.monotonic() + max(0.0, args.journal_wait_seconds)
             while time.monotonic() < deadline:
                 events = _read_chat_events(base_payload["chat_id"])
-                if any(event.get("role") == "bot" for event in events):
+                if any(_is_query_bot_event(event) for event in events):
                     break
                 time.sleep(0.5)
             accepted, failures = evaluate_release_smoke(query_result=query, events=events)

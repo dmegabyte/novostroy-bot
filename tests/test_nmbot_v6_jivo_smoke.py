@@ -52,6 +52,40 @@ def test_release_smoke_accepts_published_result_only() -> None:
     assert failures == []
 
 
+def test_release_smoke_accepts_v6_simple_trace() -> None:
+    accepted, failures = module.evaluate_release_smoke(
+        query_result={"ok": True, "http_status": 200},
+        events=[_bot(response_model={}, v6_trace={"schema_version": 1, "stages": [
+            {"stage": "prompt1", "status": "accepted"},
+            {"stage": "mcp", "status": "unknown"},
+            {"stage": "prompt2", "status": "accepted"},
+            {"stage": "state", "status": "accepted"},
+            {"stage": "bot_message", "status": "returned"},
+        ]})],
+    )
+    assert accepted
+    assert failures == []
+
+
+def test_release_smoke_rejects_incomplete_v6_simple_trace() -> None:
+    accepted, failures = module.evaluate_release_smoke(
+        query_result={"ok": True, "http_status": 200},
+        events=[_bot(response_model={}, v6_trace={"stages": [
+            {"stage": "prompt1", "status": "accepted"},
+            {"stage": "prompt2", "status": "failed"},
+            {"stage": "state", "status": "accepted"},
+            {"stage": "bot_message", "status": "returned"},
+        ]})],
+    )
+    assert not accepted
+    assert failures == ["runtime_not_accepted"]
+
+
+def test_query_bot_event_ignores_start_reset() -> None:
+    assert not module._is_query_bot_event({"role": "bot", "answer_kind": "start_reset"})
+    assert module._is_query_bot_event({"role": "bot", "answer_kind": "v6"})
+
+
 def test_chat_ref_is_one_way_and_journal_reader_is_shape_only(tmp_path: Path) -> None:
     chat_id = "test-chat"
     path = tmp_path / "dialogue_journal.jsonl"

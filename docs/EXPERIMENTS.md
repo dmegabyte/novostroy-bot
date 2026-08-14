@@ -2781,6 +2781,15 @@ NotebookLM source note: `Session 2026-07-01 — selected complex formatting depl
   existing `SelectedEntity` import mismatch in `nmbot_runtime_adapter.py`.
   Neither blocker was changed under H083. Git/deploy remain gated on isolated
   review and a clean immutable source artifact.
+### H147 — V6-simple Prompt1 discriminated clarification contract (2026-08-14, **TEST candidate**)
+
+- **Actual:** H146's first live clarification probe correctly understood `Ищу двушку в Москве до 8 или 18 млн` as `action=clarify` with `ambiguity.max_price=multiple_interpretations`, but added an irrelevant `missing` item. The flat parser rejected the semantically correct decision with `clarify_material_not_empty`, so Prompt 2 was never called and the user received a safe fallback. This exposed a Prompt-1/payload contract contradiction, not a search or runtime routing defect.
+- **Contract:** Prompt 1 now returns one of three mutually exclusive JSON variants: `continue` with search material, `clarify` with only `action`, typed `ambiguity` and unambiguous `params`, or action-only `request_phone`. The existing parser remains a mechanical JSON/bounds/privacy/allowlist boundary; it does not judge whether ambiguity is genuine. A parsed clarification is normalized at the existing boundary to empty material for Prompt 2. No new runtime layer, semantic router, regex or repair loop was added.
+- **Desired:** Genuine ambiguity reaches Prompt 2, which asks one neutral question about only the ambiguous parameter. Optional missing preferences and uniquely normalizable typos remain ordinary `continue`; state v2, third-turn specialist policy, phone/privacy/outbox and rollback contracts remain unchanged.
+- **Owner layer:** Prompt 1 semantic decision plus the existing mechanical contract boundary. Prompt 2 remains the sole owner of client prose and the clarification question.
+- **Acceptance:** continue/request_phone regressions, minimal union clarify parsing, rejection of mixed-variant fields, Prompt 2 payload normalization, privacy/outbox and third-turn tests; direct TEST model probe with the original ambiguous budget phrase; then immutable TEST release and Jivo clarification smoke.
+- **Result:** Isolated candidate passed **108 tests** and compileall. Direct TEST probe task `2541380` returned exactly the `clarify` variant and the candidate parser accepted it, normalizing material to empty. No production action; runtime TEST release is still the prior H146 artifact until the full package is built and smoke-tested.
+
 ### H146 — V6-simple typed search clarification (2026-08-14, **reviewed local candidate**)
 
 - **Actual:** A reported V6 reply claimed that no two-room flats matched `д о509 млн`. A bounded TEST-only Prompt-1 comparison showed that both the clean and spaced forms normalized identically to `rooms=2` and `max_price=509000000`, while `facts/near` remained empty and transport-owned tool trace was unavailable. The typo therefore was not a proven ambiguity, and the empty result still cannot be attributed to extraction, invocation, backend or projection from current evidence.

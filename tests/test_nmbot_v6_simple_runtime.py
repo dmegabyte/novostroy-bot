@@ -124,7 +124,7 @@ def test_generic_gateway_metadata_cannot_prove_mcp_provenance(generic_metadata):
 @pytest.mark.parametrize("message", ["Позовите специалиста", "Позовите специалиста и сколько стоит?"])
 def test_direct_specialist_request_is_owned_by_p1_and_skips_p2(message):
     p2 = Port([])
-    outcome = run(Port([result({"action": "request_phone", "facts": [], "near": [], "missing": [], "params": {}})]), p2, text=message)
+    outcome = run(Port([result({"action": "request_phone"})]), p2, text=message)
     assert outcome.text == PHONE_QUESTION and outcome.request_phone is True
     assert outcome.state.awaiting_phone is True and outcome.state.pending_offer == "none" and not p2.calls
 
@@ -198,7 +198,7 @@ def test_third_turn_replaces_unrelated_p2_question_with_sole_specialist_cta():
 
 def test_third_turn_clarification_has_priority_and_defers_specialist_once():
     clarify = {
-        "action": "clarify", "facts": [], "near": [], "missing": [], "params": {},
+        "action": "clarify", "params": {},
         "ambiguity": {"parameter": "rooms", "reason_code": "multiple_interpretations"},
     }
     following = {"action": "continue", "facts": [], "near": [], "missing": ["район"], "params": {}}
@@ -230,7 +230,7 @@ def test_third_turn_clarification_has_priority_and_defers_specialist_once():
 
 def test_clarification_prompt2_failure_uses_neutral_fallback_and_preserves_offer_turn():
     clarify = {
-        "action": "clarify", "facts": [], "near": [], "missing": [], "params": {},
+        "action": "clarify", "params": {},
         "ambiguity": {"parameter": "max_price", "reason_code": "multiple_interpretations"},
     }
     outcome = run(Port([result(clarify)]), Port([result("bad"), result("bad")]), SimpleState(client_turn_count=2))
@@ -250,7 +250,7 @@ def test_optional_missing_continue_stays_ordinary_empty_material():
 
 def test_pending_specialist_consent_requests_phone_and_skips_p2():
     state = SimpleState(client_turn_count=3, pending_offer="specialist_contact")
-    p1 = Port([result({"action": "request_phone", "facts": [], "near": [], "missing": [], "params": {}})])
+    p1 = Port([result({"action": "request_phone"})])
     p2 = Port([])
     outcome = run(p1, p2, state, "Да")
     assert p1.calls[0][0]["dialogue_policy"] == {"pending_offer": "specialist_contact"}

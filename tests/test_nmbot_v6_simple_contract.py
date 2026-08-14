@@ -143,14 +143,24 @@ def test_h144_observed_mortgage_identity_and_finishing_fields_are_bounded():
 
 def test_clarify_is_typed_and_reaches_prompt2_payload():
     raw = {
-        "action": "clarify", "facts": [], "near": [], "missing": [],
-        "params": {"purpose": "life"},
+        "action": "clarify", "params": {"purpose": "life"},
         "ambiguity": {"parameter": "max_price", "reason_code": "multiple_interpretations"},
     }
     document = parse_prompt1(raw)
     assert document.ambiguity is not None
     assert document.ambiguity.parameter == "max_price"
-    assert build_prompt2_input("x", [], document, offer_specialist_now=False)["ambiguity"] == raw["ambiguity"]
+    handoff = build_prompt2_input("x", [], document, offer_specialist_now=False)
+    assert handoff["ambiguity"] == raw["ambiguity"]
+    assert handoff["property_material"] == {"facts": [], "near": [], "params": {"purpose": "life"}}
+    assert handoff["missing"] == []
+
+
+def test_action_only_request_phone_normalizes_empty_material():
+    document = parse_prompt1({"action": "request_phone"})
+    assert document.action == "request_phone"
+    assert document.plain() == {
+        "action": "request_phone", "facts": [], "near": [], "missing": [], "params": {}, "ambiguity": None,
+    }
 
 
 def test_clarification_prompt2_requires_nonempty_final_question():
@@ -165,16 +175,16 @@ def test_clarification_prompt2_requires_nonempty_final_question():
 
 @pytest.mark.parametrize("raw", [
     {"action": "unknown", "facts": [], "near": [], "missing": [], "params": {}, "ambiguity": None},
-    {"action": "clarify", "facts": [], "near": [], "missing": [], "params": {}, "ambiguity": {"parameter": "purpose", "reason_code": "multiple_interpretations"}},
-    {"action": "clarify", "facts": [], "near": [], "missing": [], "params": {}, "ambiguity": {"parameter": "rooms", "reason_code": "unknown"}},
-    {"action": "clarify", "facts": [], "near": [], "missing": [], "params": {}, "ambiguity": {"parameter": [], "reason_code": "multiple_interpretations"}},
-    {"action": "clarify", "facts": [], "near": [], "missing": [], "params": {}, "ambiguity": {"parameter": "rooms", "reason_code": 1}},
+    {"action": "clarify", "params": {}, "ambiguity": {"parameter": "purpose", "reason_code": "multiple_interpretations"}},
+    {"action": "clarify", "params": {}, "ambiguity": {"parameter": "rooms", "reason_code": "unknown"}},
+    {"action": "clarify", "params": {}, "ambiguity": {"parameter": [], "reason_code": "multiple_interpretations"}},
+    {"action": "clarify", "params": {}, "ambiguity": {"parameter": "rooms", "reason_code": 1}},
     {"action": "continue", "facts": [], "near": [], "missing": [], "params": {}, "ambiguity": {"parameter": "rooms", "reason_code": "multiple_interpretations"}},
     {"action": "request_phone", "facts": [], "near": [], "missing": [], "params": {}, "ambiguity": {"parameter": "rooms", "reason_code": "multiple_interpretations"}},
     {"action": "clarify", "facts": [{"name": "ЖК А"}], "near": [], "missing": [], "params": {}, "ambiguity": {"parameter": "rooms", "reason_code": "multiple_interpretations"}},
     {"action": "clarify", "facts": [], "near": [{"name": "ЖК А"}], "missing": [], "params": {}, "ambiguity": {"parameter": "rooms", "reason_code": "multiple_interpretations"}},
     {"action": "clarify", "facts": [], "near": [], "missing": ["комнаты"], "params": {}, "ambiguity": {"parameter": "rooms", "reason_code": "multiple_interpretations"}},
-    {"action": "clarify", "facts": [], "near": [], "missing": [], "params": {"rooms": 2}, "ambiguity": {"parameter": "rooms", "reason_code": "multiple_interpretations"}},
+    {"action": "clarify", "params": {"rooms": 2}, "ambiguity": {"parameter": "rooms", "reason_code": "multiple_interpretations"}},
 ])
 def test_clarify_rejects_invalid_action_shape_or_cross_field_material(raw):
     with pytest.raises(SimpleContractError):
@@ -188,6 +198,12 @@ def test_prompts_define_genuine_ambiguity_and_unique_typo_contract_statically():
     assert "нельзя безопасно типизировать" in prompt1
     assert "единственную безопасную нормализацию, дают continue" in prompt1
     assert "При clarify не вызывай инструмент" in prompt1
+    assert "Выбери ровно один action" in prompt1
+    assert '- continue: {"action":"continue"' in prompt1
+    assert '- clarify: {"action":"clarify"' in prompt1
+    assert '- request_phone: {"action":"request_phone"}' in prompt1
+    assert "верни facts=[], near=[], missing=[]" not in prompt1
+    assert "ключи facts, near и missing запрещены" in prompt1
     assert "ambiguity не null" in prompt2
     assert "только о параметре ambiguity.parameter" in prompt2
     assert "д о509" not in prompt1

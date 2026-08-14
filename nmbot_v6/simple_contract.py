@@ -161,12 +161,44 @@ def _literal_item(raw: Any, *, name: str, allowed_keys: frozenset[str]) -> dict[
 
 def parse_prompt1(raw: str | Mapping[str, Any]) -> Prompt1Document:
     root = _load(raw, max_chars=12_000)
-    required = {"action", "facts", "near", "missing", "params", "ambiguity"}
-    if set(root) - (required | {"diagnostics"}) or not required <= set(root):
+    if "action" not in root:
         raise SimpleContractError("invalid_prompt1_shape")
     action = root["action"]
     if action not in {"continue", "clarify", "request_phone"}:
         raise SimpleContractError("invalid_prompt1_action")
+
+    optional = {"diagnostics"}
+    if action == "request_phone":
+        if set(root) - ({"action"} | optional):
+            raise SimpleContractError("invalid_prompt1_variant_shape")
+        return Prompt1Document(action, (), (), (), {}, None)
+
+    if action == "clarify":
+        required = {"action", "ambiguity", "params"}
+        if set(root) - (required | optional) or not required <= set(root):
+            raise SimpleContractError("invalid_prompt1_variant_shape")
+        params_raw = root["params"]
+        if not isinstance(params_raw, Mapping) or len(params_raw) > len(PARAM_FIELDS):
+            raise SimpleContractError("invalid_prompt1_bounds")
+        params = {}
+        for key, value in params_raw.items():
+            key = _safe_key(key, "param")
+            if key not in PARAM_FIELDS:
+                raise SimpleContractError("invalid_param_key", field=key)
+            params[key] = _json_value(value)
+        ambiguity_raw = _exact_keys(root["ambiguity"], {"parameter", "reason_code"}, "ambiguity")
+        parameter, reason_code = ambiguity_raw["parameter"], ambiguity_raw["reason_code"]
+        if not isinstance(parameter, str) or parameter not in AMBIGUITY_PARAMETERS:
+            raise SimpleContractError("invalid_ambiguity_parameter")
+        if not isinstance(reason_code, str) or reason_code not in AMBIGUITY_REASON_CODES:
+            raise SimpleContractError("invalid_ambiguity_reason_code")
+        if parameter in params:
+            raise SimpleContractError("ambiguous_parameter_in_params", field=parameter)
+        return Prompt1Document(action, (), (), (), params, Ambiguity(parameter, reason_code))
+
+    required = {"action", "facts", "near", "missing", "params", "ambiguity"}
+    if set(root) - (required | optional) or not required <= set(root):
+        raise SimpleContractError("invalid_prompt1_variant_shape")
     facts_raw, near_raw, missing_raw, params_raw = root["facts"], root["near"], root["missing"], root["params"]
     if (not isinstance(facts_raw, list) or len(facts_raw) > 20 or not isinstance(near_raw, list)
             or len(near_raw) > 3 or not isinstance(missing_raw, list) or len(missing_raw) > 12
@@ -186,27 +218,9 @@ def parse_prompt1(raw: str | Mapping[str, Any]) -> Prompt1Document:
         if key not in PARAM_FIELDS:
             raise SimpleContractError("invalid_param_key", field=key)
         params[key] = _json_value(value)
-    ambiguity_raw = root["ambiguity"]
-    ambiguity = None
-    if action == "clarify":
-        ambiguity_raw = _exact_keys(ambiguity_raw, {"parameter", "reason_code"}, "ambiguity")
-        parameter, reason_code = ambiguity_raw["parameter"], ambiguity_raw["reason_code"]
-        if not isinstance(parameter, str):
-            raise SimpleContractError("invalid_ambiguity_parameter")
-        if not isinstance(reason_code, str):
-            raise SimpleContractError("invalid_ambiguity_reason_code")
-        if parameter not in AMBIGUITY_PARAMETERS:
-            raise SimpleContractError("invalid_ambiguity_parameter")
-        if reason_code not in AMBIGUITY_REASON_CODES:
-            raise SimpleContractError("invalid_ambiguity_reason_code")
-        if facts or near or missing:
-            raise SimpleContractError("clarify_material_not_empty")
-        if parameter in params:
-            raise SimpleContractError("ambiguous_parameter_in_params", field=parameter)
-        ambiguity = Ambiguity(parameter, reason_code)
-    elif ambiguity_raw is not None:
+    if root["ambiguity"] is not None:
         raise SimpleContractError("unexpected_ambiguity")
-    return Prompt1Document(action, tuple(facts), tuple(near), tuple(missing), params, ambiguity)
+    return Prompt1Document(action, tuple(facts), tuple(near), tuple(missing), params, None)
 
 
 def parse_prompt2(

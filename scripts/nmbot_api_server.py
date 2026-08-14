@@ -57,6 +57,8 @@ from dialogue_journal import append_event as append_journal_event
 from nmbot_v1.execution_path import append_jivo_api_prepare as append_v1_jivo_api_prepare, sanitize_execution_path as sanitize_v1_execution_path
 from nmbot_v1.provider_adapters import V1GatewayOneModelResponsePort, V1GatewayPlannerPort, V1GatewaySearchPort
 from nmbot_v4.provider_adapter import V4GatewayOnePromptPort
+from nmbot_v6.simple_gateway import DirectTransport, SimpleGateway
+from nmbot_v6.simple_state import SimpleState
 from nmbot_v2.execution_path import append_jivo_api_prepare, sanitize_execution_path
 from nmbot_release_identity import current_release_id
 from nmbot_egress_policy import SAFE_CLIENT_FALLBACK_TEXT, guard_jivo_event, is_client_production
@@ -66,7 +68,7 @@ from nmbot_planner_context import (
     safe_planner_state as _neutral_safe_planner_state,
     safe_turn_context as _neutral_safe_turn_context,
 )
-from nmbot_runtime_adapter import _canonical_v0_envelope, _canonical_v1_envelope, _canonical_v4_envelope, _canonical_v6_envelope, _merge_runtime_namespace_envelope, run_runtime_turn
+from nmbot_runtime_adapter import _canonical_v0_envelope, _canonical_v1_envelope, _canonical_v4_envelope, _merge_runtime_namespace_envelope, run_runtime_turn
 from nmbot_v0.field_contract import V0_PRESENTATION_TRACE_FIELDS
 from nmbot_v1.state import V1ConversationState
 from nmbot_v2.contracts import OptionCard
@@ -180,7 +182,6 @@ def _default_state() -> dict[str, Any]:
         "last_bot_question": "",
         "last_offer_type": "",
         "last_answer_kind": "",
-        "last_offer": {},
         "active_task": {},
         "active_scenario": {},
         "selected_option_card_shown_count": 0,
@@ -190,6 +191,10 @@ def _default_state() -> dict[str, Any]:
 def _canonical_reset_state() -> dict[str, Any]:
     """Возвращает пустое состояние V2 для нового диалога Jivo."""
     return {"nmbot_v2": ConversationState().to_dict()}
+
+
+def _canonical_v6_envelope() -> dict[str, Any]:
+    return {"nmbot_v6": SimpleState().plain()}
 
 
 def _canonical_reset_state_for_version(version: str) -> dict[str, Any]:
@@ -679,6 +684,15 @@ RUNTIME_IDENTITIES = {
         ),
         "state_namespace": "nmbot_v2",
     },
+    "V6": {
+        "name": "TBD",
+        "start_greeting": (
+            "Здравствуйте! Я помогу подобрать квартиру в Москве и области — "
+            "для жизни, инвестиций или сдачи в аренду. Напишите, какой район или метро рассматриваете, "
+            "сколько комнат нужно и какой бюджет планируете — я сразу начну подбор."
+        ),
+        "state_namespace": "nmbot_v6",
+    },
     "V4": {
         "name": "Марина",
         "start_greeting": (
@@ -686,14 +700,6 @@ RUNTIME_IDENTITIES = {
             "Напишите район или ЖК, сколько комнат нужно и какой бюджет — я сразу предложу подходящие варианты."
         ),
         "state_namespace": "nmbot_v4",
-    },
-    "V6": {
-        "name": "V6",
-        "start_greeting": (
-            "Здравствуйте! Это локальный V6-адаптер для изолированной проверки. "
-            "Напишите, какой район или метро рассматриваете, сколько комнат нужно и какой бюджет планируете."
-        ),
-        "state_namespace": "nmbot_v6",
     },
 }
 SUPPORTED_RUNTIME_VERSIONS = frozenset(RUNTIME_IDENTITIES)
@@ -705,7 +711,7 @@ def _env_bool(name: str, default: str = "0") -> bool:
 
 def _normalize_runtime_version(value: Any) -> str:
     version = str(value or "").strip().upper()
-    return version if version in SUPPORTED_RUNTIME_VERSIONS else "V2"
+    return version if version in SUPPORTED_RUNTIME_VERSIONS else "V6"
 
 
 def _runtime_version_line(version: str) -> str:
@@ -840,18 +846,22 @@ class JsonStateStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
         self._data: dict[str, Any] | None = None
+        self.last_load_error: str | None = None
 
     async def _load(self) -> dict[str, Any]:
         if self._data is not None:
             return self._data
+        self.last_load_error = None
         if not self.path.exists():
             self._data = {}
             return self._data
         try:
             self._data = json.loads(self.path.read_text(encoding="utf-8"))
             if not isinstance(self._data, dict):
+                self.last_load_error = "state_load_error"
                 self._data = {}
         except Exception:
+            self.last_load_error = "state_load_error"
             self._data = {}
         return self._data
 
@@ -861,10 +871,6 @@ class JsonStateStore:
             state = data.get(user_id)
             if not isinstance(state, dict):
                 state = _canonical_reset_state()
-                data[user_id] = state
-            elif is_client_production() and "runtime_version_override" in state:
-                state = dict(state)
-                state.pop("runtime_version_override", None)
                 data[user_id] = state
             return state
 
@@ -908,25 +914,27 @@ class RuntimeVersionStore:
     async def set(self, version: str) -> str:
         normalized = _normalize_runtime_version(version)
         async with self._lock:
-            self._version = normalized
-            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-            tmp.write_text(json.dumps({"version": normalized}, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(self.path)
+            self._write_unlocked(normalized)
             return normalized
 
+    def _write_unlocked(self, version: str) -> None:
+        self._version = version
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp.write_text(json.dumps({"version": version}, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self.path)
+
     async def _get_unlocked(self) -> str:
-        if self._version is not None:
-            return self._version
-        if not self.path.exists():
-            self._version = "V2"
-            return self._version
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except Exception:
-            data = {}
-        version = data.get("version") if isinstance(data, dict) else None
-        self._version = _normalize_runtime_version(version)
-        return self._version
+        persisted = None
+        if self.path.exists():
+            try:
+                value = json.loads(self.path.read_text(encoding="utf-8"))
+                persisted = value.get("version") if isinstance(value, dict) else None
+            except Exception:
+                persisted = None
+        normalized = _supported_runtime_version_or_none(persisted) or "V6"
+        if self._version != normalized:
+            self._version = normalized
+        return normalized
 
 
 class SessionLockRegistry:
@@ -2367,10 +2375,7 @@ async def run_chat(app: web.Application, *, user_id: str, message: str, channel:
 
 
 async def _active_runtime_version(app: web.Application) -> str:
-    store = app.get("runtime_version_store") if hasattr(app, "get") else None
-    if store is not None and hasattr(store, "get"):
-        return _normalize_runtime_version(await store.get())
-    return "V2"
+    return await app["runtime_version_store"].get()
 
 
 def _supported_runtime_version_or_none(value: Any) -> str | None:
@@ -2379,23 +2384,9 @@ def _supported_runtime_version_or_none(value: Any) -> str | None:
 
 
 async def _effective_session_runtime_version(app: web.Application, session_key: str) -> str:
-    if is_client_production():
-        store = app.get("state_store") if hasattr(app, "get") else None
-        if store is not None and hasattr(store, "get") and hasattr(store, "save"):
-            state = await store.get(session_key)
-            if isinstance(state, dict) and "runtime_version_override" in state:
-                clean = dict(state)
-                clean.pop("runtime_version_override", None)
-                await store.save(session_key, clean)
-        return await _active_runtime_version(app)
-    store = app.get("state_store") if hasattr(app, "get") else None
-    if store is not None and hasattr(store, "get"):
-        state = await store.get(session_key)
-        if isinstance(state, dict):
-            override = _supported_runtime_version_or_none(state.get("runtime_version_override"))
-            if override:
-                return override
-    return await _active_runtime_version(app)
+    state = await app["state_store"].get(session_key)
+    override = _supported_runtime_version_or_none(state.get("runtime_version_override")) if isinstance(state, dict) else None
+    return override or await _active_runtime_version(app)
 
 
 async def _reset_state_for_active_runtime(app: web.Application, user_id: str) -> str:
@@ -2413,8 +2404,7 @@ async def _reset_state_for_session_runtime(app: web.Application, user_id: str, v
     store: JsonStateStore = app["state_store"]
     existing = await store.get(user_id)
     next_state = _reset_active_namespace_envelope(existing, normalized)
-    if not is_client_production():
-        next_state["runtime_version_override"] = normalized
+    next_state["runtime_version_override"] = normalized
     await store.save(user_id, next_state)
     return normalized
 
@@ -2811,13 +2801,24 @@ async def handle_api_chat(request: web.Request) -> web.Response:
     if not _api_token_ok(request):
         return _json_response({"ok": False, "error": "unauthorized"}, status=401)
     payload = await request.json()
+    user_id = str(payload.get("user_id") or "api:anonymous")
+    message = str(payload.get("message") or "")
+    if _is_start_command(message):
+        requested = _start_command_version(message)
+        version = await _reset_state_for_session_runtime(request.app, user_id, requested) if requested else await _reset_state_for_active_runtime(request.app, user_id)
+        return _json_response({
+            "ok": True,
+            "answer": _client_visible_start_greeting(version),
+            "meta": {"runtime": version.casefold(), "answer_kind": "start_reset"},
+        })
     result = await run_chat(
         request.app,
-        user_id=str(payload.get("user_id") or "api:anonymous"),
-        message=str(payload.get("message") or ""),
+        user_id=user_id,
+        message=message,
         channel=str(payload.get("channel") or "api"),
         meta=payload.get("meta") if isinstance(payload.get("meta"), dict) else {},
     )
+    _log_runtime_failure(result, route="api_chat")
     return _json_response(result, status=200 if result.get("ok") else 502 if result.get("error") == "upstream_error" else 400)
 
 
@@ -2835,9 +2836,7 @@ async def handle_api_reset(request: web.Request) -> web.Response:
 async def handle_api_runtime_version(request: web.Request) -> web.Response:
     if not _api_token_ok(request):
         return _json_response({"ok": False, "error": "unauthorized"}, status=401)
-    store: RuntimeVersionStore = request.app["runtime_version_store"]
-    version = await store.get()
-    return _json_response({"ok": True, "runtime_version": version})
+    return _json_response({"ok": True, "runtime_version": await request.app["runtime_version_store"].get()})
 
 
 async def handle_api_runtime_version_set(request: web.Request) -> web.Response:
@@ -2846,7 +2845,7 @@ async def handle_api_runtime_version_set(request: web.Request) -> web.Response:
     payload = await request.json()
     raw_version = str(payload.get("runtime_version") or payload.get("version") or "").strip().upper() if isinstance(payload, dict) else ""
     if raw_version not in SUPPORTED_RUNTIME_VERSIONS:
-        return _json_response({"ok": False, "error": "invalid_runtime_version"}, status=400)
+        return _json_response({"ok": False, "error": "unsupported_runtime_version"}, status=400)
     store: RuntimeVersionStore = request.app["runtime_version_store"]
     previous = await store.get()
     current = await store.set(raw_version)
@@ -2908,6 +2907,7 @@ async def handle_jivo(request: web.Request) -> web.Response:
                         "stages": ["jivo_handler"],
                         "fallback": True,
                     },
+                    runtime_version="V6",
                     release_id=current_release_id(),
                 )
             except Exception:
@@ -2970,6 +2970,28 @@ async def process_jivo_client_message(app: web.Application, payload: dict[str, A
         return response_payload, status
 
 
+def _mark_v6_bot_message_returned(result: dict[str, Any]) -> None:
+    """Record API return preparation, never an external Jivo delivery receipt."""
+    meta = result.get("meta") if isinstance(result.get("meta"), dict) else None
+    if not isinstance(meta, dict) or meta.get("runtime") != "v6":
+        return
+    trace = meta.get("v6_trace")
+    stages = trace.get("stages") if isinstance(trace, dict) else None
+    if not isinstance(stages, list) or len(stages) != 5:
+        return
+    bot_stage = stages[4]
+    if isinstance(bot_stage, dict) and bot_stage.get("stage") == "bot_message" and bot_stage.get("status") == "prepared":
+        bot_stage["status"] = "returned"
+
+
+def _journal_v6_trace(result: dict[str, Any]) -> dict[str, Any] | None:
+    meta = result.get("meta") if isinstance(result.get("meta"), dict) else None
+    if not isinstance(meta, dict) or meta.get("runtime") != "v6":
+        return None
+    trace = meta.get("v6_trace")
+    return trace if isinstance(trace, dict) else None
+
+
 async def _process_jivo_client_message_uncached(
     app: web.Application,
     payload: dict[str, Any],
@@ -2990,9 +3012,6 @@ async def _process_jivo_client_message_uncached(
     text = str(message.get("text") or "")
     if _is_start_command(text):
         command_version = _start_command_version(text)
-        if command_version and is_client_production():
-            command_version = None
-        runtime_version = command_version or await _active_runtime_version(app)
         append_journal_event(session_key=session_key, role="user", text=text, event_type="turn", event_id=event_id, meta=journal_meta, runtime_version=runtime_version, release_id=release_id)
         version = (
             await _reset_state_for_session_runtime(app, session_key, command_version)
@@ -3016,13 +3035,14 @@ async def _process_jivo_client_message_uncached(
     if safe_trace_ref and isinstance(result, dict):
         result_meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
         result["meta"] = {**result_meta, "trace_ref": safe_trace_ref}
-    _log_runtime_failure(result)
+    _log_runtime_failure(result, route="jivo")
     _log_search_validation_report(result, runtime_version=runtime_version)
     if result.get("handoff_to_operator") and payload.get("agents_online") is not False:
         append_journal_event(session_key=session_key, role="bot", event_type="handoff", event_id=event_id, meta=journal_meta, answer_kind="invite_agent", runtime_version=runtime_version, release_id=release_id)
         return build_jivo_invite_agent(payload), 200
     answer = _client_visible_runtime_answer(result)
     response_event = build_jivo_bot_message(payload, answer)
+    _mark_v6_bot_message_returned(result)
     append_journal_event(
         session_key=session_key,
         role="bot",
@@ -3038,6 +3058,8 @@ async def _process_jivo_client_message_uncached(
         response_model=_journal_response_model(result),
         error_summary=_journal_error_summary(result),
         runtime_summary=_journal_runtime_summary(result),
+        v6_candidate=_journal_v6_candidate(result),
+        v6_trace=_journal_v6_trace(result),
         runtime_version=runtime_version,
         release_id=release_id,
     )
@@ -3059,9 +3081,19 @@ def _log_v2_runtime_failure(result: dict[str, Any]) -> None:
     _log_runtime_failure(result, runtime_filter="v2")
 
 
-def _log_runtime_failure(result: dict[str, Any], *, runtime_filter: str | None = None) -> None:
-    if result.get("ok") is not False:
-        return
+def _log_runtime_failure(result: dict[str, Any], *, runtime_filter: str | None = None, route: str | None = None) -> None:
+    v6_failure_codes = frozenset({
+        "invalid_input", "mode_off", "missing_v6_ports", "missing_state_store",
+        "invalid_v6_state", "shadow_phone_bypass", "missing_callback_outbox",
+        "callback_enqueue_failed", "callback_not_queued", "phone_dependency_unavailable",
+        "unexpected_phone_bypass", "v6_runtime_failed", "shadow_only", "state_save_failed",
+        "provider_failure", "mcp_contract_violation",
+    })
+
+    v6_failure_stages = frozenset({
+        "runtime_execution", "classifier", "canonical_search", "composer", "publication",
+    })
+
     meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
     trace_ref = _validated_trace_ref(meta.get("trace_ref"))
     runtime = str(meta.get("runtime") or "").strip().lower()
@@ -3071,21 +3103,48 @@ def _log_runtime_failure(result: dict[str, Any], *, runtime_filter: str | None =
     if runtime == "v0":
         _log_v0_runtime_failure(result, trace)
         return
+    if runtime == "v6":
+        failure = trace.get("v6_failure") if isinstance(trace.get("v6_failure"), dict) else {}
+        if not failure:
+            composer = trace.get("response_composer") if isinstance(trace.get("response_composer"), dict) else {}
+            failure = composer.get("v6_failure") if isinstance(composer.get("v6_failure"), dict) else {}
+        if not failure and result.get("ok") is False:
+            raw_code = meta.get("failure_code") or result.get("error_type")
+            if raw_code:
+                code = str(raw_code).strip().lower()
+                code = code if code in v6_failure_codes else "unknown"
+                failure = {"stage": "runtime_execution", "code": code, "call_count": 0}
+        if failure:
+            raw_stage = str(failure.get("stage") or "").strip().lower()
+            stage = raw_stage if raw_stage in v6_failure_stages else "runtime_execution"
+            raw_code = str(failure.get("code") or "").strip().lower()
+            code = raw_code if raw_code in v6_failure_codes else "unknown"
+            try:
+                call_count = max(0, min(int(failure.get("call_count") or 0), 2))
+            except (TypeError, ValueError, OverflowError):
+                call_count = 0
+            _log_error_event({
+                "error_type": "v6_runtime_failure",
+                "stage": stage,
+                "error_code": code,
+                "call_count": call_count,
+                **({"route": route} if route in {"api_chat", "jivo"} else {}),
+                **({"trace_ref": trace_ref} if trace_ref else {}),
+            })
+        return
+    if result.get("ok") is not False:
+        return
     if runtime != "v2":
         return
     timing = trace.get("timing_ms") if isinstance(trace.get("timing_ms"), dict) else {}
-
-    def safe_code(value: Any) -> str | None:
-        normalized = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(value or "").strip())[:80]
-        return normalized or None
 
     event = {
         "error_type": "v2_runtime_failure",
         "stage": "runtime_execution",
         **({"trace_ref": trace_ref} if trace_ref else {}),
-        "error_code": safe_code(trace.get("error_code") or result.get("error_type")),
-        "runtime_stage": safe_code(trace.get("stage")),
-        "action": safe_code(trace.get("action")),
+        "error_code": _safe_report_code(trace.get("error_code") or result.get("error_type")),
+        "runtime_stage": _safe_report_code(trace.get("stage")),
+        "action": _safe_report_code(trace.get("action")),
         "timing_ms": {
             key: int(value)
             for key, value in timing.items()
@@ -3198,6 +3257,13 @@ def _journal_response_composer(result: dict[str, Any]) -> dict[str, Any] | None:
     if not composer:
         return None
     return composer
+
+
+def _journal_v6_candidate(result: dict[str, Any]) -> dict[str, Any] | None:
+    meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+    trace = meta.get("trace") if isinstance(meta.get("trace"), dict) else {}
+    candidate = trace.get("v6_candidate")
+    return candidate if isinstance(candidate, dict) else None
 
 
 def _journal_prompt_provenance(result: dict[str, Any]) -> dict[str, Any] | None:
@@ -3329,22 +3395,15 @@ def _journal_runtime_summary(result: dict[str, Any]) -> dict[str, Any] | None:
     meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
     trace = meta.get("trace") if isinstance(meta.get("trace"), dict) else {}
     summary = trace.get("runtime_summary") if isinstance(trace.get("runtime_summary"), dict) else None
+    if summary is None:
+        v6_trace = meta.get("v6_trace") if isinstance(meta.get("v6_trace"), dict) else {}
+        summary = v6_trace.get("runtime_summary") if isinstance(v6_trace.get("runtime_summary"), dict) else None
     if not summary:
         return None
     stage = _journal_token(summary.get("stage"))
     action = _journal_token(summary.get("action"))
     if not stage or not action:
         return None
-    if stage == "v6_runtime":
-        out = {
-            "stage": stage,
-            "action": action,
-            "call_counts": {"gateway_attempts": _journal_int((summary.get("call_counts") or {}).get("gateway_attempts") if isinstance(summary.get("call_counts"), dict) else 0, 0, 5)},
-        }
-        gateway_attempt_details = _journal_gateway_attempt_details(summary.get("gateway_attempt_details"))
-        if gateway_attempt_details:
-            out["gateway_attempt_details"] = gateway_attempt_details
-        return out
     out = {
         "stage": stage,
         "action": action,
@@ -3364,9 +3423,6 @@ def _journal_runtime_summary(result: dict[str, Any]) -> dict[str, Any] | None:
     gateway_attempt_details = _journal_gateway_attempt_details(summary.get("gateway_attempt_details"))
     if gateway_attempt_details:
         out["gateway_attempt_details"] = gateway_attempt_details
-    inventory_gate = _journal_inventory_gate_summary(summary.get("inventory_gate"))
-    if inventory_gate:
-        out["inventory_gate"] = inventory_gate
     option_enrichment = _journal_option_enrichment(summary.get("option_enrichment"))
     if option_enrichment:
         out["option_enrichment"] = option_enrichment
@@ -3377,21 +3433,6 @@ def _journal_runtime_summary(result: dict[str, Any]) -> dict[str, Any] | None:
     if intent_transition:
         out["intent_transition"] = intent_transition
     return out
-
-
-def _journal_inventory_gate_summary(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    status = str(value.get("status") or "").strip().lower()
-    if not isinstance(value.get("enabled"), bool) or status not in {"filtered", "unchanged", "disabled"}:
-        return {}
-    return {
-        "enabled": value["enabled"],
-        "status": status,
-        "source_count": _journal_int(value.get("source_count"), 0, 1000),
-        "visible_count": _journal_int(value.get("visible_count"), 0, 1000),
-        "excluded_unqualified_count": _journal_int(value.get("excluded_unqualified_count"), 0, 1000),
-    }
 
 
 _JOURNAL_INTENT_GOALS = {
@@ -3511,6 +3552,26 @@ def _journal_gateway_attempt_details(value: Any) -> list[dict[str, Any]]:
         stage = _journal_token(item.get("stage"))
         if stage == "gateway_attempt":
             attempt["stage"] = stage
+        payload_stage = _journal_token(item.get("_payload_stage"))
+        if payload_stage:
+            attempt["_payload_stage"] = payload_stage
+        if payload_stage == "v6_prompt2_question_refiner":
+            if isinstance(item.get("call_attempted"), bool):
+                attempt["call_attempted"] = bool(item.get("call_attempted"))
+            gateway_status = str(item.get("gateway_status") or "").strip()
+            if gateway_status in {"completed", "error", "unknown"}:
+                attempt["gateway_status"] = gateway_status
+            parse_status = str(item.get("parse_status") or "").strip()
+            if parse_status in {"ok", "invalid_json", "missing"}:
+                attempt["parse_status"] = parse_status
+            validator_status = str(item.get("validator_status") or "").strip()
+            if validator_status in {"ok", "rejected", "missing"}:
+                attempt["validator_status"] = validator_status
+            fallback_reason = str(item.get("fallback_reason") or "").strip()
+            if fallback_reason in {"none", "transport", "parse", "semantic", "locked", "length"}:
+                attempt["fallback_reason"] = fallback_reason
+            out.append(attempt)
+            continue
         model = _journal_token(item.get("model"))
         if model:
             attempt["model"] = model
@@ -3520,28 +3581,22 @@ def _journal_gateway_attempt_details(value: Any) -> list[dict[str, Any]]:
         for key in ("ok", "empty", "safe"):
             if isinstance(item.get(key), bool):
                 attempt[key] = bool(item.get(key))
-        payload_stage = _journal_token(item.get("_payload_stage"))
-        if payload_stage in {"v6_search_agent", "v6_answer_writer"}:
-            attempt["_payload_stage"] = payload_stage
-            if item.get("gateway_task_id_present") is True or _journal_token(item.get("gateway_task_id")):
-                attempt["gateway_task_id_present"] = True
-        else:
-            task_id = _journal_token(item.get("gateway_task_id"))
-            if task_id:
-                attempt["gateway_task_id"] = task_id
-        provider_status = _journal_optional_int(item.get("provider_status_code"), 100, 599)
-        if provider_status is not None:
-            attempt["provider_status_code"] = provider_status
+        task_id = _journal_token(item.get("gateway_task_id"))
+        if task_id:
+            attempt["gateway_task_id"] = task_id
         attempt["duration_ms"] = _journal_int(item.get("duration_ms"), 0, 10 * 60 * 1000)
         parse_status = str(item.get("parse_status") or "").strip()
         if parse_status in {"ok", "invalid_json", "missing"}:
             attempt["parse_status"] = parse_status
-        validator_status = str(item.get("validator_status") or "").strip()
-        if validator_status in {"ok", "contract_violation", "missing"}:
-            attempt["validator_status"] = validator_status
         gateway_status = str(item.get("gateway_status") or "").strip()
         if gateway_status in {"completed", "timeout", "error", "unknown"}:
             attempt["gateway_status"] = gateway_status
+        validator_status = str(item.get("validator_status") or "").strip()
+        if validator_status in {"ok", "rejected", "missing"}:
+            attempt["validator_status"] = validator_status
+        fallback_reason = str(item.get("fallback_reason") or "").strip()
+        if fallback_reason in {"none", "transport", "parse", "semantic", "locked", "length"}:
+            attempt["fallback_reason"] = fallback_reason
         response_parse = str(item.get("response_parse") or "").strip()
         if response_parse in {"valid_json", "invalid_json", "empty"}:
             attempt["response_parse"] = response_parse
@@ -3597,12 +3652,6 @@ def _journal_int(value: Any, low: int, high: int) -> int:
     return max(low, min(number, high))
 
 
-def _journal_optional_int(value: Any, low: int, high: int) -> int | None:
-    if isinstance(value, bool) or not isinstance(value, int):
-        return None
-    return value if low <= value <= high else None
-
-
 def _journal_timing(value: Any) -> dict[str, int]:
     timing = value if isinstance(value, dict) else {}
     return {key: _journal_int(timing.get(key), 0, 10 * 60 * 1000) for key in ("planner", "execution", "response", "total")}
@@ -3654,12 +3703,16 @@ def create_app() -> web.Application:
     app["state_store"] = JsonStateStore(state_file)
     app["runtime_version_store"] = RuntimeVersionStore(runtime_version_file)
     app["overmind_client"] = OvermindClient()
+    v6_transport = DirectTransport(app["overmind_client"])
+    app["v6_simple_prompt1_port"] = SimpleGateway(v6_transport, "prompt1")
+    app["v6_simple_prompt2_port"] = SimpleGateway(v6_transport, "prompt2")
     app["v1_planner_port"] = V1GatewayPlannerPort(app["overmind_client"])
     app["v1_search_port"] = V1GatewaySearchPort(app["overmind_client"])
     app["v1_one_model_gpt55_port"] = V1GatewayOneModelResponsePort(app["overmind_client"])
     app["v4_provider_port"] = V4GatewayOnePromptPort(app["overmind_client"])
     app["v1_presenter_mode"] = "off"
     app["crm_callback_outbox"] = LocalCallbackOutbox(Path(os.getenv("NMBOT_CALLBACK_OUTBOX_DIR", str(DEFAULT_CALLBACK_OUTBOX_DIR))).expanduser())
+    app["v6_callback_outbox"] = app["crm_callback_outbox"]
     app["jivo_session_locks"] = SessionLockRegistry()
     app["jivo_dedup_cache"] = JivoDedupCache()
     app.router.add_get("/health", handle_health)

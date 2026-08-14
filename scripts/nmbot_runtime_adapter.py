@@ -16,21 +16,23 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from nmbot_v2.card_normalizer import normalize_card, normalize_search_result
-from nmbot_v2.contracts import ExecutableTurn, ExecutionResult, IntentGoal, IntentPlanV3, OptionCard, RetrySearchContext, SafeTurnContext, SearchResult, SemanticPlan, StateDelta, TurnAction, TurnPlan, TurnResult, to_jsonable
+from nmbot_v2.contracts import ExecutableTurn, ExecutionResult, IntentGoal, IntentPlanV3, OptionCard, ResponseBrief, RetrySearchContext, SafeTurnContext, SearchResult, SelectedEntity, SemanticPlan, StateDelta, TurnAction, TurnPlan, TurnResult, to_jsonable
 from nmbot_v2.conversation import build_native_conversation_answer
 from nmbot_v2.execution_path import sanitize_execution_path
 from nmbot_v2.fact_context import ALLOWED_FACTS, ALLOWED_SUBJECTS, SUBJECT_FACT_MAP, answered_facts, present_fact_names, split_requested_facts
-from nmbot_v2.inventory_gate import project_broad_inventory
 from nmbot_v2.runtime import TurnProcessor
 from nmbot_v2.manager_rewriter import load_prompt as load_manager_rewriter_prompt, manager_rewriter_request_payload as build_manager_rewriter_payload, parse_manager_rewriter_text
 from nmbot_v2.pair_comparison import execute_pair_comparison
 from nmbot_v2.response_composer import compose_response_writer_formatter_async, formatter_request_payload as build_response_formatter_payload, v3_answer_writer_prompt_identity, v3_answer_writer_request_payload as build_v3_answer_writer_payload, writer_request_payload as build_response_writer_payload
 from nmbot_v2.pending import is_pending_contact_name, is_pending_contact_phone, pending_delta_for_action
+from nmbot_v2.pending_action import select_entity
 from nmbot_v2.prompt_provenance import build_prompt_provenance, identity_from_text, merge_prompt_provenance, sanitize_prompt_provenance
 from nmbot_v2.scenario_recipes import FINANCING_CONSENT_FOLLOWUP, OPERATOR_CONSENT_FOLLOWUP, SELECTED_LIVE_FACT_CONSENT_FOLLOWUP, reply_contract_for_pending
+from nmbot_v2.scenario_field_mechanics import build_scenario_context
 from nmbot_v2.search_enrichment import _filter_option_lot_examples, enrich_search_result_top_options, fetch_enriched_option_v2, merge_option_cards
 from nmbot_v2.search_contract import ALLOWED_PREFERENCES, HARD_KEYS, SEARCH_MODEL, build_request_data as build_v2_search_request_data
-from nmbot_v2.search_contract import MCP_ALIAS, available_fact_fields, build_candidate_retrieval_request, build_search_request, is_candidate_retrieval_request, load_prompt as load_v2_search_prompt, normalize_search_output, parse_strict_json, validate_search_output
+from nmbot_v2.search_contract import MCP_ALIAS, available_fact_fields, build_candidate_retrieval_request, build_search_request, is_candidate_retrieval_request, load_prompt as load_v2_search_prompt, matches_hard_constraint, normalize_search_output, parse_strict_json, validate_search_output
+from nmbot_v2 import v5_single_agent
 from nmbot_v2.semantic_planner import DerivedPlannerDecision, SemanticPlannerResult, derive_runtime_decision, normalize_semantic_planner_result, validate_intent_plan_v3
 from nmbot_v2.state import ConversationState, EnrichedCardCacheEntry, apply_state_delta, enriched_cache_entry_is_fresh, enriched_card_identity
 from nmbot_v2.transition import TransitionDecision, compile_executable_turn_v3, derive_transition_v3
@@ -46,11 +48,10 @@ from nmbot_v1.contracts import V1Action, V1Stage
 from nmbot_v4.contracts import V4_FAIL_CLOSED_OBJECT, V4State
 from nmbot_v4.response_validator import compact_json as compact_v4_json
 from nmbot_v4.runtime import run_turn as run_v4_turn
-from nmbot_v6.gateway import Prompt1Gateway, Prompt2Gateway, V6OvermindTransport
-from nmbot_v6.phone import PrivatePhone
-from nmbot_v6.runtime import RuntimeStatus as V6RuntimeStatus, V6Runtime
-from nmbot_v6.state import V6State
+from scripts.nmbot_v6_simple_adapter import run_v6_simple_turn
 from scripts.nmbot_card_reformatter import build_reformat_plan
+from scripts.nmbot_prompt_ledger import append_attempt as append_prompt_ledger_attempt
+from scripts.nmbot_gateway_client import _log_error_event
 
 try:
     from scripts.nmbot_crm_outbox import LocalCallbackOutbox, build_callback_lead_context
@@ -312,43 +313,32 @@ async def run_runtime_turn(
     channel: str,
     meta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Global V0/V2 local runtime adapter for NMBot API/Jivo turns.
-
-    The public transport boundary remains unchanged: callers invoke this adapter
-    with an already-normalized turn. Version selection is server-side only and
-    defaults to V2 unless the protected global setting explicitly says V0.
-    """
-    version = "V2"
+    """Dispatch the selected runtime without routing legacy versions to V6."""
     try:
-        if os.getenv("NMBOT_CONTOUR_PROFILE", "test").strip().lower() == "client_production":
-            version = await _active_runtime_version(app)
-        else:
-            version = await _session_runtime_version(app, user_id) or await _active_runtime_version(app)
+        version = await _session_runtime_version(app, user_id) or await _active_runtime_version(app)
+        if version == "V6":
+            return await run_v6_simple_turn(app, user_id=user_id, message=message, channel=channel, meta=meta)
         if version == "V0":
             return await _run_v0_authoritative(app, user_id=user_id, message=message, channel=channel, meta=meta)
         if version == "V1":
             return await _run_v1_authoritative(app, user_id=user_id, message=message, channel=channel, meta=meta)
-        if version == "V3":
-            return _decorate_v3_result(await _run_v2_authoritative_for_public_runtime(app, user_id=user_id, message=message, channel=channel, meta=meta, runtime_version="v3", engine_version="v2"))
-        if version == "V5":
-            return _decorate_v5_result(await _run_v2_authoritative_for_public_runtime(app, user_id=user_id, message=message, channel=channel, meta=meta, runtime_version="v5", engine_version="v2"))
         if version == "V4":
-            try:
-                return await _run_v4_authoritative(app, user_id=user_id, message=message, channel=channel, meta=meta)
-            except Exception as exc:
-                return _v4_config_error(detail=exc.__class__.__name__, call_count=getattr(exc, "call_attempted", 0))
-        return await _run_v2_authoritative(app, user_id=user_id, message=message, channel=channel, meta=meta)
+            return await _run_v4_authoritative(app, user_id=user_id, message=message, channel=channel, meta=meta)
+        runtime = version.casefold()
+        result = await _run_v2_authoritative_for_public_runtime(
+            app, user_id=user_id, message=message, channel=channel, meta=meta,
+            runtime_version=runtime, engine_version="v2",
+        )
+        return _decorate_v5_result(result) if version == "V5" else _decorate_v3_result(result) if version == "V3" else result
     except (KeyError, TypeError, ValueError, RuntimeError) as exc:
-        if version == "V4":
-            return _v4_config_error(detail=exc.__class__.__name__)
-        return _config_error("v6_runtime_exception" if version == "V6" else "v4_runtime_exception" if version == "V4" else "v1_runtime_exception" if version == "V1" else "v0_runtime_exception" if version == "V0" else "v2_runtime_exception", detail=exc.__class__.__name__, runtime=version.lower())
+        return _config_error(
+            "runtime_exception", detail=exc.__class__.__name__
+        )
 
 
 def _normalize_runtime_version(value: Any) -> str:
     normalized = str(value or "").strip().upper()
-    return normalized if normalized in SUPPORTED_RUNTIME_VERSIONS else "V2"
-        if version == "V6":
-            return await _run_v6_authoritative(app, user_id=user_id, message=message, channel=channel, meta=meta)
+    return normalized if normalized in SUPPORTED_RUNTIME_VERSIONS else "V6"
 
 
 def _decorate_v3_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -720,7 +710,7 @@ async def _active_runtime_version(app: Any) -> str:
         if asyncio.iscoroutine(value):
             value = await value
         return _normalize_runtime_version(value)
-    return "V2"
+    return "V6"
 
 
 async def _session_runtime_version(app: Any, user_id: str) -> str | None:
@@ -938,8 +928,6 @@ def _merge_runtime_namespace_envelope(existing: dict[str, Any] | None, active: d
         value = active.get(key) if isinstance(active, dict) else None
         if isinstance(value, dict):
             merged[key] = copy.deepcopy(value)
-    if os.getenv("NMBOT_CONTOUR_PROFILE", "test").strip().lower() == "client_production":
-        return merged
     override = active.get("runtime_version_override") if isinstance(active, dict) else None
     if override is None and isinstance(source, dict):
         override = source.get("runtime_version_override")
@@ -984,198 +972,6 @@ def _envelope_to_v1_state(envelope: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return V1ConversationState.clean().to_dict()
     try:
-def _canonical_v6_envelope(state: V6State | None = None) -> dict[str, Any]:
-    return {"nmbot_v6": (state or V6State()).safe_projection()}
-
-
-def _envelope_to_v6_state(envelope: dict[str, Any] | None) -> V6State:
-    raw = envelope.get("nmbot_v6") if isinstance(envelope, dict) else None
-    try:
-        return V6State.from_mapping(raw) if isinstance(raw, Mapping) else V6State()
-    except Exception:
-        return V6State()
-
-
-def _v6_runtime_summary(result: Any) -> dict[str, Any]:
-    meta = getattr(result, "meta", {})
-    trace = meta.get("trace") if isinstance(meta, Mapping) else None
-    summary = trace.get("runtime_summary") if isinstance(trace, Mapping) else None
-    if not isinstance(summary, Mapping):
-        return {}
-    details = _safe_gateway_attempt_details(summary.get("gateway_attempt_details"))
-    return {
-        "stage": "v6_runtime",
-        "action": _bounded_token(summary.get("action")) or "unknown",
-        "call_counts": {"gateway_attempts": _bounded_int((summary.get("call_counts") or {}).get("gateway_attempts") if isinstance(summary.get("call_counts"), Mapping) else 0, 0, 5)},
-        **({"gateway_attempt_details": details} if details else {}),
-    }
-
-
-def _v6_public_result(result: Any, *, channel: str) -> dict[str, Any]:
-    raw_text = getattr(result, "text", None)
-    task_ref_echoed = _v6_task_ref_echoed(result)
-    completed = getattr(result, "status", None) is V6RuntimeStatus.COMPLETED and not task_ref_echoed
-    raw_text = raw_text if completed else None
-    answer = _redact(str(raw_text or "").strip())[:1200]
-    if not answer:
-        answer = SAFE_V2_ERROR_TEXT
-    plan = getattr(result, "plan", None)
-    action = str(getattr(getattr(plan, "action", None), "value", "") or "v6_turn")
-    return {
-        "ok": completed,
-        **({"error": "v6_runtime_error", "error_type": "task_ref_echo" if task_ref_echoed else str(getattr(result, "failure_code", "runtime_failure") or "runtime_failure")} if not completed else {}),
-        "answer": answer,
-        "client_answer": answer,
-        "intent": action,
-        "answer_kind": action,
-        "handoff_to_operator": False,
-        "buttons": [],
-        "meta": _v6_public_meta(channel=channel, runtime_summary=_v6_runtime_summary(result)),
-    }
-
-
-_V6_PUBLIC_CHANNELS = frozenset({"jivo", "local"})
-
-
-def _safe_v6_channel(channel: Any) -> str | None:
-    """Return only a known V6 transport token, never caller-controlled text."""
-    candidate = channel if isinstance(channel, str) else ""
-    normalized = candidate.strip().lower()
-    return normalized if normalized in _V6_PUBLIC_CHANNELS else None
-
-
-def _v6_public_meta(*, channel: Any, runtime_summary: dict[str, Any]) -> dict[str, Any]:
-    meta: dict[str, Any] = {"runtime": "v6", "trace": {"runtime_summary": runtime_summary}}
-    safe_channel = _safe_v6_channel(channel)
-    if safe_channel is not None:
-        meta["channel"] = safe_channel
-    return meta
-
-
-def _v6_task_ref_echoed(result: Any) -> bool:
-    evidence = getattr(result, "evidence", None)
-    task_ref = getattr(evidence, "task_ref", None)
-    return bool(
-        getattr(result, "status", None) is V6RuntimeStatus.COMPLETED
-        and isinstance(task_ref, str)
-        and task_ref
-        and task_ref in str(getattr(result, "text", None) or "")
-    )
-
-
-def _v6_callback_context_snapshot(state: V6State, *, channel: str) -> dict[str, Any]:
-    """Build a bounded outbox context without V6 private runtime material."""
-    forbidden = ("phone", "task", "payload", "raw", "contact", "client", "chat", "token", "secret")
-
-    def clean(value: Any, *, depth: int = 0) -> Any:
-        if depth >= 4:
-            return None
-        if isinstance(value, Mapping):
-            out: dict[str, Any] = {}
-            for key, item in list(value.items())[:12]:
-                name = str(key)
-                if any(word in name.lower() for word in forbidden):
-                    continue
-                cleaned = clean(item, depth=depth + 1)
-                if cleaned not in (None, "", [], {}):
-                    out[name[:80]] = cleaned
-            return out
-        if isinstance(value, (list, tuple)):
-            return [item for item in (clean(item, depth=depth + 1) for item in value[:5]) if item not in (None, "", [], {})]
-        if isinstance(value, str):
-            return _redact(value)[:160]
-        if isinstance(value, (bool, int, float)):
-            return value
-        return None
-
-    projection = state.safe_projection()
-    context = {
-        "runtime": "v6",
-        "state": clean(projection),
-    }
-    safe_channel = _safe_v6_channel(channel)
-    if safe_channel is not None:
-        context["channel"] = safe_channel
-    return context
-
-
-def _v6_phone_bypass_public_result(
-    app: Any,
-    *,
-    user_id: str,
-    channel: str,
-    meta: dict[str, Any] | None,
-    result: Any,
-    state: V6State,
-) -> dict[str, Any]:
-    private_phone = getattr(result, "private_phone", None)
-    outbox = _callback_outbox(app)
-    enqueue_callback = getattr(outbox, "enqueue_callback", None) if outbox is not None else None
-    if not callable(enqueue_callback):
-        return _v6_public_result(type("FailedV6", (), {"status": V6RuntimeStatus.FAILED, "text": None, "failure_code": "callback_outbox_unavailable", "plan": None, "meta": {}})(), channel=channel)
-    if type(private_phone) is not PrivatePhone:
-        return _v6_public_result(type("FailedV6", (), {"status": V6RuntimeStatus.FAILED, "text": None, "failure_code": "callback_outbox_unavailable", "plan": None, "meta": {}})(), channel=channel)
-    revealed_phone = private_phone.reveal_for_private_storage()
-    phone = _normalize_phone_v2(revealed_phone) if isinstance(revealed_phone, str) else None
-    if not phone:
-        return _v6_public_result(type("FailedV6", (), {"status": V6RuntimeStatus.FAILED, "text": None, "failure_code": "callback_outbox_unavailable", "plan": None, "meta": {}})(), channel=channel)
-    context = _v6_callback_context_snapshot(state, channel=channel)
-    try:
-        outbox_result = enqueue_callback(
-            session_key=user_id,
-            event_id=_v1_meta_event_id(meta),
-            contact_name="Без имени",
-            normalized_phone=phone,
-            context=context,
-            summary_input=context,
-        )
-    except OSError:
-        return _v6_public_result(type("FailedV6", (), {"status": V6RuntimeStatus.FAILED, "text": None, "failure_code": "callback_outbox_unavailable", "plan": None, "meta": {}})(), channel=channel)
-    if getattr(outbox_result, "status", None) not in {"queued", "duplicate"}:
-        return _v6_public_result(type("FailedV6", (), {"status": V6RuntimeStatus.FAILED, "text": None, "failure_code": "callback_outbox_not_queued", "plan": None, "meta": {}})(), channel=channel)
-    answer = "Спасибо. Заявку на обратный звонок сохранила — специалист свяжется с вами."
-    return {
-        "ok": True,
-        "answer": answer,
-        "client_answer": answer,
-        "intent": "callback_queued",
-        "answer_kind": "callback_queued",
-        "handoff_to_operator": False,
-        "buttons": [],
-        "crm_callback": outbox_result.public(),
-        "meta": _v6_public_meta(channel=channel, runtime_summary={"stage": "v6_runtime", "action": "callback_queued", "call_counts": {"gateway_attempts": 0}}),
-    }
-
-
-async def _run_v6_authoritative(
-    app: Any,
-    *,
-    user_id: str,
-    message: str,
-    channel: str,
-    meta: dict[str, Any] | None,
-    commit: bool = True,
-) -> dict[str, Any]:
-    store = app["state_store"]
-    envelope = copy.deepcopy(await store.get(user_id))
-    state_before = _envelope_to_v6_state(envelope)
-    client = app.get("overmind_client") if hasattr(app, "get") else None
-    if client is None:
-        return _v6_public_result(type("FailedV6", (), {"status": V6RuntimeStatus.FAILED, "text": None, "failure_code": "missing_overmind_client", "plan": None, "meta": {}})(), channel=channel)
-    transport = V6OvermindTransport(client)
-    phone_parser = app.get("v6_phone_parser") if hasattr(app, "get") else None
-    runtime_kwargs = {"phone_parser": phone_parser} if callable(phone_parser) else {}
-    result = await V6Runtime(Prompt1Gateway(transport), Prompt2Gateway(transport), **runtime_kwargs).run(str(message or ""), state_before)
-    state_after = getattr(result, "state", None)
-    if _v6_task_ref_echoed(result):
-        return _v6_public_result(result, channel=channel)
-    if commit and isinstance(state_after, V6State):
-        await store.save(user_id, _merge_runtime_namespace_envelope(envelope, _canonical_v6_envelope(state_after)))
-    if getattr(result, "status", None) is V6RuntimeStatus.PHONE_BYPASS:
-        return _v6_phone_bypass_public_result(app, user_id=user_id, channel=channel, meta=meta, result=result, state=state_after if isinstance(state_after, V6State) else state_before)
-    return _v6_public_result(result, channel=channel)
-
-
         return V1ConversationState.from_dict(raw).to_dict()
     except Exception:
         return V1ConversationState.clean().to_dict()
@@ -1558,6 +1354,9 @@ async def _run_v2_authoritative(
             new_state = _merge_runtime_namespace_envelope(legacy_state, _canonical_v2_envelope(contact_result["state"]))
             await store.save(user_id, new_state)
             return contact_result["public"]
+    v5_candidate_meta: dict[str, Any] | None = None
+    if runtime_version == "v5" and v5_single_agent.mode(os.getenv("NMBOT_V5_SINGLE_AGENT_MODE")) == "shadow":
+        v5_candidate_meta = await _run_v5_single_agent_shadow(app, text=text, state=v2_state)
     context = SafeTurnContext(conversation_ref=user_id, user_text=text, channel=channel, metadata=_safe_meta(meta or {}))
     composer_mode = _runtime_response_composer_mode(runtime_version)
     manager_rewriter_mode = _runtime_manager_rewriter_mode(runtime_version)
@@ -1585,6 +1384,8 @@ async def _run_v2_authoritative(
     )
     result = await processor.process_async(context, v2_state)
     _attach_turn_prompt_provenance(result, planner=planner, search=search)
+    if v5_candidate_meta:
+        result.trace["v5_single_agent"] = v5_candidate_meta
     if not result.execution.ok:
         answer = result.response_text or _v2_failure_text(result, v2_state)
         failure_state = v2_state
@@ -1605,21 +1406,6 @@ async def _run_v2_authoritative(
             )
             should_save_failure_state = True
         if result.action == TurnAction.SEARCH:
-            failure_state = apply_state_delta(
-                failure_state,
-                StateDelta(
-                    clear_fields=(
-                        "selected_option_name",
-                        "selected_enriched",
-                        "last_offer",
-                    ),
-                ),
-            )
-            if not is_recoverable_search_failure:
-                failure_state = apply_state_delta(
-                    failure_state,
-                    StateDelta(clear_fields=("pending_followup",)),
-                )
             failure_state = _state_with_failed_search_retry(failure_state, result, answer)
             should_save_failure_state = True
         if is_recoverable_search_failure:
@@ -1634,7 +1420,7 @@ async def _run_v2_authoritative(
             "intent": "safe_upstream_fallback",
             "awaiting_phone": False,
             "handoff_to_operator": False,
-            "selected_option": failure_state.selected_option_name,
+            "selected_option": v2_state.selected_option_name,
             "buttons": [],
             "meta": {"channel": channel, "runtime": runtime_version, **({"engine": engine_version} if engine_version else {}), "trace": _safe_trace(result)},
         }
@@ -1745,6 +1531,8 @@ class _OvermindSearchAdapter:
         self.last_shortlist_cache_entries: tuple[EnrichedCardCacheEntry, ...] = ()
         self.last_pair_comparison_metadata: dict[str, Any] = {}
         self.prompt_provenance: dict[str, Any] | None = None
+        self.ledger_selected_dispatch = False
+        self.ledger_canonical_dispatch = False
 
     def _record_search_prompt(self, prompt: str) -> None:
         item = identity_from_text("search", "prompts/v2_search_mcp.txt", prompt)
@@ -1844,7 +1632,10 @@ class _OvermindSearchAdapter:
             return result
 
         async def gateway(request_data: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
-            return await _run_v2_low_level_gateway(client, request_data)
+            return await _run_v2_low_level_gateway(
+                client, request_data,
+                ledger_stage="v2_enrichment_gateway" if self.ledger_canonical_dispatch else None,
+            )
 
         try:
             enriched, meta = await enrich_search_result_top_options(
@@ -1855,7 +1646,6 @@ class _OvermindSearchAdapter:
                 max_options=len(cards),
                 timeout=max(0.2, _safe_float_env("NMBOT_V2_ENRICHMENT_ITEM_TIMEOUT", 20.0)),
                 facts_needed=facts_needed if facts_needed is not None else _shortlist_enrichment_facts(contract.response_viewpoint),
-                lot_hard=getattr(contract, "lot_hard", None),
             )
             enriched_cards = enriched.shortlist(limit=len(cards))
             applied_indexes = {
@@ -1882,8 +1672,8 @@ class _OvermindSearchAdapter:
                     applied_indexes,
                     max_options=len(cards),
                 )
-                enriched, gate_attempt = _apply_broad_inventory_gate(enriched, lot_hard=getattr(contract, "lot_hard", None))
-                self.last_attempts = (*self.last_attempts, gate_attempt)
+                enriched, projection = _project_broad_visible_inventory(enriched)
+                self.last_attempts = (*self.last_attempts, projection)
             return enriched
         except Exception as exc:
             self.last_attempts = (*self.last_attempts, {
@@ -1901,7 +1691,21 @@ class _OvermindSearchAdapter:
     async def _search_once(self, client: Any, contract: Any, *, prompt: str, validation_contract: Any | None = None) -> tuple[SearchResult, tuple[dict[str, Any], ...]]:
         strict_contract = validation_contract or contract
         request_data = build_v2_search_request_data(contract, prompt=prompt, model=SEARCH_MODEL)
-        raw, meta = await _run_v2_low_level_gateway(client, request_data)
+        try:
+            raw, meta = await _run_v2_low_level_gateway(
+                client, request_data,
+                ledger_stage="v2_search_gateway" if self.ledger_canonical_dispatch else None,
+            )
+        except Exception:
+            if not self.ledger_canonical_dispatch:
+                append_prompt_ledger_attempt(stage="v2_search_gateway", status="failed", error_code="gateway_exception")
+            raise
+        if not self.ledger_canonical_dispatch:
+            append_prompt_ledger_attempt(
+                stage="v2_search_gateway",
+                status="failed" if meta.get("_safe_fallback") or meta.get("_upstream_error") else "succeeded",
+                error_code="gateway_not_ok" if meta.get("_safe_fallback") or meta.get("_upstream_error") else "",
+            )
         attempts = tuple({**item, "model_role": "search"} for item in _attempts_from_meta(meta))
         if isinstance(meta, dict) and (meta.get("_safe_fallback") or meta.get("_upstream_error")):
             raise RuntimeError("v2_search_gateway_not_ok")
@@ -1919,6 +1723,12 @@ class _OvermindSearchAdapter:
             })
         if validation.get("status") != "valid" or validation.get("errors") or validation.get("warnings"):
             attempts = (*attempts, _search_validation_report_attempt(validation))
+        # An exact result with a hard-constraint violation must never survive
+        # normalization as publishable facts.  Location used to be demoted to
+        # ``near`` below; V6 and the canonical V2 owner now fail closed for all
+        # hard fields (including missing evidence) instead.
+        if any(re.fullmatch(r"fact_\d+_(?:violates_hard|missing_hard_evidence):[a-z_]+", str(error or "")) for error in validation.get("errors") or []):
+            raise RuntimeError("v2_search_hard_validation_failed")
         parsed = _move_location_invalid_facts_to_near(parsed, validation)
         result = normalize_search_result(parsed)
         result = _enforce_exact_named_search_scope(result, strict_contract)
@@ -1936,6 +1746,16 @@ class _OvermindSearchAdapter:
         requested = plan.requested_facts or plan.facts_needed
         split = split_requested_facts(requested, base)
         if requested and not split.missing:
+            self.last_enrichment_trace = {
+                "stage": "v2_option_enrichment",
+                "provenance": "canonical_v2_enrichment",
+                "provenance_status": "skipped_base_complete",
+                "enabled": True,
+                "applied": False,
+                "source": "base",
+                "transport_status": "not_attempted",
+                "publication_source": "base_only",
+            }
             return base
         facts_needed = _selected_enrichment_facts(split.missing or plan.facts_needed, viewpoint)
         lot_hard = _selected_lot_hard_constraints(plan)
@@ -1951,8 +1771,12 @@ class _OvermindSearchAdapter:
             self.last_fresh_facts = tuple(dict.fromkeys(fresh))
             self.last_enrichment_trace = {
                 "stage": "v2_option_enrichment",
+                "provenance": "canonical_v2_enrichment",
+                "provenance_status": "cache",
                 "applied": True,
                 "source": "state_cache",
+                "transport_status": "not_attempted",
+                "publication_source": "cache",
                 "facts": list(self.last_fresh_facts),
                 "availability_evidence": _selected_availability_evidence_trace(requested_facts=facts_needed, fresh_facts=self.last_fresh_facts, meta={"source": "state_cache"}),
             }
@@ -1968,6 +1792,7 @@ class _OvermindSearchAdapter:
             facts_needed=facts_needed,
             lot_hard=lot_hard,
             force_refresh=_enrichment_refresh_requested(plan),
+            ledger_transport=self.ledger_selected_dispatch,
         )
         if meta.get("applied") is True and meta.get("source") != "cache":
             present = set(present_fact_names(enriched))
@@ -2003,6 +1828,24 @@ class _OvermindSearchAdapter:
         )
         self.last_enrichment_trace = {
             "stage": "v2_option_enrichment",
+            "provenance": "canonical_v2_enrichment",
+            "provenance_status": (
+                "transport_success" if meta.get("applied") is True and str(meta.get("source") or "") in {"fetch", "v2_low_level"}
+                else "cache" if meta.get("applied") is True and str(meta.get("source") or "") in {"cache", "state_cache"}
+                else "transport_no_application" if str(meta.get("transport_status") or "") == "success"
+                else "transport_failed" if str(meta.get("transport_status") or "") == "failed"
+                else "skipped" if meta.get("skipped")
+                else "not_invoked"
+            ),
+            "transport_status": str(meta.get("transport_status") or "not_attempted"),
+            "publication_source": (
+                "transport" if (
+                    str(meta.get("transport_status") or "") == "success"
+                    and meta.get("applied") is True
+                )
+                else "cache" if str(meta.get("source") or "") in {"cache", "state_cache"}
+                else "base_only"
+            ),
             "enabled": True,
             "applied": bool(meta.get("applied")),
             "count": 1,
@@ -2164,32 +2007,16 @@ def _enforce_exact_named_search_scope(result: SearchResult, contract: Any) -> Se
     return SearchResult(facts=facts, near=near, missing=result.missing, params=result.params, summary=result.summary)
 
 
-def _broad_inventory_gate_enabled(value: Any = None) -> bool:
-    raw = os.getenv("NMBOT_BROAD_INVENTORY_GATE_ENABLED", "1") if value is None else value
-    normalized = str(raw or "").strip().lower()
-    if normalized in {"0", "false", "no", "off"}:
-        return False
-    return True
-
-
-def _apply_broad_inventory_gate(result: SearchResult, *, lot_hard: Mapping[str, Any] | None = None) -> tuple[SearchResult, dict[str, Any]]:
-    enabled = _broad_inventory_gate_enabled()
+def _project_broad_visible_inventory(result: SearchResult) -> tuple[SearchResult, dict[str, Any]]:
+    """Retain only cards with one positively qualified lot example."""
+    facts = tuple(card for card in result.facts if _broad_card_inventory_evidence(card))
+    near = tuple(card for card in result.near if _broad_card_inventory_evidence(card))
     source_count = len(result.facts) + len(result.near)
-    if not enabled:
-        return result, {
-            "stage": "broad_inventory_gate",
-            "enabled": False,
-            "status": "disabled",
-            "source_count": source_count,
-            "visible_count": source_count,
-            "excluded_unqualified_count": 0,
-        }
-    projected, counts = project_broad_inventory(result, lot_hard=lot_hard)
-    return projected, {
-        "stage": "broad_inventory_gate",
-        "enabled": True,
-        "status": "filtered" if counts["excluded_unqualified_count"] else "unchanged",
-        **counts,
+    return SearchResult(facts=facts, near=near, missing=result.missing, params=result.params, summary=result.summary), {
+        "stage": "broad_inventory_projection",
+        "status": "projected",
+        "visible_count": len(facts) + len(near),
+        "excluded_unqualified_count": source_count - len(facts) - len(near),
     }
 
 
@@ -2210,6 +2037,23 @@ def _retain_broad_enrichment_applied(
         if index in applied_indexes
     )
     return SearchResult(facts=facts, near=near, missing=enriched.missing, params=enriched.params, summary=enriched.summary)
+
+
+def _broad_card_inventory_evidence(card: OptionCard) -> bool:
+    return any(
+        _selected_lot_has_valid_id(lot)
+        and _inventory_wire_code_is_active(getattr(lot, "state", None))
+        and _inventory_wire_code_is_active(getattr(lot, "status", None))
+        for lot in getattr(card, "lot_examples", ()) or ()
+    )
+
+
+def _inventory_wire_code_is_active(value: Any) -> bool:
+    if isinstance(value, bool) or value in (None, ""):
+        return False
+    if isinstance(value, (int, float)):
+        return value == 2
+    return str(value).strip() == "2"
 
 
 def _merge_underfilled_search_result(primary: SearchResult, supplemental: SearchResult, *, limit: int) -> SearchResult:
@@ -2586,7 +2430,7 @@ def _transition_decision_to_dict(decision: TransitionDecision) -> dict[str, Any]
 def _merge_semantic_facets(*sources: Any) -> list[str]:
     out: list[str] = []
     for source in sources:
-        if source in (None, "", [], {}, ()): 
+        if source in (None, "", [], {}, ()):
             continue
         raw_items = [key for key, enabled in source.items() if enabled] if isinstance(source, dict) else source if isinstance(source, (list, tuple, set)) else [source]
         for item in raw_items:
@@ -2749,12 +2593,9 @@ def _inherit_selected_scope(plan: TurnPlan, state: ConversationState) -> TurnPla
 
 
 def _pending_scenario_for_planner(state: ConversationState) -> dict[str, Any] | None:
-    pending_key = state.pending_followup
-    contract = (
-        reply_contract_for_pending(OPERATOR_CONSENT_FOLLOWUP)
-        if pending_key == "contact_name" and not state.contact_consent
-        else reply_contract_for_pending(pending_key)
-    )
+    contract = (reply_contract_for_pending(OPERATOR_CONSENT_FOLLOWUP)
+                if state.pending_followup == "contact_name" and not state.contact_consent
+                else reply_contract_for_pending(state.pending_followup))
     if contract is None:
         return None
     selected = str(state.selected_option_name or (state.selected_enriched.name if state.selected_enriched else "") or "").strip()
@@ -2911,7 +2752,6 @@ def _legacy_to_v2_state(state: dict[str, Any]) -> ConversationState:
         "recent_turns": _safe_recent_turns(state, {}),
         "last_assistant_question": _redact(str(state.get("last_bot_question") or ""))[:1000] or None,
         "last_answer_kind": _redact(str(state.get("last_answer_kind") or ""))[:120] or None,
-        "last_offer": _safe_nested(state.get("last_offer") or {}),
         "operator_declined": bool(state.get("operator_declined")),
         "contact_name": legacy_contact_name,
         "contact_consent": bool(legacy_callback_ref),
@@ -2945,7 +2785,6 @@ def _v2_to_planner_legacy_state(state: ConversationState) -> dict[str, Any]:
         "last_response_text": last_response_text,
         "last_bot_question": state.last_assistant_question or "",
         "last_answer_kind": state.last_answer_kind or "",
-        "last_offer": to_jsonable(state.last_offer),
         "current_options_scope": "one" if state.selected_option_name else "all" if visible else "unknown",
         "dialog_focus": to_jsonable(state.dialog_focus),
         "selected_object": _selected_object_context(state),
@@ -2957,8 +2796,9 @@ def _safe_v2_state_dict(data: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "params", "pending_followup", "selected_option_name", "visible_options", "previous_options",
         "last_search", "operator_offered", "operator_declined", "active_topic", "dialog_focus", "selected_enriched", "enriched_card_cache",
-        "recent_turns", "dialogue_turns", "last_assistant_question", "last_answer_kind", "last_offer", "already_asked", "answered",
+        "recent_turns", "dialogue_turns", "last_assistant_question", "last_answer_kind", "already_asked", "answered",
         "contact_name", "contact_phone_redacted", "contact_consent", "callback_ref", "retry_search",
+        "selected_entity", "pending_action",
     }
     return {key: _safe_nested(value) for key, value in data.items() if key in allowed}
 
@@ -3058,10 +2898,8 @@ def _try_capture_contact(
     if not (pending_name or pending_phone):
         return None
     if pending_name:
-        # A pending name must not decide the meaning of the preceding operator
-        # offer locally. Let the single semantic planner resolve consent,
-        # decline, a new question, or an actual name from the structured
-        # operator-consent scenario.
+        # Let the single semantic planner resolve consent, decline, a new
+        # question, or an actual name from the structured scenario.
         phone = _extract_phone_v2(text)
         if phone:
             _save_v2_contact_draft(app, user_id=user_id, phone=phone, event_id=str(meta.get("event_id") or ""))
@@ -3142,11 +2980,14 @@ def _queue_callback_result(app: Any, *, user_id: str, channel: str, meta: dict[s
                 clear_fields=("pending_followup",),
             ),
         )
-    answer = (
-        f"Приняла, {name}. Заявка по текущему подбору передана оператору."
-        if callback_ref
-        else f"Приняла, {name}. Контакт сохранила; оператор сможет продолжить текущий подбор."
-    )
+    if runtime_version.casefold() == "v6":
+        answer = f"Спасибо, {name}. Заявка передана оператору. До связи!"
+    else:
+        answer = (
+            f"Приняла, {name}. Заявка по текущему подбору передана оператору."
+            if callback_ref
+            else f"Приняла, {name}. Контакт сохранила; оператор сможет продолжить текущий подбор."
+        )
     if not isinstance(state, ConversationState):
         next_state = replace(
             state,
@@ -3495,14 +3336,44 @@ def _area_from_v2_fact(raw: dict[str, Any]) -> str | None:
     return None
 
 
-async def _run_v2_low_level_gateway(client: Any, request_data: dict[str, Any], *, timeout_env: str = "NMBOT_V2_SEARCH_TIMEOUT") -> tuple[Any, dict[str, Any]]:
+async def _run_v2_low_level_gateway(client: Any, request_data: dict[str, Any], *, timeout_env: str = "NMBOT_V2_SEARCH_TIMEOUT", ledger_stage: str | None = None) -> tuple[Any, dict[str, Any]]:
     if not hasattr(client, "_run_gateway_request"):
         raise RuntimeError("v2_low_level_gateway_missing")
     headers = {"Authorization": f"Bearer {os.getenv('OVERMIND_TOKEN') or os.getenv('GATEWAY_POLL_TOKEN') or ''}"}
     default_timeout = "25" if timeout_env == "NMBOT_V2_RESPONSE_TIMEOUT" else os.getenv("NMBOT_REASON_TIMEOUT", "90")
     timeout = int(os.getenv(timeout_env, default_timeout))
-    raw, meta = await client._run_gateway_request(request_data, headers, timeout)
+    payload = dict(request_data)
+    if ledger_stage in {"v2_search_gateway", "v2_enrichment_gateway"}:
+        prompt = str(payload.get("system_prompt") or "")
+        payload["_prompt_dispatch"] = {
+            "stage": ledger_stage,
+            "prompt_source": "prompts/v2_search_mcp.txt",
+            "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest() if prompt else "",
+        }
+    raw, meta = await client._run_gateway_request(payload, headers, timeout)
     return raw if raw is not None else "", meta if isinstance(meta, dict) else {}
+
+
+async def _run_v2_selected_enrichment_gateway_once(client: Any, request_data: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+    """One selected-card dispatch with its ledger row at the transport boundary."""
+    if not hasattr(client, "_run_gateway_request_once"):
+        raise RuntimeError("v2_selected_enrichment_gateway_once_missing")
+    headers = {"Authorization": f"Bearer {os.getenv('OVERMIND_TOKEN') or os.getenv('GATEWAY_POLL_TOKEN') or ''}"}
+    timeout = int(os.getenv("NMBOT_V2_ENRICHMENT_ITEM_TIMEOUT", "20"))
+    prompt = str(request_data.get("system_prompt") or "")
+    prompt_sha = hashlib.sha256(prompt.encode("utf-8")).hexdigest() if prompt else ""
+    retry = 1 if "selected_exact_repair" in str((request_data.get("query") or "")) else 0
+    payload = dict(request_data)
+    # The low-level transport owns the single physical-dispatch ledger row,
+    # including cancellation after POST acceptance.
+    payload["_prompt_dispatch"] = {
+        "stage": "v2_enrichment_gateway",
+        "prompt_source": "prompts/v2_search_mcp.txt",
+        "prompt_sha256": prompt_sha,
+    }
+    raw, meta = await client._run_gateway_request_once(payload, headers, timeout, metrics_retry=retry)
+    safe_meta = meta if isinstance(meta, dict) else {}
+    return raw if raw is not None else "", safe_meta
 
 
 async def _run_v2_response_gateway_once(client: Any, request_data: dict[str, Any], *, timeout_env: str = "NMBOT_V2_RESPONSE_TIMEOUT") -> tuple[Any, dict[str, Any]]:
@@ -3515,14 +3386,41 @@ async def _run_v2_response_gateway_once(client: Any, request_data: dict[str, Any
     return raw if raw is not None else "", meta if isinstance(meta, dict) else {}
 
 
+async def _run_v5_single_agent_shadow(app: Any, *, text: str, state: ConversationState) -> dict[str, Any]:
+    """Run exactly one non-authoritative V5 gateway candidate."""
+    try:
+        visible = [card.name for card in state.visible_options[:3] if str(card.name or "").strip()]
+        request = v5_single_agent.build_request(
+            client_message=text,
+            previous_assistant_message=_v5_previous_assistant_message(state),
+            visible_option_names=visible,
+            selected_option_name=state.selected_option_name,
+            pending_followup=state.pending_followup,
+            last_offer_type=state.last_answer_kind,
+        )
+        client = app.get("overmind_client") if hasattr(app, "get") else app["overmind_client"]
+        raw, gateway_meta = await _run_v2_response_gateway_once(client, request, timeout_env="NMBOT_V5_SINGLE_AGENT_TIMEOUT")
+        return v5_single_agent.result_from_gateway(raw, gateway_meta).to_meta()
+    except Exception:
+        return v5_single_agent.V5SingleAgentResult(status="fallback", validation_errors=("gateway_exception",)).to_meta()
+
+
+def _v5_previous_assistant_message(state: ConversationState) -> str | None:
+    for turn in reversed(state.dialogue_turns):
+        if isinstance(turn, Mapping) and str(turn.get("assistant") or "").strip():
+            return str(turn["assistant"])
+    return state.last_assistant_question
+
+
 class _ResponseComposerAdapter:
-    """V2/V3 conditional response composer gateway adapter.
+    """V2/V3/V6 conditional response composer gateway adapter.
 
     Gemini timeout is NMBOT_V2_RESPONSE_TIMEOUT (default 25s); formatter timeout
     is NMBOT_RESPONSE_FORMATTER_TIMEOUT (default 20s) and is used only for
     repairable JSON/mechanical failures. Both stages use the single-shot gateway
-    route only. V0 is deliberately excluded because it has a separate
-    deterministic presentation path and no ResponseBrief adapter.
+    route only. V6 supplies its own bounded ResponseBrief projection. V0 is
+    deliberately excluded because it has a separate deterministic presentation
+    path and no ResponseBrief adapter.
     """
 
     def __init__(self, app: Any, *, runtime_version: str = "v2") -> None:
@@ -3535,10 +3433,17 @@ class _ResponseComposerAdapter:
         return build_response_writer_payload(brief, model=model)
 
     async def compose_response(self, brief: Any, *, fallback_text: str) -> Any:
-        async def gateway_writer(inner_brief: Any, *, model: str = "google/gemini-2.5-flash") -> tuple[Any, dict[str, Any]]:
+        async def gateway_writer(inner_brief: Any, *, model: str = "google/gemini-3-flash-preview") -> tuple[Any, dict[str, Any]]:
             client = self.app.get("overmind_client") if hasattr(self.app, "get") else self.app["overmind_client"]
             payload = self._writer_payload(inner_brief, model=model)
-            raw, meta = await _run_v2_response_gateway_once(client, payload)
+            try:
+                raw, meta = await _run_v2_response_gateway_once(client, payload)
+            except Exception as exc:
+                if self.runtime_version == "v6":
+                    _record_v6_response_dispatch("v6_response_writer", payload, failed=True, error_code=exc.__class__.__name__)
+                raise
+            if self.runtime_version == "v6":
+                _record_v6_response_dispatch("v6_response_writer", payload, meta=meta)
             safe_meta = meta if isinstance(meta, dict) else {}
             primary_failed = bool(
                 safe_meta.get("_upstream_error")
@@ -3558,13 +3463,43 @@ class _ResponseComposerAdapter:
         async def gateway_formatter(inner_brief: Any, *, writer_text: str, model: str = "inclusionai/ling-2.6-flash") -> tuple[Any, dict[str, Any]]:
             client = self.app.get("overmind_client") if hasattr(self.app, "get") else self.app["overmind_client"]
             payload = build_response_formatter_payload(writer_text, inner_brief, model=model)
-            return await _run_v2_response_gateway_once(client, payload, timeout_env="NMBOT_RESPONSE_FORMATTER_TIMEOUT")
+            try:
+                raw, meta = await _run_v2_response_gateway_once(client, payload, timeout_env="NMBOT_RESPONSE_FORMATTER_TIMEOUT")
+            except Exception as exc:
+                if self.runtime_version == "v6":
+                    _record_v6_response_dispatch("v6_response_formatter", payload, failed=True, error_code=exc.__class__.__name__)
+                raise
+            if self.runtime_version == "v6":
+                _record_v6_response_dispatch("v6_response_formatter", payload, meta=meta)
+            return raw, meta
 
         kwargs: dict[str, Any] = {}
         if self.runtime_version == "v3":
             kwargs["writer_prompt_identity"] = v3_answer_writer_prompt_identity()
             kwargs["validation_mode"] = "v3"
+        elif self.runtime_version == "v6":
+            # V6 reuses the V2 prompts/payload, but publishes only through the
+            # stricter existing canonical-fact validation boundary.
+            kwargs["validation_mode"] = "v3"
         return await compose_response_writer_formatter_async(brief, fallback_text=fallback_text, writer=gateway_writer, formatter=gateway_formatter, **kwargs)
+
+
+def _record_v6_response_dispatch(stage: str, payload: Mapping[str, Any], *, meta: Any = None, failed: bool = False, error_code: Any = "") -> None:
+    """Write V6 writer/formatter attempts where their one-shot transport returns."""
+    if stage not in {"v6_response_writer", "v6_response_formatter"}:
+        return
+    safe_meta = meta if isinstance(meta, Mapping) else {}
+    transport_failed = failed or bool(safe_meta.get("_safe_fallback") or safe_meta.get("_upstream_error") or safe_meta.get("ok") is False)
+    prompt = str(payload.get("system_prompt") or "")
+    append_prompt_ledger_attempt(
+        stage=stage,
+        status="failed" if transport_failed else "accepted",
+        prompt_source="prompts/v2_response_writer.txt" if stage == "v6_response_writer" else "prompts/v2_response_formatter.txt",
+        prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest() if prompt else "",
+        model=payload.get("model"),
+        error_code=_bounded_v6_error_code(error_code or "gateway_not_ok") if transport_failed else "",
+        task_id=safe_meta.get("_gateway_task_id") or safe_meta.get("task_id"),
+    )
 
 
 class _ManagerRewriterAdapter:
@@ -3690,6 +3625,25 @@ def _safe_gateway_attempt(value: Any) -> dict[str, Any] | None:
         return None
     stage = str(value.get("stage") or "gateway_attempt").strip()
     out: dict[str, Any] = {"stage": "gateway_attempt" if stage == "gateway_attempt" else "gateway_attempt"}
+    payload_stage = _bounded_token(value.get("_payload_stage"))
+    if payload_stage:
+        out["_payload_stage"] = payload_stage
+    if payload_stage == "v6_prompt2_question_refiner":
+        if isinstance(value.get("call_attempted"), bool):
+            out["call_attempted"] = bool(value.get("call_attempted"))
+        gateway_status = str(value.get("gateway_status") or "").strip()
+        if gateway_status in {"completed", "error", "unknown"}:
+            out["gateway_status"] = gateway_status
+        parse_status = str(value.get("parse_status") or "").strip()
+        if parse_status in {"ok", "invalid_json", "missing"}:
+            out["parse_status"] = parse_status
+        validator_status = str(value.get("validator_status") or "").strip()
+        if validator_status in {"ok", "rejected", "missing"}:
+            out["validator_status"] = validator_status
+        fallback_reason = str(value.get("fallback_reason") or "").strip()
+        if fallback_reason in {"none", "transport", "parse", "semantic", "locked", "length"}:
+            out["fallback_reason"] = fallback_reason
+        return out
     model = _bounded_token(value.get("model"))
     if model:
         out["model"] = model
@@ -3699,16 +3653,9 @@ def _safe_gateway_attempt(value: Any) -> dict[str, Any] | None:
     for key in ("ok", "empty", "safe"):
         if isinstance(value.get(key), bool):
             out[key] = bool(value.get(key))
-    if is_v6:
-        if value.get("gateway_task_id_present") is True or _bounded_token(value.get("gateway_task_id")):
-            out["gateway_task_id_present"] = True
-    else:
-        task_id = _bounded_token(value.get("gateway_task_id"))
-        if task_id:
-            out["gateway_task_id"] = task_id
-    provider_status = value.get("provider_status_code")
-    if isinstance(provider_status, int) and not isinstance(provider_status, bool) and 100 <= provider_status <= 599:
-        out["provider_status_code"] = provider_status
+    task_id = _bounded_token(value.get("gateway_task_id"))
+    if task_id:
+        out["gateway_task_id"] = task_id
     out["duration_ms"] = _bounded_int(value.get("duration_ms"), 0, 10 * 60 * 1000)
     parse_status = str(value.get("parse_status") or "").strip()
     if parse_status in {"ok", "invalid_json", "missing"}:
@@ -3716,6 +3663,12 @@ def _safe_gateway_attempt(value: Any) -> dict[str, Any] | None:
     gateway_status = str(value.get("gateway_status") or "").strip()
     if gateway_status in {"completed", "timeout", "error", "unknown"}:
         out["gateway_status"] = gateway_status
+    validator_status = str(value.get("validator_status") or "").strip()
+    if validator_status in {"ok", "rejected", "missing"}:
+        out["validator_status"] = validator_status
+    fallback_reason = str(value.get("fallback_reason") or "").strip()
+    if fallback_reason in {"none", "transport", "parse", "semantic", "locked", "length"}:
+        out["fallback_reason"] = fallback_reason
     response_parse = str(value.get("response_parse") or "").strip()
     if response_parse in {"valid_json", "invalid_json", "empty"}:
         out["response_parse"] = response_parse
@@ -3732,10 +3685,6 @@ def _safe_gateway_attempt(value: Any) -> dict[str, Any] | None:
         out["request_shape"] = safe_shape
     return out
 
-    payload_stage = str(value.get("_payload_stage") or "").strip()
-    is_v6 = payload_stage in {"v6_search_agent", "v6_answer_writer"}
-    if is_v6:
-        out["_payload_stage"] = payload_stage
 
 def _safe_model_usage(value: Any) -> dict[str, list[str]]:
     if not isinstance(value, dict):
@@ -3752,9 +3701,6 @@ def _safe_model_usage(value: Any) -> dict[str, list[str]]:
         models = [model for model in (_bounded_token(item) for item in raw_items) if model]
         if models:
             out[role] = list(dict.fromkeys(models))[:3]
-    validator_status = str(value.get("validator_status") or "").strip()
-    if validator_status in {"ok", "contract_violation", "missing"}:
-        out["validator_status"] = validator_status
     return out
 
 
@@ -3888,10 +3834,11 @@ async def _get_or_fetch_v2_enriched_option(
     facts_needed: tuple[str, ...] | list[str] | None = None,
     lot_hard: Mapping[str, Any] | None = None,
     force_refresh: bool = False,
+    ledger_transport: bool = False,
 ) -> tuple[OptionCard, dict[str, Any]]:
     key = _v2_option_enrichment_key(option, viewpoint, facts_needed, lot_hard)
     if not key:
-        return option, {"applied": False, "source": "base", "skipped": "missing_key"}
+        return option, {"applied": False, "source": "base", "transport_status": "not_attempted", "skipped": "missing_key"}
     cache = _v2_enrichment_cache(app)
     cached = cache.get(key)
     if not force_refresh and isinstance(cached, dict) and isinstance(cached.get("option"), dict) and _v2_process_cache_fresh(cached):
@@ -3899,18 +3846,20 @@ async def _get_or_fetch_v2_enriched_option(
         cached_option = _filter_option_lot_examples(cached_option, lot_hard)
         if not split_requested_facts(facts_needed or (), cached_option).missing:
             cache.move_to_end(key)
-            return cached_option, {"applied": True, "source": "cache", "key": key, "ts": cached.get("ts")}
+            return cached_option, {"applied": True, "source": "cache", "transport_status": "not_attempted", "key": key, "ts": cached.get("ts")}
     client = app.get("overmind_client") if hasattr(app, "get") else None
     if client is None:
-        return option, {"applied": False, "source": "base", "key": key, "skipped": "client_missing"}
+        return option, {"applied": False, "source": "base", "key": key, "transport_status": "not_attempted", "skipped": "client_missing"}
     safe_lot_hard = dict(lot_hard or {}) if isinstance(lot_hard, Mapping) else {}
     fetch_accepts_lot_hard = bool(hasattr(client, "fetch_enriched_option") and _client_fetch_enrichment_accepts_lot_hard(client))
     use_low_level = not hasattr(client, "fetch_enriched_option") or (bool(safe_lot_hard) and not fetch_accepts_lot_hard)
     if use_low_level:
         if not hasattr(client, "_run_gateway_request"):
-            return option, {"applied": False, "source": "base", "key": key, "skipped": "client_lot_hard_unsupported" if safe_lot_hard else "client_missing"}
+            return option, {"applied": False, "source": "base", "key": key, "transport_status": "not_attempted", "skipped": "client_lot_hard_unsupported" if safe_lot_hard else "client_missing"}
 
         async def gateway(request_data: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+            if ledger_transport:
+                return await _run_v2_selected_enrichment_gateway_once(client, request_data)
             return await _run_v2_low_level_gateway(client, request_data)
 
         enriched, meta = await fetch_enriched_option_v2(
@@ -3923,7 +3872,7 @@ async def _get_or_fetch_v2_enriched_option(
             lot_hard=lot_hard,
         )
         if enriched == option:
-            out = {"applied": False, "source": "base", "key": key, "skipped": str(meta.get("skipped") or "low_level_not_applied")}
+            out = {"applied": False, "source": "base", "key": key, "transport_status": str(meta.get("transport_status") or "success"), "skipped": str(meta.get("skipped") or "low_level_not_applied")}
             if isinstance(meta.get("recovery"), dict):
                 out["recovery"] = _safe_nested(meta.get("recovery"))
             if meta.get("initial_skipped"):
@@ -3933,7 +3882,7 @@ async def _get_or_fetch_v2_enriched_option(
             return option, out
         cache[key] = {"option": to_jsonable(enriched), "meta": _safe_nested(meta), "ts": datetime.now(timezone.utc).isoformat()}
         _trim_v2_enrichment_cache(cache)
-        out = {"applied": True, "source": "v2_low_level", "key": key, "ts": cache[key]["ts"]}
+        out = {"applied": True, "source": "v2_low_level", "transport_status": "success", "key": key, "ts": cache[key]["ts"]}
         if isinstance(meta.get("recovery"), dict):
             out["recovery"] = _safe_nested(meta.get("recovery"))
         return enriched, out
@@ -3948,16 +3897,16 @@ async def _get_or_fetch_v2_enriched_option(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        return option, {"applied": False, "source": "base", "key": key, "skipped": exc.__class__.__name__}
+        return option, {"applied": False, "source": "base", "key": key, "transport_status": "failed", "skipped": exc.__class__.__name__}
     if isinstance(enriched_raw, dict) and not _v2_enriched_identity_matches(option, enriched_raw):
-        return option, {"applied": False, "source": "base", "key": key, "skipped": "identity_mismatch", "meta": _safe_nested(meta)}
+        return option, {"applied": False, "source": "base", "key": key, "transport_status": "success", "skipped": "identity_mismatch", "meta": _safe_nested(meta)}
     enriched = _merge_v2_option(option, _option_from_legacy(enriched_raw) if isinstance(enriched_raw, dict) else option)
     enriched = _filter_option_lot_examples(enriched, lot_hard)
     if enriched == option:
-        return option, {"applied": False, "source": "base", "key": key, "skipped": "empty_enrichment", "meta": _safe_nested(meta)}
+        return option, {"applied": False, "source": "base", "key": key, "transport_status": "success", "skipped": "empty_enrichment", "meta": _safe_nested(meta)}
     cache[key] = {"option": to_jsonable(enriched), "meta": _safe_nested(meta), "ts": datetime.now(timezone.utc).isoformat()}
     _trim_v2_enrichment_cache(cache)
-    return enriched, {"applied": True, "source": "fetch", "key": key, "meta": _safe_nested(meta), "ts": cache[key]["ts"]}
+    return enriched, {"applied": True, "source": "fetch", "transport_status": "success", "key": key, "meta": _safe_nested(meta), "ts": cache[key]["ts"]}
 
 
 def _v2_enrichment_cache(app: Any) -> OrderedDict[str, dict[str, Any]]:
@@ -4225,7 +4174,34 @@ def _safe_trace(result: TurnResult) -> dict[str, Any]:
     execution_path = sanitize_execution_path(result.trace.get("execution_path"))
     if execution_path:
         safe["execution_path"] = execution_path
+    candidate = result.trace.get("v5_single_agent") if isinstance(result.trace.get("v5_single_agent"), dict) else None
+    if candidate:
+        safe_candidate = _safe_v5_single_agent_trace(candidate)
+        if safe_candidate:
+            safe["v5_single_agent"] = safe_candidate
     return safe
+
+
+def _safe_v5_single_agent_trace(value: Mapping[str, Any]) -> dict[str, Any]:
+    if value.get("contour") != "v5_single_agent" or value.get("mode") != "shadow":
+        return {}
+    status = str(value.get("status") or "")
+    if status not in {"accepted", "rejected", "fallback"}:
+        return {}
+    out: dict[str, Any] = {"contour": "v5_single_agent", "mode": "shadow", "status": status, "payload_stage": "v5_single_agent"}
+    for key in ("task_id", "model"):
+        token = _bounded_token(value.get(key))
+        if token:
+            out[key] = token
+    provider = value.get("provider_meta") if isinstance(value.get("provider_meta"), dict) else {}
+    out["provider_meta"] = {"transport": "gateway", "agent": "gateway-agent", "upstream_provider": "openrouter", "fallback": False}
+    errors = value.get("validation_errors") if isinstance(value.get("validation_errors"), list) else []
+    out["validation_errors"] = [str(item) for item in errors if re.fullmatch(r"[a-z0-9_]{1,64}", str(item))][:8]
+    provenance = value.get("prompt_provenance") if isinstance(value.get("prompt_provenance"), dict) else {}
+    source, sha = str(provenance.get("source") or ""), str(provenance.get("sha256") or "")
+    if source == "prompts/v5_single_agent.txt" and re.fullmatch(r"[0-9a-f]{64}", sha):
+        out["prompt_provenance"] = {"source": source, "sha256": sha}
+    return out
 
 
 def _attach_turn_prompt_provenance(result: TurnResult, *, planner: Any, search: Any) -> None:
@@ -4337,9 +4313,6 @@ def _safe_runtime_summary_trace(value: Any) -> dict[str, Any]:
     gateway_attempt_details = _safe_gateway_attempt_details(value.get("gateway_attempt_details"))
     if gateway_attempt_details:
         summary["gateway_attempt_details"] = gateway_attempt_details
-    inventory_gate = _safe_inventory_gate_summary(value.get("inventory_gate"))
-    if inventory_gate:
-        summary["inventory_gate"] = inventory_gate
     option_enrichment = _safe_runtime_option_enrichment(value.get("option_enrichment"))
     if option_enrichment:
         summary["option_enrichment"] = option_enrichment
@@ -4353,21 +4326,6 @@ def _safe_runtime_summary_trace(value: Any) -> dict[str, Any]:
     if intent_transition:
         summary["intent_transition"] = intent_transition
     return summary
-
-
-def _safe_inventory_gate_summary(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    status = str(value.get("status") or "").strip().lower()
-    if not isinstance(value.get("enabled"), bool) or status not in {"filtered", "unchanged", "disabled"}:
-        return {}
-    return {
-        "enabled": value["enabled"],
-        "status": status,
-        "source_count": _bounded_int(value.get("source_count"), 0, 1000),
-        "visible_count": _bounded_int(value.get("visible_count"), 0, 1000),
-        "excluded_unqualified_count": _bounded_int(value.get("excluded_unqualified_count"), 0, 1000),
-    }
 
 
 def _safe_pair_comparison_summary(value: Any) -> dict[str, Any] | None:

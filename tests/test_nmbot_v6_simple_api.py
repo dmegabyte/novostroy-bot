@@ -76,7 +76,7 @@ def test_v1_and_v4_selectors_remain_isolated_from_simple_v6(monkeypatch):
 
 
 def test_actual_simple_operator_request_prepares_bot_message_without_handoff():
-    p1 = Port({"action": "request_phone", "facts": [], "near": [], "missing": [], "params": {}})
+    p1 = Port({"action": "request_phone", "facts": [], "near": [], "missing": [], "params": {}, "ambiguity": None})
     p2 = Port({"action": "request_phone", "response": "", "final_question": ""})
     app = {"state_store": Store(), "v6_simple_prompt1_port": p1, "v6_simple_prompt2_port": p2}
     result = asyncio.run(run_v6_simple_turn(app, user_id="s", message="Позовите специалиста", channel="jivo"))
@@ -107,7 +107,7 @@ def test_h138_safe_fallback_commits_public_offer_without_operator_handoff():
     store = Store()
     app = {
         "state_store": store,
-        "v6_simple_prompt1_port": SequencePort([{"action": "continue", "facts": [], "near": [], "missing": [], "params": {"unknown_source_key": "private-value"}}]),
+        "v6_simple_prompt1_port": SequencePort([{"action": "continue", "facts": [], "near": [], "missing": [], "params": {"unknown_source_key": "private-value"}, "ambiguity": None}]),
         "v6_simple_prompt2_port": SequencePort([RuntimeError("must not be called")]),
     }
     result = asyncio.run(run_v6_simple_turn(app, user_id="s", message="Обычный вопрос", channel="jivo"))
@@ -124,7 +124,7 @@ def test_h138_safe_fallback_commits_public_offer_without_operator_handoff():
 def test_related_consent_after_saved_safe_offer_is_owned_by_p1():
     offer = "Сейчас не удалось проверить базу по вашему запросу. Хотите, чтобы этот запрос проверил специалист?"
     store = Store({"nmbot_v6": {"schema_version": 2, "revision": 1, "history": [{"role": "user", "text": "двушка"}, {"role": "assistant", "text": offer}], "awaiting_phone": False, "client_turn_count": 1, "pending_offer": "specialist_contact"}})
-    p1 = Port({"action": "request_phone", "facts": [], "near": [], "missing": [], "params": {}})
+    p1 = Port({"action": "request_phone", "facts": [], "near": [], "missing": [], "params": {}, "ambiguity": None})
     p2 = Port({"action": "reply", "response": "must not run", "final_question": ""})
     result = asyncio.run(run_v6_simple_turn({"state_store": store, "v6_simple_prompt1_port": p1, "v6_simple_prompt2_port": p2}, user_id="s", message="Да", channel="jivo"))
     assert result["answer"] == "На какой номер вам позвонить?" and p2.calls == 0

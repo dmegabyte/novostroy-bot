@@ -2781,6 +2781,16 @@ NotebookLM source note: `Session 2026-07-01 — selected complex formatting depl
   existing `SelectedEntity` import mismatch in `nmbot_runtime_adapter.py`.
   Neither blocker was changed under H083. Git/deploy remain gated on isolated
   review and a clean immutable source artifact.
+### H146 — V6-simple typed search clarification (2026-08-14, **reviewed local candidate**)
+
+- **Actual:** A reported V6 reply claimed that no two-room flats matched `д о509 млн`. A bounded TEST-only Prompt-1 comparison showed that both the clean and spaced forms normalized identically to `rooms=2` and `max_price=509000000`, while `facts/near` remained empty and transport-owned tool trace was unavailable. The typo therefore was not a proven ambiguity, and the empty result still cannot be attributed to extraction, invocation, backend or projection from current evidence.
+- **Contract:** Prompt 1 owns semantic search interpretation. It may return typed `action=clarify` only when a critical constraint has at least two incompatible interpretations or cannot be safely typed and bounded search would be meaningless. Prompt 1 returns no client prose; Prompt 2 asks exactly one clarification about the typed parameter. Missing optional preferences and uniquely normalizable typos remain `continue`. Clarification is not an empty search result and cannot be replaced by the third-turn specialist CTA.
+- **Desired:** Never turn genuine ambiguity into a categorical no-result. Ask one useful question, retain the answer in bounded history, then retry the normal Prompt-1 search route. Preserve request-phone, privacy, one-question, grounding, third-turn specialist and rollback contracts.
+- **Owner layer:** Prompt-1 typed decision plus the existing Prompt-2 publication boundary and mechanical parser/runtime routing. No regex, private typo rule, extra classifier or semantic runtime judge.
+- **State/rollback:** State remains schema v2. A clarification pair is persisted without advancing the specialist-policy turn counter; the next eligible non-clarify answer emits the deferred specialist CTA once. Fixed specialist fallbacks consume that policy immediately. Candidate state was read successfully by the current canonical v2 reader.
+- **Acceptance:** strict clarify cross-field schema; typed finite ambiguity allowlists; nonempty clarification `final_question`; neutral clarification failure; no repeated specialist offer; existing consent/phone/outbox flows; focused V6-simple tests; compileall; ordinary review; then immutable TEST release and controlled semantic smoke only after explicit approval.
+- **Result:** Local candidate passed **107 tests**, compileall and static prompt checks. Ordinary review returned `approve` with low residual risk after rollback, repeated-offer, clarification-fallback and type-validation fixes. Real-model clarification behavior and search-tool provenance remain unproven until TEST smoke; production was not changed.
+
 ### H145 — V6-simple one-goal final-question revision (2026-08-14, **isolated prompt repair**)
 
 - **Actual:** H144 removed the observed H108 parser hard stops and corrected the invalid phone fixture. The focused rerun T02/T04/T06/T10 had no technical failure and T10 outbox passed, but T02/T04/T06 still produced final questions with two independent goals joined by `или`.

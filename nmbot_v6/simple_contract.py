@@ -36,6 +36,12 @@ PARAM_FIELDS = frozenset({
     "finance_preference", "sort_hint", "floor", "has_renovation", "name",
     "mortgage_type", "delivered", "only_with_flats", "location_name", "novos_id", "has_finishing",
 })
+AMBIGUITY_PARAMETERS = frozenset({
+    "max_price", "min_price", "rooms", "location", "name", "mortgage_type",
+})
+AMBIGUITY_REASON_CODES = frozenset({
+    "multiple_interpretations", "unparseable_critical_value", "ambiguous_object_identity",
+})
 _MISSING_FIELDS = FACT_FIELDS | {"field", "reason_code", "reason", "details", "property_name"}
 _FORBIDDEN_KEY = re.compile(
     r"(?:phone|телефон|email|e-mail|mail|token|secret|password|client|chat_id|"
@@ -46,12 +52,22 @@ PHONEISH = re.compile(r"(?<!\d)(?:\+?\d[\s().-]*){10,18}(?!\d)")
 
 
 @dataclass(frozen=True)
+class Ambiguity:
+    parameter: str
+    reason_code: str
+
+    def plain(self) -> dict[str, str]:
+        return {"parameter": self.parameter, "reason_code": self.reason_code}
+
+
+@dataclass(frozen=True)
 class Prompt1Document:
     action: str
     facts: tuple[dict[str, Any], ...]
     near: tuple[dict[str, Any], ...]
     missing: tuple[Any, ...]
     params: dict[str, Any]
+    ambiguity: Ambiguity | None
 
     def plain(self) -> dict[str, Any]:
         return {
@@ -60,6 +76,7 @@ class Prompt1Document:
             "near": [dict(item) for item in self.near],
             "missing": [dict(item) if isinstance(item, Mapping) else item for item in self.missing],
             "params": dict(self.params),
+            "ambiguity": self.ambiguity.plain() if self.ambiguity else None,
         }
 
 
@@ -144,10 +161,11 @@ def _literal_item(raw: Any, *, name: str, allowed_keys: frozenset[str]) -> dict[
 
 def parse_prompt1(raw: str | Mapping[str, Any]) -> Prompt1Document:
     root = _load(raw, max_chars=12_000)
-    if set(root) - {"action", "facts", "near", "missing", "params", "diagnostics"} or not {"action", "facts", "near", "missing", "params"} <= set(root):
+    required = {"action", "facts", "near", "missing", "params", "ambiguity"}
+    if set(root) - (required | {"diagnostics"}) or not required <= set(root):
         raise SimpleContractError("invalid_prompt1_shape")
     action = root["action"]
-    if action not in {"continue", "request_phone"}:
+    if action not in {"continue", "clarify", "request_phone"}:
         raise SimpleContractError("invalid_prompt1_action")
     facts_raw, near_raw, missing_raw, params_raw = root["facts"], root["near"], root["missing"], root["params"]
     if (not isinstance(facts_raw, list) or len(facts_raw) > 20 or not isinstance(near_raw, list)
@@ -168,10 +186,33 @@ def parse_prompt1(raw: str | Mapping[str, Any]) -> Prompt1Document:
         if key not in PARAM_FIELDS:
             raise SimpleContractError("invalid_param_key", field=key)
         params[key] = _json_value(value)
-    return Prompt1Document(action, tuple(facts), tuple(near), tuple(missing), params)
+    ambiguity_raw = root["ambiguity"]
+    ambiguity = None
+    if action == "clarify":
+        ambiguity_raw = _exact_keys(ambiguity_raw, {"parameter", "reason_code"}, "ambiguity")
+        parameter, reason_code = ambiguity_raw["parameter"], ambiguity_raw["reason_code"]
+        if not isinstance(parameter, str):
+            raise SimpleContractError("invalid_ambiguity_parameter")
+        if not isinstance(reason_code, str):
+            raise SimpleContractError("invalid_ambiguity_reason_code")
+        if parameter not in AMBIGUITY_PARAMETERS:
+            raise SimpleContractError("invalid_ambiguity_parameter")
+        if reason_code not in AMBIGUITY_REASON_CODES:
+            raise SimpleContractError("invalid_ambiguity_reason_code")
+        if facts or near or missing:
+            raise SimpleContractError("clarify_material_not_empty")
+        if parameter in params:
+            raise SimpleContractError("ambiguous_parameter_in_params", field=parameter)
+        ambiguity = Ambiguity(parameter, reason_code)
+    elif ambiguity_raw is not None:
+        raise SimpleContractError("unexpected_ambiguity")
+    return Prompt1Document(action, tuple(facts), tuple(near), tuple(missing), params, ambiguity)
 
 
-def parse_prompt2(raw: str | Mapping[str, Any], *, allow_request_phone: bool = True) -> Prompt2Document:
+def parse_prompt2(
+    raw: str | Mapping[str, Any], *, allow_request_phone: bool = True,
+    require_final_question: bool = False,
+) -> Prompt2Document:
     root = _exact_keys(_load(raw, max_chars=2_200), {"action", "response", "final_question"}, "prompt2")
     action, response, final_question = root["action"], root["response"], root["final_question"]
     if action not in {"reply", "request_phone"} or not isinstance(response, str) or not isinstance(final_question, str):
@@ -182,6 +223,8 @@ def parse_prompt2(raw: str | Mapping[str, Any], *, allow_request_phone: bool = T
         raise SimpleContractError("privacy_violation")
     if action == "reply" and not response.strip():
         raise SimpleContractError("empty_reply")
+    if require_final_question and (action != "reply" or not final_question.strip()):
+        raise SimpleContractError("clarification_question_required")
     if action == "request_phone" and (response != "" or final_question != ""):
         raise SimpleContractError("request_phone_fields_not_empty")
     published_length = len(response) + len(final_question) + (2 if final_question else 0)
@@ -205,4 +248,5 @@ def build_prompt2_input(current_message: str, dialogue_history: list[dict[str, s
     plain = result.plain()
     return {"current_message": current_message, "dialogue_history": dialogue_history,
             "property_material": {key: plain[key] for key in ("facts", "near", "params")}, "missing": plain["missing"],
+            "ambiguity": plain["ambiguity"],
             "dialogue_policy": {"offer_specialist_now": offer_specialist_now}}

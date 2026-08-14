@@ -13,6 +13,7 @@ from .simple_state import SimpleState
 TECHNICAL_TEXT = "Сейчас не получилось обработать запрос. Попробуйте, пожалуйста, ещё раз."
 SPECIALIST_OFFER_ON_FAILURE = "Сейчас не удалось проверить базу по вашему запросу. Хотите, чтобы этот запрос проверил специалист?"
 SPECIALIST_CTA = "Хотите, чтобы специалист проверил актуальные варианты по вашему запросу?"
+CLARIFICATION_FAILURE = "Не получилось уточнить запрос.\n\nМожете уточнить этот параметр поиска?"
 PHONE_QUESTION = "На какой номер вам позвонить?"
 MULTIPLE_PHONES_TEXT = "Пришлите, пожалуйста, один номер для связи."
 _CANDIDATE = re.compile(r"(?<!\d)(?:\+?\d[\s().-]*){10,18}(?!\d)")
@@ -91,7 +92,7 @@ class SimpleRuntime:
             try:
                 remembered = state.accepted(
                     message, SPECIALIST_OFFER_ON_FAILURE, awaiting_phone=False,
-                    pending_offer="specialist_contact",
+                    pending_offer="specialist_contact", specialist_offer_published=True,
                 )
             except Exception:
                 remembered = state
@@ -102,6 +103,23 @@ class SimpleRuntime:
                 material_status=material_status, material_source="gateway_returned_projection" if material_status else None,
                 tool_observation=observation, error_code=code, error_field=field,
                 prompt1_failed=prompt1_failed,
+            )
+
+        def clarification_failure(*, code: str, p2_attempt: str | None = None,
+                                  mcp_calls: int = 0, observation: str | None = None) -> SimpleRuntimeResult:
+            try:
+                remembered = state.accepted(
+                    message, CLARIFICATION_FAILURE, awaiting_phone=False,
+                    pending_offer="none", advance_client_turn=False,
+                )
+            except Exception:
+                remembered = state
+            return SimpleRuntimeResult(
+                "safe_failure", remembered, CLARIFICATION_FAILURE,
+                failure_stage="prompt2", model_calls=calls,
+                prompt1_attempt_ref=p1_attempt, prompt2_attempt_ref=p2_attempt,
+                mcp_call_count=mcp_calls, material_status="clarification_required",
+                tool_observation=observation, error_code=code,
             )
         try:
             calls += 1
@@ -129,10 +147,14 @@ class SimpleRuntime:
                 "completed", next_state, PHONE_QUESTION, model_calls=calls,
                 prompt1_attempt_ref=p1_attempt, request_phone=True,
             )
-        material_status = "accepted_nonempty" if p1.facts or p1.near else "accepted_empty"
+        is_clarification = p1.action == "clarify"
+        material_status = "clarification_required" if is_clarification else ("accepted_nonempty" if p1.facts or p1.near else "accepted_empty")
         observation = "observed_exact" if p1_result.tool_trace is not None else "unavailable"
         mcp_calls = p1_result.tool_trace.call_count if p1_result.tool_trace else 0
-        offer_specialist_now = state.client_turn_count + 1 == 3
+        offer_specialist_now = (
+            not is_clarification
+            and state.client_turn_count + 1 == 3
+        )
         p2_payload = build_prompt2_input(
             message, history, p1, offer_specialist_now=offer_specialist_now,
         )
@@ -140,16 +162,26 @@ class SimpleRuntime:
             calls += 1
             p2_result = await self.prompt2.run(p2_payload)
         except Exception:
+            if is_clarification:
+                return clarification_failure(code="transport_failure", mcp_calls=mcp_calls, observation=observation)
             return safe_failure(stage="prompt2", code="transport_failure", mcp_calls=mcp_calls, material_status=material_status, observation=observation)
         try:
-            p2 = parse_prompt2(p2_result.output, allow_request_phone=False)
+            p2 = parse_prompt2(
+                p2_result.output, allow_request_phone=False,
+                require_final_question=is_clarification,
+            )
         except SimpleContractError:
             try:
                 calls += 1
                 p2_result = await self.prompt2.run(p2_payload, repair=True)
-                p2 = parse_prompt2(p2_result.output, allow_request_phone=False)
+                p2 = parse_prompt2(
+                    p2_result.output, allow_request_phone=False,
+                    require_final_question=is_clarification,
+                )
             except Exception as exc:
                 code = exc.code if isinstance(exc, SimpleContractError) else "prompt2_failure"
+                if is_clarification:
+                    return clarification_failure(code=code, mcp_calls=mcp_calls, observation=observation)
                 return safe_failure(stage="prompt2", code=code, mcp_calls=mcp_calls, material_status=material_status, observation=observation)
         p2_attempt = p2_result.attempt_ref
         # On turn three the typed policy owns the sole published question.
@@ -162,6 +194,8 @@ class SimpleRuntime:
             next_state = state.accepted(
                 message, text, awaiting_phone=False,
                 pending_offer="specialist_contact" if offer_specialist_now else "none",
+                advance_client_turn=not is_clarification,
+                specialist_offer_published=offer_specialist_now,
             )
         except Exception:
             return SimpleRuntimeResult("failed", state, TECHNICAL_TEXT, failure_stage="state", model_calls=calls, prompt1_attempt_ref=p1_attempt, prompt2_attempt_ref=p2_attempt, mcp_call_count=mcp_calls, material_status=material_status, material_source="gateway_returned_projection", tool_observation=observation)

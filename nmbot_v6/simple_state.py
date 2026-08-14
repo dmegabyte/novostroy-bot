@@ -49,7 +49,7 @@ class SimpleState:
 
     def __post_init__(self) -> None:
         if (self.schema_version != SCHEMA_VERSION or type(self.revision) is not int or self.revision < 0
-                or type(self.awaiting_phone) is not bool or type(self.client_turn_count) is not int
+                 or type(self.awaiting_phone) is not bool or type(self.client_turn_count) is not int
                 or self.client_turn_count < 0 or self.pending_offer not in PENDING_OFFERS):
             raise SimpleContractError("invalid_state")
         object.__setattr__(self, "history", tuple(bound_history(list(self.history))))
@@ -76,7 +76,8 @@ class SimpleState:
             )
         return cls(
             schema_version=raw["schema_version"], revision=raw["revision"], history=tuple(raw["history"]),
-            awaiting_phone=raw["awaiting_phone"], client_turn_count=raw["client_turn_count"],
+            awaiting_phone=raw["awaiting_phone"],
+            client_turn_count=max(raw["client_turn_count"], 3) if raw["pending_offer"] == "specialist_contact" else raw["client_turn_count"],
             pending_offer=raw["pending_offer"],
         )
 
@@ -87,11 +88,15 @@ class SimpleState:
             "client_turn_count": self.client_turn_count, "pending_offer": self.pending_offer,
         }
 
-    def accepted(self, user: str, assistant: str, *, awaiting_phone: bool, pending_offer: str = "none") -> "SimpleState":
+    def accepted(self, user: str, assistant: str, *, awaiting_phone: bool, pending_offer: str = "none",
+                 advance_client_turn: bool = True, specialist_offer_published: bool = False) -> "SimpleState":
         history = bound_history([*self.plain()["history"], {"role": "user", "text": user}, {"role": "assistant", "text": assistant}])
+        next_turn_count = self.client_turn_count + (1 if advance_client_turn else 0)
+        if specialist_offer_published:
+            next_turn_count = max(next_turn_count, 3)
         return SimpleState(
             revision=self.revision + 1, history=tuple(history), awaiting_phone=awaiting_phone,
-            client_turn_count=self.client_turn_count + 1, pending_offer=pending_offer,
+            client_turn_count=next_turn_count, pending_offer=pending_offer,
         )
 
     def phone_accepted(self) -> "SimpleState":

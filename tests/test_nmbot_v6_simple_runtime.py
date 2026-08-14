@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 from nmbot_v6.simple_gateway import DirectTransport, SimpleGateway, SimpleGatewayResult, SimpleToolTrace
-from nmbot_v6.simple_runtime import PHONE_QUESTION, SPECIALIST_CTA, SPECIALIST_OFFER_ON_FAILURE, SimpleRuntime
+from nmbot_v6.simple_runtime import CLARIFICATION_FAILURE, PHONE_QUESTION, SPECIALIST_CTA, SPECIALIST_OFFER_ON_FAILURE, SimpleRuntime
 from nmbot_v6.simple_state import SimpleState
 
 
@@ -16,7 +16,10 @@ class Port:
         return value
 
 
-def result(output, trace=None): return SimpleGatewayResult(output, "attempt-a", trace)
+def result(output, trace=None):
+    if isinstance(output, dict) and "facts" in output:
+        output = {**output, "ambiguity": output.get("ambiguity")}
+    return SimpleGatewayResult(output, "attempt-a", trace)
 
 
 def run(p1, p2, state=SimpleState(), text="Хочу квартиру"):
@@ -44,6 +47,16 @@ def test_p1_transport_failure_remembers_fixed_offer_without_p2_or_phone_request(
     assert outcome.state.revision == 1 and outcome.request_phone is False
     assert outcome.state.history[-1]["text"] == SPECIALIST_OFFER_ON_FAILURE
     assert outcome.state.pending_offer == "specialist_contact"
+    assert outcome.state.client_turn_count == 3
+
+
+def test_fixed_failure_offer_is_not_repeated_on_later_reply():
+    first = run(Port([RuntimeError("failure")]), Port([]))
+    p1 = Port([result({"action": "continue", "facts": [], "near": [], "missing": [], "params": {}, "ambiguity": None})])
+    p2 = Port([result({"action": "reply", "response": "Продолжаю подбор.", "final_question": "Какой район?"})])
+    later = run(p1, p2, first.state, "Продолжим")
+    assert SPECIALIST_CTA not in later.text
+    assert later.text == "Продолжаю подбор.\n\nКакой район?"
 
 
 def test_p2_parse_failure_returns_fixed_specialist_offer():
@@ -96,7 +109,7 @@ def test_direct_transport_ignores_malformed_optional_transport_trace(raw_trace):
     {"prompt_metadata": {"v6_tool_trace": {"actual_server": "novostroym", "actual_tool": "get_flat_info", "call_count": 1}}},
 ])
 def test_generic_gateway_metadata_cannot_prove_mcp_provenance(generic_metadata):
-    card = {"action": "continue", "facts": [{"name": "ЖК А", "price_min": 10}], "near": [], "missing": [], "params": {}}
+    card = {"action": "continue", "facts": [{"name": "ЖК А", "price_min": 10}], "near": [], "missing": [], "params": {}, "ambiguity": None}
 
     class Client:
         async def _run_gateway_request_once(self, payload, headers, timeout):
@@ -181,6 +194,58 @@ def test_third_turn_replaces_unrelated_p2_question_with_sole_specialist_cta():
     assert "Какой район" not in outcome.text and outcome.text.count("?") == 1
     assert outcome.state.client_turn_count == 3
     assert outcome.state.pending_offer == "specialist_contact"
+
+
+def test_third_turn_clarification_has_priority_and_defers_specialist_once():
+    clarify = {
+        "action": "clarify", "facts": [], "near": [], "missing": [], "params": {},
+        "ambiguity": {"parameter": "rooms", "reason_code": "multiple_interpretations"},
+    }
+    following = {"action": "continue", "facts": [], "near": [], "missing": ["район"], "params": {}}
+    p1 = Port([result(clarify), result(following), result(following)])
+    p2 = Port([
+        result({"action": "reply", "response": "Нужно уточнить число комнат.", "final_question": "Вам нужна одна или две комнаты?"}),
+        result({"action": "reply", "response": "Продолжаю подбор.", "final_question": "Какой район рассматриваете?"}),
+        result({"action": "reply", "response": "Есть новые параметры.", "final_question": "Нужна отделка?"}),
+    ])
+    state = SimpleState(client_turn_count=2)
+
+    clarified = run(p1, p2, state, "Уточняемый запрос")
+    assert clarified.material_status == "clarification_required"
+    assert clarified.text == "Нужно уточнить число комнат.\n\nВам нужна одна или две комнаты?"
+    assert SPECIALIST_CTA not in clarified.text
+    assert p2.calls[0][0]["ambiguity"] == clarify["ambiguity"]
+    assert p2.calls[0][0]["dialogue_policy"] == {"offer_specialist_now": False}
+    assert clarified.state.client_turn_count == 2
+
+    offered = run(p1, p2, clarified.state, "Нужны две комнаты")
+    assert offered.text == f"Продолжаю подбор.\n\n{SPECIALIST_CTA}"
+    assert offered.state.client_turn_count == 3
+    assert offered.state.pending_offer == "specialist_contact"
+
+    later = run(p1, p2, offered.state, "Ещё вопрос")
+    assert SPECIALIST_CTA not in later.text
+    assert later.text == "Есть новые параметры.\n\nНужна отделка?"
+
+
+def test_clarification_prompt2_failure_uses_neutral_fallback_and_preserves_offer_turn():
+    clarify = {
+        "action": "clarify", "facts": [], "near": [], "missing": [], "params": {},
+        "ambiguity": {"parameter": "max_price", "reason_code": "multiple_interpretations"},
+    }
+    outcome = run(Port([result(clarify)]), Port([result("bad"), result("bad")]), SimpleState(client_turn_count=2))
+    assert outcome.status == "safe_failure" and outcome.text == CLARIFICATION_FAILURE
+    assert "баз" not in outcome.text.lower() and outcome.state.pending_offer == "none"
+    assert outcome.state.client_turn_count == 2 and outcome.material_status == "clarification_required"
+
+
+def test_optional_missing_continue_stays_ordinary_empty_material():
+    p1 = Port([result({"action": "continue", "facts": [], "near": [], "missing": ["необязательная отделка"], "params": {"rooms": 2}})])
+    p2 = Port([result({"action": "reply", "response": "Продолжаю подбор по двум комнатам.", "final_question": "Нужна отделка?"})])
+    outcome = run(p1, p2)
+    assert outcome.material_status == "accepted_empty"
+    assert p2.calls[0][0]["ambiguity"] is None
+    assert outcome.text == "Продолжаю подбор по двум комнатам.\n\nНужна отделка?"
 
 
 def test_pending_specialist_consent_requests_phone_and_skips_p2():

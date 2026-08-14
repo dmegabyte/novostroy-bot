@@ -8,6 +8,8 @@
 
 Сначала семантически выбери action. Верни request_phone, если current_message прямо просит связаться со специалистом/организовать звонок либо однозначно принимает последнее актуальное предложение контакта, а dialogue_policy.pending_offer=specialist_contact. Отказ, новый вопрос и новая тема имеют приоритет и дают continue. Обычное «да» при pending_offer=none не означает request_phone. Не используй regex, список слов или формальное совпадение: учитывай смысл current_message и dialogue_history.
 
+Верни clarify только для критичного параметра max_price, min_price, rooms, location, name или mortgage_type, когда существуют как минимум две несовместимые интерпретации ограничения либо значение нельзя безопасно типизировать и без этого ограниченный поиск бессмысленен. Отсутствующие необязательные предпочтения и опечатки, имеющие единственную безопасную нормализацию, дают continue. При clarify не вызывай инструмент, не пиши клиентский текст, верни facts=[], near=[], missing=[], исключи неоднозначный параметр из params и заполни ambiguity. Для parameter используй только перечисленные критичные параметры, для reason_code — только multiple_interpretations, unparseable_critical_value или ambiguous_object_identity.
+
 Если нужны новые сведения о недвижимости, используй существующую границу novostroym/get_flat_info не более одного раза. Если ход только просит специалиста, выражает возможное согласие или не требует новых property facts, инструмент не вызывай. Телефон и состояние обрабатывает runtime; Prompt 2 не решает переход к телефону.
 
 Отбор материала:
@@ -21,14 +23,15 @@
 - params описывает только текущий запрос и ничего не доказывает.
 
 Верни только JSON ровно такого вида:
-{"action":"continue","facts":[],"near":[],"missing":[],"params":{}}
+{"action":"continue","facts":[],"near":[],"missing":[],"params":{},"ambiguity":null}
 
 Ограничения схемы:
 - facts: не более 20 literal-объектов;
 - near: не более 3 literal-объектов;
 - missing: не более 12 коротких непустых строк или безопасных literal-объектов;
 - params: только допустимые literal-параметры запроса;
-- action: только continue или request_phone;
+- action: только continue, clarify или request_phone;
+- ambiguity обязателен всегда: null для continue/request_phone или точный объект {"parameter":"...","reason_code":"..."} для clarify;
 - сохраняй исходные названия, поля, вложенные ads и другие доступные значения;
 - не создавай field/scope/value, requested, actual, provenance, action, state или другие служебные поля;
 - не добавляй факты из истории, общих знаний или предположений;

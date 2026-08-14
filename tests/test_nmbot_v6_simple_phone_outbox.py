@@ -50,7 +50,7 @@ def test_mixed_phone_terminal_multiple_and_numeric_negative():
         async def run(self, payload, **kwargs):
             from nmbot_v6.simple_gateway import SimpleGatewayResult
             self.calls.append(payload); return SimpleGatewayResult(self.value, "a")
-    a, b = ReplyPort({"action": "continue", "facts": [], "near": [], "missing": [], "params": {}}), ReplyPort({"action": "reply", "response": "Принято.", "final_question": ""})
+    a, b = ReplyPort({"action": "continue", "facts": [], "near": [], "missing": [], "params": {}, "ambiguity": None}), ReplyPort({"action": "reply", "response": "Принято.", "final_question": ""})
     assert asyncio.run(SimpleRuntime(a, b, phone_backend=Backend()).run("Бюджет 18000000", SimpleState())).status == "completed"
 
 

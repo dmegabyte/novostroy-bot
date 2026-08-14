@@ -6,7 +6,7 @@ import json
 from nmbot_v6.simple_gateway import SimpleGatewayResult
 from nmbot_v6.simple_runtime import URL_CARD_FAILURE_TEXT, SimpleRuntime
 from nmbot_v6.simple_state import SimpleState
-from scripts.nmbot_url_card import extract_novostroy_url
+from nmbot_v6.url_card import extract_novostroy_url
 from scripts.nmbot_v6_simple_adapter import run_v6_simple_turn
 
 

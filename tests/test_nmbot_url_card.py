@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "nmbot_url_card.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "nmbot_v6" / "url_card.py"
 spec = importlib.util.spec_from_file_location("nmbot_url_card", SCRIPT)
 module = importlib.util.module_from_spec(spec)
 assert spec and spec.loader

@@ -67,6 +67,25 @@ def test_release_smoke_accepts_v6_simple_trace() -> None:
     assert failures == []
 
 
+def test_release_smoke_accepts_direct_url_card_prompt2_trace() -> None:
+    accepted, failures = module.evaluate_release_smoke(
+        query_result={"ok": True, "http_status": 200},
+        events=[_bot(response_model={}, v6_trace={
+            "schema_version": 1,
+            "url_card": {"status": "accepted", "route": "prompt2_direct"},
+            "stages": [
+                {"stage": "prompt1", "status": "not_called"},
+                {"stage": "mcp", "status": "not_called"},
+                {"stage": "prompt2", "status": "accepted"},
+                {"stage": "state", "status": "accepted"},
+                {"stage": "bot_message", "status": "returned"},
+            ],
+        })],
+    )
+    assert accepted
+    assert failures == []
+
+
 def test_release_smoke_rejects_incomplete_v6_simple_trace() -> None:
     accepted, failures = module.evaluate_release_smoke(
         query_result={"ok": True, "http_status": 200},

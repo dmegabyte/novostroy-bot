@@ -114,7 +114,7 @@ def _v6_simple_trace_accepted(event: dict[str, Any]) -> bool:
         for item in stages
         if isinstance(item, dict) and isinstance(item.get("stage"), str)
     }
-    return all(
+    normal_route = all(
         statuses.get(stage) == expected
         for stage, expected in {
             "prompt1": "accepted",
@@ -123,6 +123,16 @@ def _v6_simple_trace_accepted(event: dict[str, Any]) -> bool:
             "bot_message": "returned",
         }.items()
     )
+    url_card = trace.get("url_card") if isinstance(trace.get("url_card"), dict) else {}
+    direct_url_route = (
+        url_card.get("status") == "accepted"
+        and statuses.get("prompt1") == "not_called"
+        and statuses.get("mcp") == "not_called"
+        and statuses.get("prompt2") == "accepted"
+        and statuses.get("state") == "accepted"
+        and statuses.get("bot_message") == "returned"
+    )
+    return normal_route or direct_url_route
 
 
 def _is_query_bot_event(event: dict[str, Any]) -> bool:

@@ -714,7 +714,7 @@ def test_local_preflight_requires_full_remote_preflight_source_closure(tmp_path:
         "scripts/gateway_v0_answer_writer.py",
         "scripts/bluesminds_v0_answer_writer.py",
     }
-    optional_api_paths = v0_writer_paths | {"scripts/nmbot_v6_simple_adapter.py"}
+    optional_api_paths = v0_writer_paths | {"scripts/nmbot_v6_journal.py", "scripts/nmbot_v6_simple_adapter.py"}
     adapter_source = (ROOT / "scripts" / "nmbot_runtime_adapter.py").read_text(encoding="utf-8")
     assert "gateway_v0_answer_writer" in adapter_source
     assert "bluesminds_v0_answer_writer" in adapter_source
@@ -761,6 +761,72 @@ def test_local_preflight_requires_full_remote_preflight_source_closure(tmp_path:
         assert "scripts/nmbot_egress_policy.py" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("build from source missing remote preflight file must fail")
+
+
+def test_v6_only_remote_preflight_renders_exact_profile_contract() -> None:
+    command = rel._remote_preflight_command(
+        "/remote/releases/REL-v6-only",
+        list(rel.V6_ONLY_IMPORT_MODULES),
+        list(rel.V6_ONLY_PREFLIGHT_PY_FILES),
+        profile=rel.V6_ONLY_PROFILE,
+    )
+    payload = json.loads(shlex.split(command)[-1])
+
+    assert payload == {
+        "profile": rel.V6_ONLY_PROFILE,
+        "modules": list(rel.V6_ONLY_IMPORT_MODULES),
+        "compile_files": list(rel.V6_ONLY_PREFLIGHT_PY_FILES),
+        "required_dependencies": list(rel.V6_ONLY_REQUIRED_DEPENDENCIES),
+    }
+    assert set(payload["compile_files"]) == {path for path in rel.V6_ONLY_RUNTIME_FILES if path.endswith(".py")}
+    assert not any(path.startswith(("nmbot_v0/", "nmbot_v1/", "nmbot_v2/", "nmbot_v4/")) for path in payload["compile_files"])
+
+    with pytest.raises(rel.ReleaseError, match="exactly match its allowlist"):
+        rel._remote_preflight_command(
+            "/remote/releases/REL-v6-only",
+            list(rel.V6_ONLY_IMPORT_MODULES),
+            list(rel.V6_ONLY_PREFLIGHT_PY_FILES) + ["scripts/unknown.py"],
+            profile=rel.V6_ONLY_PROFILE,
+        )
+    with pytest.raises(rel.ReleaseError, match="profile contract"):
+        rel._remote_preflight_command(
+            "/remote/releases/REL-v6-only",
+            list(rel.IMPORT_MODULES),
+            profile=rel.V6_ONLY_PROFILE,
+        )
+
+
+def test_default_remote_preflight_payload_remains_unprofiled() -> None:
+    command = rel._remote_preflight_command("/remote/releases/REL-default")
+    payload = json.loads(shlex.split(command)[-1])
+
+    assert payload == {
+        "modules": list(rel.IMPORT_MODULES),
+        "compile_files": list(rel.REMOTE_PREFLIGHT_PY_FILES),
+    }
+    assert "profile" not in payload
+    assert "required_dependencies" not in payload
+
+
+def test_v6_only_remote_preflight_fails_when_required_dependency_is_absent(tmp_path: Path, monkeypatch) -> None:
+    release_root = tmp_path / "release"
+    for relative in rel.V6_ONLY_PREFLIGHT_PY_FILES:
+        path = release_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("# isolated preflight fixture\n", encoding="utf-8")
+    missing_dependency = "nmbot_phase2_intentionally_missing_dependency"
+    monkeypatch.setattr(rel, "V6_ONLY_REQUIRED_DEPENDENCIES", (missing_dependency,))
+    command = rel._remote_preflight_command(
+        str(release_root),
+        list(rel.V6_ONLY_IMPORT_MODULES),
+        list(rel.V6_ONLY_PREFLIGHT_PY_FILES),
+        profile=rel.V6_ONLY_PROFILE,
+    )
+
+    proc = subprocess.run(command, shell=True, text=True, capture_output=True, check=False)
+
+    assert proc.returncode != 0
+    assert missing_dependency in proc.stderr
 
 
 def test_optional_v0_writer_absent_when_adapter_imports_only_gateway_preflights(tmp_path: Path) -> None:

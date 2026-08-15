@@ -97,6 +97,9 @@ IMPORT_MODULES = (
     "nmbot_v2.response_composer",
     "nmbot_v2.manager_rewriter",
 )
+V6_ONLY_PROFILE = "v6-only"
+V6_ONLY_IMPORT_MODULES = ("scripts.nmbot_api_server",)
+V6_ONLY_REQUIRED_DEPENDENCIES = ("aiohttp", "phonenumbers")
 CONFIG_REQUIREMENTS = {
     "required_secret_names": sorted(("JIVO_PROVIDER_ID", "JIVO_PROVIDER_TOKEN", "NMBOT_API_TOKEN")),
     "required_setting_names": sorted((
@@ -110,6 +113,10 @@ CONFIG_REQUIREMENTS = {
     )),
     "required_mode_names": sorted(("NMBOT_V2_MANAGER_REWRITER_MODE", "NMBOT_V3_MANAGER_REWRITER_MODE")),
     "external_runtime_paths": sorted((".env", "data", "logs", "backups")),
+}
+V6_ONLY_CONFIG_REQUIREMENTS = {
+    **CONFIG_REQUIREMENTS,
+    "required_mode_names": [],
 }
 CANONICAL_API_ENV_VALUES = {
     "NMBOT_API_HOST": "127.0.0.1",
@@ -208,8 +215,31 @@ API_RUNTIME_SCRIPT_FILES = frozenset({
     "scripts/nmbot_release_identity.py",
     "scripts/nmbot_runtime_adapter.py",
     "scripts/nmbot_v6_simple_adapter.py",
+    "scripts/nmbot_v6_journal.py",
     "scripts/planner_trace.py",
 })
+V6_ONLY_RUNTIME_FILES = frozenset({
+    "nmbot_v6/__init__.py",
+    "nmbot_v6/phone.py",
+    "nmbot_v6/simple_contract.py",
+    "nmbot_v6/simple_gateway.py",
+    "nmbot_v6/simple_runtime.py",
+    "nmbot_v6/simple_state.py",
+    "nmbot_v6/url_card.py",
+    "prompts/v6_simple_answer_writer.txt",
+    "prompts/v6_simple_search_agent.txt",
+    "requirements.txt",
+    "scripts/dialogue_journal.py",
+    "scripts/nmbot_api_server.py",
+    "scripts/nmbot_crm_outbox.py",
+    "scripts/nmbot_egress_policy.py",
+    "scripts/nmbot_gateway_client.py",
+    "scripts/nmbot_prompt_ledger.py",
+    "scripts/nmbot_release_identity.py",
+    "scripts/nmbot_v6_journal.py",
+    "scripts/nmbot_v6_simple_adapter.py",
+})
+V6_ONLY_PREFLIGHT_PY_FILES = tuple(sorted(path for path in V6_ONLY_RUNTIME_FILES if path.endswith(".py")))
 NMBOT_DIALOGUE_EXPORTER_SCRIPT = "scripts/nmbot_dialogue_sheet_exporter.py"
 NMBOT_DIALOGUE_EXPORTER_SERVICE_TEMPLATE = "deploy/systemd/nmbot-dialogue-sheet-export.service"
 NMBOT_DIALOGUE_EXPORTER_TIMER_TEMPLATE = "deploy/systemd/nmbot-dialogue-sheet-export.timer"
@@ -230,6 +260,7 @@ NMBOT_DIALOGUE_EXPORTER_TIMER_UNIT = "nmbot-dialogue-sheet-export.timer"
 OPTIONAL_API_RUNTIME_SCRIPT_FILES = frozenset({
     "scripts/bluesminds_v0_answer_writer.py",
     "scripts/gateway_v0_answer_writer.py",
+    "scripts/nmbot_v6_journal.py",
     "scripts/nmbot_v6_simple_adapter.py",
 })
 REMOTE_PREFLIGHT_PY_FILES = tuple(sorted((API_RUNTIME_SCRIPT_FILES - OPTIONAL_API_RUNTIME_SCRIPT_FILES) | {
@@ -536,6 +567,37 @@ def iter_snapshot_files(root: Path = ROOT, *, include_dialogue_exporter: bool = 
     return sorted(files, key=lambda p: p.relative_to(root).as_posix())
 
 
+def _v6_only_runtime_files(root: Path) -> list[Path]:
+    files: list[Path] = []
+    missing: list[str] = []
+    for rel in sorted(V6_ONLY_RUNTIME_FILES):
+        path = root / rel
+        if not path.is_file() or path.is_symlink():
+            missing.append(rel)
+            continue
+        _reject_secret_like(path, rel)
+        files.append(path)
+    if missing:
+        raise ReleaseError("V6-only runtime file missing: " + ",".join(missing))
+    return files
+
+
+def _runtime_files_for_profile(
+    root: Path,
+    *,
+    profile: str | None,
+    include_dialogue_exporter: bool = False,
+    test_api_overlay_paths: set[str] | frozenset[str] = frozenset(),
+) -> list[Path]:
+    if profile == V6_ONLY_PROFILE:
+        if include_dialogue_exporter or test_api_overlay_paths:
+            raise ReleaseError("V6-only profile does not permit release overlays")
+        return _v6_only_runtime_files(root)
+    if profile is not None:
+        raise ReleaseError(f"unknown release profile: {profile}")
+    return iter_snapshot_files(root, include_dialogue_exporter=include_dialogue_exporter, test_api_overlay_paths=test_api_overlay_paths)
+
+
 def _file_records(files: list[Path], root: Path = ROOT) -> list[dict[str, str]]:
     return [{"path": path.relative_to(root).as_posix(), "sha256": _sha256_file(path)} for path in files]
 
@@ -593,18 +655,20 @@ def _file_records_with_metadata(files: list[Path], root: Path = ROOT) -> list[di
     return rows
 
 
-def build(*, release_id: str | None = None, out_dir: Path = DEFAULT_OUT_DIR, root: Path = ROOT, source_provenance: dict[str, Any] | None = None, include_dialogue_exporter: bool = False, test_api_overlay_paths: set[str] | frozenset[str] = frozenset()) -> Artifact:
+def build(*, release_id: str | None = None, out_dir: Path = DEFAULT_OUT_DIR, root: Path = ROOT, source_provenance: dict[str, Any] | None = None, include_dialogue_exporter: bool = False, test_api_overlay_paths: set[str] | frozenset[str] = frozenset(), profile: str | None = None) -> Artifact:
     rid = _release_id(release_id)
     out_dir.mkdir(parents=True, exist_ok=True)
-    files = iter_snapshot_files(root, include_dialogue_exporter=include_dialogue_exporter, test_api_overlay_paths=test_api_overlay_paths)
+    files = _runtime_files_for_profile(root, profile=profile, include_dialogue_exporter=include_dialogue_exporter, test_api_overlay_paths=test_api_overlay_paths)
     selected_paths = {p.relative_to(root).as_posix() for p in files}
-    _assert_required_runtime_resources_present(selected_paths, root=root)
+    if profile != V6_ONLY_PROFILE:
+        _assert_required_runtime_resources_present(selected_paths, root=root)
     if include_dialogue_exporter and not NMBOT_DIALOGUE_EXPORTER_FILES.issubset(selected_paths):
         missing = sorted(NMBOT_DIALOGUE_EXPORTER_FILES - selected_paths)
         raise ReleaseError("dialogue exporter allowlist files missing from release source: " + ",".join(missing))
     if not include_dialogue_exporter and selected_paths & NMBOT_DIALOGUE_EXPORTER_FILES:
         raise ReleaseError("dialogue exporter files require explicit opt-in")
-    _assert_remote_preflight_sources_present(root, selected_paths)
+    if profile != V6_ONLY_PROFILE:
+        _assert_remote_preflight_sources_present(root, selected_paths)
     metadata_records = _file_records_with_metadata(files, root)
     _validate_size_limits(metadata_records, label="release")
     base_records = [{"path": item["path"], "sha256": item["sha256"]} for item in metadata_records]
@@ -642,10 +706,10 @@ def build(*, release_id: str | None = None, out_dir: Path = DEFAULT_OUT_DIR, roo
         "archive_sha256": archive_sha,
         "files": file_records,
         "entrypoints": list(ENTRYPOINTS),
-        "import_modules": list(IMPORT_MODULES),
+        "import_modules": list(V6_ONLY_IMPORT_MODULES if profile == V6_ONLY_PROFILE else IMPORT_MODULES),
         "service": API_SERVICE,
         "forbidden_services": [BRIDGE_SERVICE, WORKER_SERVICE],
-        "config_schema_requirements": CONFIG_REQUIREMENTS,
+        "config_schema_requirements": V6_ONLY_CONFIG_REQUIREMENTS if profile == V6_ONLY_PROFILE else CONFIG_REQUIREMENTS,
         "external_runtime_strategy": "Keep .env, data, logs and backups outside immutable TEST API releases; deploy links manifest external_runtime_paths into each release before switching current.",
         "identity_path": IDENTITY_IN_RELEASE,
         "source_provenance": source_provenance or _source_provenance_absent(),
@@ -687,6 +751,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ReleaseError("manifest must forbid bridge/worker restart")
     if manifest["identity_path"] != IDENTITY_IN_RELEASE:
         raise ReleaseError("invalid release identity path")
+    v6_only = manifest["import_modules"] == list(V6_ONLY_IMPORT_MODULES)
     seen: set[str] = set()
     if len(manifest["files"]) > MAX_FILES:
         raise ReleaseError("manifest file count exceeds limit")
@@ -706,9 +771,15 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         previous_path = rel
         if not isinstance(item["sha256"], str) or not HEX_RE.fullmatch(item["sha256"]):
             raise ReleaseError(f"invalid file hash: {rel}")
-    _assert_required_runtime_resources_present(seen)
+    if v6_only:
+        expected_v6_paths = set(V6_ONLY_RUNTIME_FILES) | {IDENTITY_IN_RELEASE}
+        if seen != expected_v6_paths:
+            raise ReleaseError("V6-only manifest file set must exactly match its allowlist")
+    else:
+        _assert_required_runtime_resources_present(seen)
     req = manifest["config_schema_requirements"]
-    if req != CONFIG_REQUIREMENTS:
+    expected_requirements = V6_ONLY_CONFIG_REQUIREMENTS if v6_only else CONFIG_REQUIREMENTS
+    if req != expected_requirements:
         raise ReleaseError("config requirements must exactly match release contract")
     encoded = json.dumps(req, ensure_ascii=False, sort_keys=True)
     if "=" in encoded:
@@ -718,7 +789,8 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     for rel in manifest["entrypoints"]:
         if _manifest_path(rel) not in seen:
             raise ReleaseError(f"entrypoint missing from manifest: {rel}")
-    if manifest["import_modules"] != list(IMPORT_MODULES):
+    expected_imports = V6_ONLY_IMPORT_MODULES if v6_only else IMPORT_MODULES
+    if manifest["import_modules"] != list(expected_imports):
         raise ReleaseError("manifest import_modules must exactly match release contract")
     if not all(isinstance(m, str) and MODULE_RE.fullmatch(m) for m in manifest["import_modules"]):
         raise ReleaseError("invalid import module in manifest")
@@ -840,18 +912,28 @@ def local_preflight(*, archive: Path, manifest_path: Path) -> str:
             if not (root / rel).is_file():
                 raise ReleaseError(f"required entrypoint missing: {rel}")
         artifact_paths = {item["path"] for item in manifest["files"]}
-        _assert_required_runtime_resources_present(artifact_paths, root=root)
-        _assert_remote_preflight_sources_present(root, artifact_paths)
+        v6_only = manifest["import_modules"] == list(V6_ONLY_IMPORT_MODULES)
+        if not v6_only:
+            _assert_required_runtime_resources_present(artifact_paths, root=root)
+            _assert_remote_preflight_sources_present(root, artifact_paths)
         identity = json.loads((root / IDENTITY_IN_RELEASE).read_text(encoding="utf-8"))
         validate_release_identity(identity, manifest)
-        py_files = sorted({*root.rglob("*.py"), *(root / rel for rel in _remote_preflight_py_files(artifact_paths))})
+        if v6_only:
+            expected_v6_paths = set(V6_ONLY_RUNTIME_FILES) | {IDENTITY_IN_RELEASE}
+            if artifact_paths != expected_v6_paths:
+                raise ReleaseError("V6-only local preflight file set must exactly match its allowlist")
+            py_files = [root / rel for rel in V6_ONLY_PREFLIGHT_PY_FILES]
+        else:
+            required_preflight_files = _remote_preflight_py_files(artifact_paths)
+            py_files = sorted({*root.rglob("*.py"), *(root / rel for rel in required_preflight_files)})
         for idx, path in enumerate(py_files):
             py_compile.compile(str(path), cfile=str(Path(tmp) / f"compiled-{idx}.pyc"), doraise=True)
         code = "import importlib, json, sys\nfor name in json.loads(sys.argv[1]):\n    importlib.import_module(name)\nprint('import=ok')\n"
         env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
         pythonpath = os.pathsep.join([str(root), str(root / "scripts")])
         env["PYTHONPATH"] = pythonpath
-        proc = subprocess.run([sys.executable, "-c", code, json.dumps(manifest["import_modules"])], cwd=root, env=env, text=True, capture_output=True, check=False)
+        import_names = [*manifest["import_modules"], *(V6_ONLY_REQUIRED_DEPENDENCIES if v6_only else ())]
+        proc = subprocess.run([sys.executable, "-c", code, json.dumps(import_names)], cwd=root, env=env, text=True, capture_output=True, check=False)
         if proc.returncode != 0:
             raise ReleaseError((proc.stdout + proc.stderr)[-2000:])
         startup_env = {
@@ -2053,14 +2135,14 @@ def _allowed_prepared_worktree_dir(worktree_dir: Path) -> Path:
     return path
 
 
-def _worktree_source_rows(source_dir: Path, *, include_dialogue_exporter: bool = False, test_api_overlay_paths: set[str] | frozenset[str] = frozenset()) -> list[dict[str, Any]]:
-    files = iter_snapshot_files(source_dir, include_dialogue_exporter=include_dialogue_exporter, test_api_overlay_paths=test_api_overlay_paths)
+def _worktree_source_rows(source_dir: Path, *, include_dialogue_exporter: bool = False, test_api_overlay_paths: set[str] | frozenset[str] = frozenset(), profile: str | None = None) -> list[dict[str, Any]]:
+    files = _runtime_files_for_profile(source_dir, profile=profile, include_dialogue_exporter=include_dialogue_exporter, test_api_overlay_paths=test_api_overlay_paths)
     rows = _file_records_with_metadata(files, source_dir)
     _validate_size_limits(rows, label="worktree")
     return sorted(rows, key=lambda row: row["path"])
 
 
-def verify_prepared_worktree(worktree_dir: Path, *, include_dialogue_exporter: bool = False, test_api_overlay_paths: set[str] | frozenset[str] = frozenset()) -> dict[str, Any]:
+def verify_prepared_worktree(worktree_dir: Path, *, include_dialogue_exporter: bool = False, test_api_overlay_paths: set[str] | frozenset[str] = frozenset(), profile: str | None = None) -> dict[str, Any]:
     work = _allowed_prepared_worktree_dir(worktree_dir)
     source = work / "source"
     provenance_path = work / "snapshot-provenance.json"
@@ -2085,14 +2167,14 @@ def verify_prepared_worktree(worktree_dir: Path, *, include_dialogue_exporter: b
     if provenance["source_host"] != AUTHORIZED_DEPLOY_HOST:
         raise ReleaseError("prepared worktree provenance source mismatch")
     _validate_snapshot_contour_root(provenance["contour"], provenance["remote_root"])
-    rows = _worktree_source_rows(source, include_dialogue_exporter=include_dialogue_exporter, test_api_overlay_paths=test_api_overlay_paths)
+    rows = _worktree_source_rows(source, include_dialogue_exporter=include_dialogue_exporter, test_api_overlay_paths=test_api_overlay_paths, profile=profile)
     current_source_tree_sha = _tree_hash_from_records(rows)
     current_source_manifest_sha = _source_manifest_sha(rows)
     return {"worktree_dir": str(work), "source_dir": str(source), "provenance": provenance, "rows": rows, "source_tree_sha256": current_source_tree_sha, "source_manifest_sha256": current_source_manifest_sha}
 
 
-def build_from_worktree(*, worktree_dir: Path, release_id: str | None = None, out_dir: Path = DEFAULT_OUT_DIR, include_dialogue_exporter: bool = False, test_api_overlay_paths: set[str] | frozenset[str] = frozenset()) -> Artifact:
-    verified = verify_prepared_worktree(worktree_dir, include_dialogue_exporter=include_dialogue_exporter, test_api_overlay_paths=test_api_overlay_paths)
+def build_from_worktree(*, worktree_dir: Path, release_id: str | None = None, out_dir: Path = DEFAULT_OUT_DIR, include_dialogue_exporter: bool = False, test_api_overlay_paths: set[str] | frozenset[str] = frozenset(), profile: str | None = None) -> Artifact:
+    verified = verify_prepared_worktree(worktree_dir, include_dialogue_exporter=include_dialogue_exporter, test_api_overlay_paths=test_api_overlay_paths, profile=profile)
     provenance = verified["provenance"]
     provenance_payload = json.dumps(provenance, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     release_provenance = {
@@ -2107,7 +2189,7 @@ def build_from_worktree(*, worktree_dir: Path, release_id: str | None = None, ou
         "worktree_provenance_sha256": _sha256_bytes(provenance_payload),
     }
     _validate_release_source_provenance(release_provenance, require_present=True)
-    return build(release_id=release_id, out_dir=out_dir, root=Path(verified["source_dir"]), source_provenance=release_provenance, include_dialogue_exporter=include_dialogue_exporter, test_api_overlay_paths=test_api_overlay_paths)
+    return build(release_id=release_id, out_dir=out_dir, root=Path(verified["source_dir"]), source_provenance=release_provenance, include_dialogue_exporter=include_dialogue_exporter, test_api_overlay_paths=test_api_overlay_paths, profile=profile)
 
 
 def compare_snapshot(*, snapshot_dir: Path, project_root: Path, contour: str = DEFAULT_SNAPSHOT_CONTOUR) -> dict[str, Any]:
@@ -3400,17 +3482,39 @@ def _assert_remote_unit_migrated(remote: Remote, *, remote_root: str) -> None:
         raise ReleaseError("remote unit Environment override is not allowed for fields: " + ",".join(denied))
 
 
-def _remote_preflight_command(release_dir: str, modules: list[str] | None = None, compile_files: list[str] | None = None) -> str:
-    if modules is not None and modules != list(IMPORT_MODULES):
-        raise ReleaseError("remote preflight modules must exactly match release contract")
-    allowed_compile_files = set(REMOTE_PREFLIGHT_PY_FILES) | {NMBOT_DIALOGUE_EXPORTER_SCRIPT} | set(NMBOT_DIALOGUE_EXPORTER_DEPENDENCY_FILES)
-    selected_compile_files = list(REMOTE_PREFLIGHT_PY_FILES) if compile_files is None else compile_files
-    if not set(selected_compile_files).issubset(allowed_compile_files):
-        raise ReleaseError("remote preflight compile files must match release contract")
-    payload = json.dumps({"modules": list(IMPORT_MODULES), "compile_files": sorted(selected_compile_files)}, sort_keys=True)
+def _remote_preflight_command(
+    release_dir: str,
+    modules: list[str] | None = None,
+    compile_files: list[str] | None = None,
+    *,
+    profile: str | None = None,
+) -> str:
+    if profile not in {None, V6_ONLY_PROFILE}:
+        raise ReleaseError(f"unknown remote preflight profile: {profile}")
+    expected_modules = list(V6_ONLY_IMPORT_MODULES if profile == V6_ONLY_PROFILE else IMPORT_MODULES)
+    if modules is not None and modules != expected_modules:
+        raise ReleaseError("remote preflight modules must exactly match release profile contract")
+    if profile == V6_ONLY_PROFILE:
+        selected_compile_files = list(V6_ONLY_PREFLIGHT_PY_FILES) if compile_files is None else compile_files
+        if selected_compile_files != list(V6_ONLY_PREFLIGHT_PY_FILES):
+            raise ReleaseError("V6-only remote preflight compile files must exactly match its allowlist")
+        payload_data = {
+            "profile": V6_ONLY_PROFILE,
+            "modules": expected_modules,
+            "compile_files": selected_compile_files,
+            "required_dependencies": list(V6_ONLY_REQUIRED_DEPENDENCIES),
+        }
+    else:
+        allowed_compile_files = set(REMOTE_PREFLIGHT_PY_FILES) | {NMBOT_DIALOGUE_EXPORTER_SCRIPT} | set(NMBOT_DIALOGUE_EXPORTER_DEPENDENCY_FILES)
+        selected_compile_files = list(REMOTE_PREFLIGHT_PY_FILES) if compile_files is None else compile_files
+        if not set(selected_compile_files).issubset(allowed_compile_files):
+            raise ReleaseError("remote preflight compile files must match release contract")
+        # Keep the default payload and generated command behavior unchanged.
+        payload_data = {"modules": expected_modules, "compile_files": sorted(selected_compile_files)}
+    payload = json.dumps(payload_data, sort_keys=True)
     code = r'''
 import hashlib, importlib, json, os, pathlib, py_compile, sys, tempfile
-cfg=json.loads(sys.argv[1]); root=pathlib.Path.cwd().resolve(); modules=cfg["modules"]; compile_files=cfg["compile_files"]
+cfg=json.loads(sys.argv[1]); root=pathlib.Path.cwd().resolve(); modules=cfg["modules"]; compile_files=cfg["compile_files"]; profile=cfg.get("profile"); required_dependencies=cfg.get("required_dependencies",[])
 def fail(msg): print(json.dumps({"ok": False, "error": msg})); sys.exit(2)
 def v1_py_files():
     base=root/"nmbot_v1"
@@ -3432,7 +3536,10 @@ def snapshot():
             out[rel]=hashlib.sha256(p.read_bytes()).hexdigest()
     return out
 before=snapshot()
-compile_files=sorted(set(compile_files)|set(v1_py_files()))
+if profile == "v6-only":
+    if compile_files != sorted(compile_files) or len(compile_files) != len(set(compile_files)): fail("V6-only compile file set is not exact")
+else:
+    compile_files=sorted(set(compile_files)|set(v1_py_files()))
 with tempfile.TemporaryDirectory(prefix="nmbot-preflight-pyc-") as td:
     tmp=pathlib.Path(td)
     for idx, rel in enumerate(compile_files):
@@ -3445,9 +3552,14 @@ release_paths={str(root), str(root/"scripts")}
 sys.path[:]=[str(root), str(root/"scripts")]+[p for p in sys.path if p and p not in release_paths and not pathlib.Path(p).resolve().is_relative_to(root)]
 for name in modules:
     importlib.import_module(name)
+for name in required_dependencies:
+    importlib.import_module(name)
 after=snapshot()
 if after != before: fail("release file set/hash changed during preflight")
-print(json.dumps({"ok": True, "import": "ok", "py_compile": len(compile_files), "import_modules": len(modules)}))
+if profile == "v6-only":
+    print(json.dumps({"ok": True, "profile": profile, "import": "ok", "py_compile": len(compile_files), "import_modules": len(modules), "required_dependencies": len(required_dependencies)}))
+else:
+    print(json.dumps({"ok": True, "import": "ok", "py_compile": len(compile_files), "import_modules": len(modules)}))
 '''
     return " && ".join([
         "test -d " + shlex.quote(release_dir),
@@ -4389,12 +4501,13 @@ def deploy(*, release_id: str, archive: Path, manifest_path: Path, confirm: bool
         _remote_ok(remote.run(_remote_extract_command(staging, release_dir, manifest)))
         for name in manifest["config_schema_requirements"]["external_runtime_paths"]:
             _remote_ok(remote.run("ln -sfn " + shlex.quote(remote_root + "/" + name) + " " + shlex.quote(release_dir + "/" + name)))
-        compile_files = list(REMOTE_PREFLIGHT_PY_FILES)
+        v6_only = manifest["import_modules"] == list(V6_ONLY_IMPORT_MODULES)
+        compile_files = list(V6_ONLY_PREFLIGHT_PY_FILES if v6_only else REMOTE_PREFLIGHT_PY_FILES)
         if include_dialogue_exporter:
             _remote_ok(remote.run(_dialogue_exporter_backup_command(remote_root, rid)))
             compile_files.append(NMBOT_DIALOGUE_EXPORTER_SCRIPT)
             compile_files.extend(sorted(NMBOT_DIALOGUE_EXPORTER_DEPENDENCY_FILES))
-        _remote_ok(remote.run(_remote_preflight_command(release_dir, list(manifest["import_modules"]), sorted(compile_files))))
+        _remote_ok(remote.run(_remote_preflight_command(release_dir, list(manifest["import_modules"]), sorted(compile_files), profile=V6_ONLY_PROFILE if v6_only else None)))
         tmp_link = f"{remote_root}/.current.{rid}.tmp"
         cutover_started = True
         _remote_ok(remote.run(_stop_api_command()))
@@ -4476,7 +4589,8 @@ def bootstrap_apply(*, release_id: str, archive: Path, manifest_path: Path, conf
         _remote_ok(remote.run(_remote_extract_command(paths["staging"], paths["release_dir"], manifest)))
         for name in manifest["config_schema_requirements"]["external_runtime_paths"]:
             _remote_ok(remote.run("ln -sfn " + shlex.quote(remote_root.rstrip("/") + "/" + name) + " " + shlex.quote(paths["release_dir"] + "/" + name)))
-        _remote_ok(remote.run(_remote_preflight_command(paths["release_dir"], list(manifest["import_modules"]))))
+        v6_only = manifest["import_modules"] == list(V6_ONLY_IMPORT_MODULES)
+        _remote_ok(remote.run(_remote_preflight_command(paths["release_dir"], list(manifest["import_modules"]), profile=V6_ONLY_PROFILE if v6_only else None)))
         _remote_ok(remote.run(_stop_api_command()))
         _remote_ok(remote.run(_api_inactive_command()))
         mutation_started = True
@@ -4523,6 +4637,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     bw.add_argument("--release-id")
     bw.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     bw.add_argument("--include-dialogue-exporter", action="store_true")
+    bw.add_argument("--profile", choices=(V6_ONLY_PROFILE,))
     pre = sub.add_parser("preflight")
     pre.add_argument("--archive", type=Path, required=True)
     pre.add_argument("--manifest", type=Path, required=True)
@@ -4623,7 +4738,7 @@ def main(argv: list[str] | None = None) -> int:
             artifact = build(release_id=args.release_id, out_dir=args.out_dir, include_dialogue_exporter=args.include_dialogue_exporter)
             print(f"build=ok release_id={artifact.manifest_data['release_id']} archive={artifact.archive} manifest={artifact.manifest}")
         elif command == "build-from-worktree":
-            artifact = build_from_worktree(worktree_dir=args.worktree_dir, release_id=args.release_id, out_dir=args.out_dir, include_dialogue_exporter=args.include_dialogue_exporter)
+            artifact = build_from_worktree(worktree_dir=args.worktree_dir, release_id=args.release_id, out_dir=args.out_dir, include_dialogue_exporter=args.include_dialogue_exporter, profile=args.profile)
             provenance = artifact.manifest_data["source_provenance"]
             print(json.dumps({"build": "ok", "release_id": artifact.manifest_data["release_id"], "archive": str(artifact.archive), "manifest": str(artifact.manifest), "source_snapshot_id": provenance["source_snapshot_id"], "source_snapshot_manifest_sha256": provenance["source_snapshot_manifest_sha256"]}, ensure_ascii=False, sort_keys=True))
         elif command == "preflight":

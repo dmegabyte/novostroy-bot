@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_v6_release_allowlist_contains_diagnostic_and_smoke_tools() -> None:
     assert "scripts/nmbot_diag.sh" in rel.V6_ONLY_RUNTIME_FILES
     assert "scripts/nmbot_v6_jivo_smoke.py" in rel.V6_ONLY_RUNTIME_FILES
+    assert "scripts/nmbot_diag.sh" in rel.API_RUNTIME_SCRIPT_FILES
+    assert "scripts/nmbot_v6_jivo_smoke.py" in rel.API_RUNTIME_SCRIPT_FILES
 
 
 class FakeRemote:

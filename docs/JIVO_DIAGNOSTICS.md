@@ -220,6 +220,15 @@ runbook.
 
 Текущий production runtime — это `novostroy-bot-api.service` (`scripts/nmbot_api_server.py`, localhost `:8088`) и `novostroy-bot-n8n-bridge.service` (`scripts/nmbot_n8n_bridge_server.py`, localhost `:8093`). Legacy `novostroy-bot.service` / `scripts/chat_tester_bot.py` относится к Telegram rollback-истории и не является current Jivo production.
 
+Для V6 atomic release diagnostic tools входят в пакет по путям
+`current/scripts/nmbot_diag.sh` и `current/scripts/nmbot_v6_jivo_smoke.py`.
+Строгий smoke запускается на VPS, а не из локального checkout:
+
+```bash
+python3 /home/neiro/novostroy-bot/current/scripts/nmbot_v6_jivo_smoke.py \
+  --require-accepted
+```
+
 Проверка активной версии процесса:
 
 ```bash
@@ -246,11 +255,9 @@ cat data/nmbot_runtime_version.json
 `current_runtime_version`. Если он `unverified` или `unknown`, нельзя подменять
 его значением selector-файла или audit-журнала.
 
-На 2026-07-30 текущий `nmbot_diag.sh --vps --json` ещё не умеет подтвердить V1
-selector на live endpoint и возвращает `unsupported_or_missing_runtime_version`.
-Пока это ограничение действует, не делайте обратный вывод, что активен V2
-fallback: отсутствие V1-подтверждения в diagnostics — это diagnostic gap, а не
-доказательство текущей версии процесса.
+Диагностика принимает поддерживаемые live-версии V0, V2, V3, V5 и V6.
+Если endpoint возвращает другую или пустую версию, результат остаётся
+`unverified`; selector-файл по-прежнему не заменяет live proof.
 
 Анализ production trace-лога без вызова Jivo или LLM:
 

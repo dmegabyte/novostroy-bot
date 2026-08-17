@@ -1,0 +1,41 @@
+- description: Missing discount without specialist offer
+  vars:
+    case_id: absent_discount
+    expect_absent: true
+    expected_values: ""
+    input_json: >-
+      {"current_message":"Есть скидка?","dialogue_history":[],"property_material":{"facts":[{"name":"ЖК Северный"}],"near":[],"params":{"name":"ЖК Северный"}},"missing":["discount"],"ambiguity":null,"dialogue_policy":{"offer_specialist_now":false}}
+- description: Confirmed discount in facts
+  vars:
+    case_id: confirmed_discount
+    expect_absent: false
+    expected_values: "Скидка 7%"
+    require_source_framing: true
+    input_json: >-
+      {"current_message":"Какая скидка в ЖК Северный?","dialogue_history":[],"property_material":{"facts":[{"name":"ЖК Северный","discount":"Скидка 7% при полной оплате"}],"near":[],"params":{"name":"ЖК Северный"}},"missing":[],"ambiguity":null,"dialogue_policy":{"offer_specialist_now":false}}
+- description: Card installment and calculated mortgage, down payment absent
+  vars:
+    case_id: card_installment_mortgage
+    expect_absent: true
+    require_page_calculation: true
+    expected_values: "Рассрочка на 12 месяцев|45 000"
+    require_source_framing: true
+    input_json: >-
+      {"current_message":"Какие условия рассрочки, платёж по ипотеке и первоначальный взнос?","dialogue_history":[],"property_material":{"facts":[],"near":[],"params":{"name":"ЖК Речной"},"url_card":{"card":{"complex_name":"ЖК Речной","installment_terms":"Рассрочка на 12 месяцев","mortgage_from_rub_per_month":"45 000 ₽/мес"},"missing":["down_payment"]}},"missing":["down_payment"],"ambiguity":null,"dialogue_policy":{"offer_specialist_now":false}}
+- description: Family mortgage programme without approval claim
+  vars:
+    case_id: family_mortgage
+    expect_absent: false
+    require_approval_boundary: true
+    expected_values: "Семейная ипотека"
+    require_source_framing: true
+    input_json: >-
+      {"current_message":"Можно по семейной ипотеке?","dialogue_history":[],"property_material":{"facts":[{"name":"ЖК Садовый","mortgage_programs":"Семейная ипотека"}],"near":[],"params":{"name":"ЖК Садовый"}},"missing":[],"ambiguity":null,"dialogue_policy":{"offer_specialist_now":false}}
+- description: Missing finance fact with exact specialist CTA
+  vars:
+    case_id: missing_finance_specialist
+    expect_absent: true
+    expect_specialist_cta: true
+    expected_values: ""
+    input_json: >-
+      {"current_message":"Какой первоначальный взнос?","dialogue_history":[],"property_material":{"facts":[{"name":"ЖК Лесной"}],"near":[],"params":{"name":"ЖК Лесной"}},"missing":["down_payment"],"ambiguity":null,"dialogue_policy":{"offer_specialist_now":true}}

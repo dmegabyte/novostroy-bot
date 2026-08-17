@@ -1,0 +1,17 @@
+description: V6 finance prompt candidate
+prompts:
+  - file://prompts/v6-chat.json
+providers:
+  - id: openrouter:google/gemini-3.1-flash-lite-preview
+    config:
+      apiBaseUrl: https://openrouter.ai/api/v1
+      temperature: 0.2
+      max_tokens: 1800
+defaultTest:
+  assert:
+    - type: python
+      value: file://scripts/assertions.py
+tests: file://tests/cases.yaml
+commandLineOptions:
+  maxConcurrency: 1
+outputPath: results/model-eval.json

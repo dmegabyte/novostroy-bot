@@ -316,9 +316,7 @@ class SimpleRuntime:
         p1_attempt = None
 
         contact_intent = classify_contact_intent(message)
-        if contact_intent == "live_operator":
-            return SimpleRuntimeResult("operator_handoff", state, "")
-        if contact_intent == "callback":
+        if contact_intent in {"live_operator", "callback"}:
             try:
                 next_state = state.accepted(
                     message, PHONE_QUESTION, awaiting_phone=True, pending_offer="none",

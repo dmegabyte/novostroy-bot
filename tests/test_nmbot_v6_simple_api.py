@@ -12,7 +12,7 @@ from scripts.nmbot_api_server import (
     _mark_v6_bot_message_returned, _reset_state_for_session_runtime, build_jivo_bot_message,
 )
 from scripts.nmbot_runtime_adapter import run_runtime_turn
-from scripts.nmbot_v6_simple_adapter import OPERATOR_UNAVAILABLE_CALLBACK, run_v6_simple_turn
+from scripts.nmbot_v6_simple_adapter import run_v6_simple_turn
 
 
 class Port:
@@ -75,24 +75,27 @@ def test_v1_and_v4_selectors_remain_isolated_from_simple_v6(monkeypatch):
     assert called == ["v1", "v4"]
 
 
-def test_actual_simple_operator_request_prepares_typed_online_handoff():
+def test_actual_simple_operator_request_starts_callback_phone_flow():
     p1 = Port({"must": "not run"})
     p2 = Port({"must": "not run"})
     app = {"state_store": Store(), "v6_simple_prompt1_port": p1, "v6_simple_prompt2_port": p2}
     result = asyncio.run(run_v6_simple_turn(app, user_id="s", message="Позовите оператора", channel="jivo", meta={"agents_online": True}))
-    assert result["handoff_to_operator"] is True and result["answer"] == ""
+    assert result["handoff_to_operator"] is False
+    assert result["answer"] == "На какой номер вам позвонить?"
+    assert result["awaiting_phone"] is True
     assert p1.calls == 0 and p2.calls == 0
     stages = {item["stage"]: item["status"] for item in result["meta"]["v6_trace"]["stages"]}
     assert stages["prompt1"] == "not_called" and stages["prompt2"] == "not_called"
 
 
-def test_offline_operator_request_persists_callback_and_short_phone_stays_guarded():
+def test_operator_request_persists_callback_and_short_phone_stays_guarded():
     store = Store()
     p1 = Port({"must": "not run"})
     p2 = Port({"must": "not run"})
     app = {"state_store": store, "v6_simple_prompt1_port": p1, "v6_simple_prompt2_port": p2}
     result = asyncio.run(run_v6_simple_turn(app, user_id="s", message="Подключите менеджера", channel="jivo", meta={"agents_online": False}))
-    assert result["handoff_to_operator"] is False and result["answer"] == OPERATOR_UNAVAILABLE_CALLBACK
+    assert result["handoff_to_operator"] is False
+    assert result["answer"] == "На какой номер вам позвонить?"
     assert result["awaiting_phone"] is True and store.value["nmbot_v6"]["awaiting_phone"] is True
     assert p1.calls == 0 and p2.calls == 0
     stages = {item["stage"]: item["status"] for item in result["meta"]["v6_trace"]["stages"]}

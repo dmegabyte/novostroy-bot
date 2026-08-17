@@ -136,12 +136,13 @@ def test_direct_specialist_request_is_owned_by_p1_and_skips_p2(message):
     "Соедините с живым человеком",
     "Пожалуйста, подключите оператора!",
 ])
-def test_direct_live_operator_commands_bypass_both_models(message):
+def test_direct_operator_commands_bypass_models_and_enter_phone_flow(message):
     p1, p2 = Port([]), Port([])
     outcome = run(p1, p2, text=message)
     assert classify_contact_intent(message) == "live_operator"
-    assert outcome.status == "operator_handoff" and outcome.model_calls == 0
-    assert outcome.state == SimpleState() and not p1.calls and not p2.calls
+    assert outcome.status == "completed" and outcome.text == PHONE_QUESTION
+    assert outcome.request_phone is True and outcome.state.awaiting_phone is True
+    assert outcome.model_calls == 0 and not p1.calls and not p2.calls
 
 
 def test_explicit_callback_bypasses_models_and_enters_phone_flow():

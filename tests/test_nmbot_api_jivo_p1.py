@@ -186,7 +186,7 @@ def test_jivo_handler_returns_json_bot_message_when_runtime_raises(monkeypatch):
     asyncio.run(scenario())
 
 
-def test_v6_direct_operator_wire_invites_online_agent() -> None:
+def test_v6_direct_operator_wire_requests_callback_phone() -> None:
     class ForbiddenPort:
         async def run(self, *args: Any, **kwargs: Any):
             raise AssertionError("contact command must bypass models")
@@ -199,7 +199,8 @@ def test_v6_direct_operator_wire_invites_online_agent() -> None:
         response, status = await mod.process_jivo_client_message(
             app, payload(event_id="v6-operator-online", text="Соедините с живым человеком"),
         )
-        assert status == 200 and response["event"] == "INVITE_AGENT"
+        assert status == 200 and response["event"] == "BOT_MESSAGE"
+        assert response["message"]["text"] == "На какой номер вам позвонить?"
 
     asyncio.run(scenario())
 

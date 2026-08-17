@@ -63,6 +63,7 @@ Prompt-уровни тратят токены и требуют одноврем
 | 2026-08-17 10:29 | integrated candidate v2: обязательный `NEXT_SLOT_CANDIDATES` gate | `eval-4Ip-2026-08-17T10:29:19` | **4/5** | ambiguity без альтернатив; multi-missing gate | **Не принимать**: модель снова выбрала бюджет при двух деталях |
 | 2026-08-17 10:34 | integrated candidate v2 на Gemini 3.6 Flash | `eval-obo-2026-08-17T10:34:08` | **0/5** | тот же Prompt2-набор; OpenRouter принял `google/gemini-3.6-flash` | **Не принимать**: модель вернула рассуждения и текст вне требуемого JSON |
 | 2026-08-17 10:35 | integrated candidate v2 на Gemini 2.5 Flash | `eval-m45-2026-08-17T10:35:36` | **3/5** | тот же Prompt2-набор; OpenRouter принял `google/gemini-2.5-flash` | **Не принимать**: multi-missing и ambiguity-кейсы не прошли |
+| 2026-08-17 10:43 | integrated candidate v2 на GPT-5.6 Luna | `eval-tqL-2026-08-17T10:43:19` | **3/5** | тот же Prompt2-набор; OpenRouter ID `openai/gpt-5.6-luna` | **Не принимать**: standalone price и specialist CTA вернули рассуждения вместо чистого JSON |
 
 ### Контрольные метрики
 
@@ -72,6 +73,7 @@ Prompt-уровни тратят токены и требуют одноврем
 - Prompt2 candidate v1/v2: требование `5/5` в двух независимых прогонах **не выполнено**.
 - Gemini 3.6 Flash: **0/5**, eval `eval-obo-2026-08-17T10:34:08`; дополнительно зафиксировано нарушение JSON/output-контракта.
 - Gemini 2.5 Flash: **3/5**, eval `eval-m45-2026-08-17T10:35:36`; прошли price, unique-area и specialist CTA.
+- GPT-5.6 Luna: **3/5**, eval `eval-tqL-2026-08-17T10:43:19`; OpenRouter-маршрут работает, но output-контракт нарушен в двух кейсах.
 - Следствие: contextual follow-up правило пока не переносится в production Prompt2.
 
 ### Зафиксированные дефекты кандидатов

@@ -236,6 +236,8 @@ V6_ONLY_RUNTIME_FILES = frozenset({
     "scripts/nmbot_gateway_client.py",
     "scripts/nmbot_prompt_ledger.py",
     "scripts/nmbot_release_identity.py",
+    "scripts/nmbot_diag.sh",
+    "scripts/nmbot_v6_jivo_smoke.py",
     "scripts/nmbot_v6_journal.py",
     "scripts/nmbot_v6_simple_adapter.py",
 })

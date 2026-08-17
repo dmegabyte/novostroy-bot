@@ -21,6 +21,11 @@ import scripts.nmbot_atomic_release as rel
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_v6_release_allowlist_contains_diagnostic_and_smoke_tools() -> None:
+    assert "scripts/nmbot_diag.sh" in rel.V6_ONLY_RUNTIME_FILES
+    assert "scripts/nmbot_v6_jivo_smoke.py" in rel.V6_ONLY_RUNTIME_FILES
+
+
 class FakeRemote:
     def __init__(self, *, fail: str | None = None, migrated: bool = True, remote_root: str = "/remote", previous: str = "old", release_exists: bool = False, pythonpath: bool = False, execstart_pythonpath: bool = False, systemd_identity_override: str | None = None, systemd_state_override: str | None = None, rollback_fail: bool = False, cleanup_fail: bool = False, env_files: str | None = None, exec_start_pre: str = "", exec_extra_args: str = "", bootstrap_current_symlink: bool = False, bootstrap_current_state: str = "absent", inactive_fail: bool = False) -> None:
         self.fail = fail

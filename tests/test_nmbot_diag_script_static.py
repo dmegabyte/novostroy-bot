@@ -32,3 +32,8 @@ def test_vps_json_runtime_truth_comes_only_from_protected_live_endpoint() -> Non
     assert 'active_process_truth": False' in text
     assert '"runtime_version": {"status": "malformed_default", "effective_version": "V2"}' not in vps_json
     assert '"runtime_version": runtime' not in vps_json
+
+
+def test_diag_accepts_current_v6_runtime_version() -> None:
+    text = (ROOT / "scripts" / "nmbot_diag.sh").read_text(encoding="utf-8")
+    assert '"V6"' in text

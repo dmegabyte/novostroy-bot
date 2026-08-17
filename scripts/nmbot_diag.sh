@@ -93,7 +93,7 @@ from pathlib import Path
 
 bot_dir = Path("/home/neiro/novostroy-bot")
 services = ["novostroy-bot-api.service", "novostroy-bot-n8n-bridge.service"]
-supported_runtime_versions = {"V0", "V2", "V3", "V5"}
+supported_runtime_versions = {"V0", "V2", "V3", "V5", "V6"}
 
 def run(args):
     try:

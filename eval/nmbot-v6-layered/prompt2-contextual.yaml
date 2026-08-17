@@ -1,0 +1,44 @@
+description: V6 Prompt 2 contextual candidate synthetic diagnostic
+prompts:
+  - file://prompt2-contextual-chat.json
+providers:
+  - id: openrouter:google/gemini-3.1-flash-lite-preview
+    config:
+      apiBaseUrl: https://openrouter.ai/api/v1
+      temperature: 0.2
+      max_tokens: 700
+defaultTest:
+  assert:
+    - type: python
+      value: file://assertions.py:get_assert
+tests:
+  - description: standalone URL price has no selection intent
+    vars:
+      layer: prompt2
+      expected_mode: empty
+      required_values: '12 500 000'
+      input_json: '{"current_message":"Какая цена по ссылке?","dialogue_history":[],"property_material":{"facts":[],"near":[],"params":{},"url_card":{"card":{"complex_name":"ЖК Синтетический","price_rub":12500000},"missing":[],"derived":{"price_difference_is_not_a_promotion":true}}},"missing":[],"ambiguity":null,"dialogue_policy":{"offer_specialist_now":false}}'
+  - description: explicit studio selection needs only area
+    vars:
+      layer: prompt2
+      expected_mode: area
+      required_values: '7 900 000'
+      input_json: '{"current_message":"Сколько стоит студия?","dialogue_history":[{"role":"user","text":"Подбираю студию именно в ЖК Синтетический, бюджет до 8 миллионов. По району и формату уже определился; для продолжения осталось понять подходящую площадь."},{"role":"assistant","text":"Хорошо, продолжаем выбор студии в этом жилом комплексе с бюджетом до 8 миллионов."}],"property_material":{"facts":[{"name":"ЖК Синтетический","rooms":0,"price":"7 900 000 ₽"}],"near":[],"params":{"name":"ЖК Синтетический","rooms":0,"max_price":8000000}},"missing":["preferred_area_m2"],"ambiguity":null,"dialogue_policy":{"offer_specialist_now":false}}'
+  - description: explicit selection with budget and area missing abstains
+    vars:
+      layer: prompt2
+      expected_mode: empty
+      required_values: '7 900 000'
+      input_json: '{"current_message":"Сколько стоит студия?","dialogue_history":[{"role":"user","text":"Подбираю студию в ЖК Синтетический, но бюджет и желаемую площадь ещё не определил."}],"property_material":{"facts":[{"name":"ЖК Синтетический","rooms":0,"price":"7 900 000 ₽"}],"near":[],"params":{"name":"ЖК Синтетический","rooms":0}},"missing":["max_price","preferred_area_m2"],"ambiguity":null,"dialogue_policy":{"offer_specialist_now":false}}'
+  - description: ambiguity overrides contextual candidate
+    vars:
+      layer: prompt2
+      expected_mode: ambiguity_max_price
+      input_json: '{"current_message":"до 10 или 15 млн","dialogue_history":[],"property_material":{"facts":[{"name":"ЖК Синтетический"}],"near":[],"params":{}},"missing":[],"ambiguity":{"parameter":"max_price","reason_code":"multiple_interpretations"},"dialogue_policy":{"offer_specialist_now":false}}'
+  - description: specialist offer has exact CTA
+    vars:
+      layer: prompt2
+      expected_mode: specialist
+      input_json: '{"current_message":"Какая цена?","dialogue_history":[],"property_material":{"facts":[{"name":"ЖК Синтетический","price":"12 500 000 ₽"}],"near":[],"params":{"name":"ЖК Синтетический"}},"missing":[],"ambiguity":null,"dialogue_policy":{"offer_specialist_now":true}}'
+commandLineOptions:
+  maxConcurrency: 1

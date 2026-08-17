@@ -1,0 +1,31 @@
+description: V6 Prompt 1 synthetic semantic diagnostic
+prompts:
+  - file://prompt1-chat.json
+providers:
+  - id: openrouter:google/gemini-3.1-flash-lite-preview
+    config:
+      apiBaseUrl: https://openrouter.ai/api/v1
+      temperature: 0.2
+      max_tokens: 500
+defaultTest:
+  assert:
+    - type: python
+      value: file://assertions.py:get_assert
+tests:
+  - description: pending specialist offer accepted
+    vars:
+      layer: prompt1
+      expected_action: request_phone
+      input_json: '{"current_message":"Да, соедините со специалистом","dialogue_history":[{"role":"assistant","text":"Подключить специалиста?"}],"dialogue_policy":{"pending_offer":"specialist_contact"}}'
+  - description: bare yes without offer continues
+    vars:
+      layer: prompt1
+      expected_action: continue_empty
+      input_json: '{"current_message":"Да","dialogue_history":[],"dialogue_policy":{"pending_offer":"none"}}'
+  - description: two budget interpretations clarify
+    vars:
+      layer: prompt1
+      expected_action: clarify_max_price
+      input_json: '{"current_message":"Нужна квартира до 10 или 15 млн","dialogue_history":[],"dialogue_policy":{"pending_offer":"none"}}'
+commandLineOptions:
+  maxConcurrency: 1

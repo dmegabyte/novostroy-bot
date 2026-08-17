@@ -1,0 +1,5 @@
+[
+  {"role": "system", "content": "file://../../prompts/v6_simple_answer_writer.txt"},
+  {"role": "system", "content": "file://prompts/prompt2-contextual-followup-addendum.txt"},
+  {"role": "user", "content": "{{input_json}}"}
+]

@@ -1,0 +1,4 @@
+[
+  {"role": "system", "content": "file://../../prompts/v6_simple_search_agent.txt"},
+  {"role": "user", "content": "{{input_json}}"}
+]

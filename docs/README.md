@@ -32,6 +32,7 @@ may link or redirect here, but should not become duplicate owner docs.
 
 ## 2. Build and verify
 
+- `reference` [`NMBOT_V6_TESTING.md`](NMBOT_V6_TESTING.md) — layered V6 diagnostic, runtime and TEST-contour proof boundaries.
 - `reference` [`NMBOT_EXTERNAL_CONTRACTS.md`](NMBOT_EXTERNAL_CONTRACTS.md) — external callback/Jivo contracts.
 - `reference` [`MCP_APARTMENT_REQUEST_RULES_LLM.md`](MCP_APARTMENT_REQUEST_RULES_LLM.md) — LLM quick start for MCP apartment requests.
 - `reference` [`MCP_APARTMENT_REQUEST_RULES.md`](MCP_APARTMENT_REQUEST_RULES.md) — full MCP apartment request contract.

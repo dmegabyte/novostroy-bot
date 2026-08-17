@@ -308,6 +308,19 @@ def test_h151_prompt2_orders_ownership_act_choice_and_short_answer_rules_statica
     assert specialist < ambiguity < empty_results
 
 
+def test_prompt2_has_anti_loop_rule_after_semantic_connection():
+    prompt2 = (ROOT / "prompts" / "v6_simple_answer_writer.txt").read_text(encoding="utf-8")
+    semantic_connection = prompt2.index("СМЫСЛОВАЯ СВЯЗЬ РЕПЛИК")
+    anti_loop = prompt2.index("НЕ ПОВТОРЯЙ ЗАКРЫТЫЙ ШАГ")
+    specialist_phone = prompt2.index("СПЕЦИАЛИСТ И ТЕЛЕФОН")
+    assert semantic_connection < anti_loop < specialist_phone
+    assert (
+        "Если current_message содержательно отвечает на непосредственно предшествующий "
+        "final_question или однозначно принимает либо отклоняет предложенное в нём действие"
+    ) in prompt2
+    assert "выбери ANSWER_ONLY и верни final_question=\"\"" in prompt2
+
+
 def test_h151_prompt2_has_exact_closed_speech_act_set_statically():
     prompt2 = (ROOT / "prompts" / "v6_simple_answer_writer.txt").read_text(encoding="utf-8")
     closed_set = prompt2[

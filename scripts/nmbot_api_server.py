@@ -69,6 +69,7 @@ from nmbot_planner_context import (
     safe_turn_context as _neutral_safe_turn_context,
 )
 from nmbot_runtime_adapter import _canonical_v0_envelope, _canonical_v1_envelope, _canonical_v4_envelope, _merge_runtime_namespace_envelope, run_runtime_turn
+from scripts.nmbot_v6_simple_adapter import establish_v6_unavailable_fallback
 from nmbot_v0.field_contract import V0_PRESENTATION_TRACE_FIELDS
 from nmbot_v1.state import V1ConversationState
 from nmbot_v2.contracts import OptionCard
@@ -2917,6 +2918,17 @@ async def handle_jivo(request: web.Request) -> web.Response:
             status = 200
         return _json_response(response_payload, status=status)
     if event == "AGENT_UNAVAILABLE":
+        try:
+            session_key = _jivo_session_key(payload)
+            if await _effective_session_runtime_version(request.app, session_key) == "V6":
+                fallback = await establish_v6_unavailable_fallback(
+                    request.app, user_id=session_key,
+                )
+                if fallback.get("ok"):
+                    return _json_response(build_jivo_bot_message(payload, fallback["answer"]))
+        except Exception:
+            # Keep the historical safe response if runtime/state lookup fails.
+            pass
         return _json_response(build_jivo_bot_message(
             payload,
             "Сейчас специалист не на связи. Оставьте, пожалуйста, номер телефона — как только сможет, с вами свяжутся.",

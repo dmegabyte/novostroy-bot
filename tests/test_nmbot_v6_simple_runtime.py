@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 from nmbot_v6.simple_gateway import DirectTransport, SimpleGateway, SimpleGatewayResult, SimpleToolTrace
-from nmbot_v6.simple_runtime import CLARIFICATION_FAILURE, PHONE_QUESTION, SPECIALIST_CTA, SPECIALIST_OFFER_ON_FAILURE, SimpleRuntime
+from nmbot_v6.simple_runtime import CLARIFICATION_FAILURE, PHONE_QUESTION, SPECIALIST_CTA, SPECIALIST_OFFER_ON_FAILURE, SimpleRuntime, classify_contact_intent
 from nmbot_v6.simple_state import SimpleState
 
 
@@ -127,6 +127,45 @@ def test_direct_specialist_request_is_owned_by_p1_and_skips_p2(message):
     outcome = run(Port([result({"action": "request_phone"})]), p2, text=message)
     assert outcome.text == PHONE_QUESTION and outcome.request_phone is True
     assert outcome.state.awaiting_phone is True and outcome.state.pending_offer == "none" and not p2.calls
+
+
+@pytest.mark.parametrize("message", [
+    "оператора позови",
+    "Позовите оператора",
+    "подключи менеджера",
+    "Соедините с живым человеком",
+    "Пожалуйста, подключите оператора!",
+])
+def test_direct_live_operator_commands_bypass_both_models(message):
+    p1, p2 = Port([]), Port([])
+    outcome = run(p1, p2, text=message)
+    assert classify_contact_intent(message) == "live_operator"
+    assert outcome.status == "operator_handoff" and outcome.model_calls == 0
+    assert outcome.state == SimpleState() and not p1.calls and not p2.calls
+
+
+def test_explicit_callback_bypasses_models_and_enters_phone_flow():
+    p1, p2 = Port([]), Port([])
+    outcome = run(p1, p2, text="Перезвоните мне")
+    assert classify_contact_intent("Перезвоните мне") == "callback"
+    assert outcome.status == "completed" and outcome.text == PHONE_QUESTION
+    assert outcome.request_phone is True and outcome.state.awaiting_phone is True
+    assert outcome.model_calls == 0 and not p1.calls and not p2.calls
+
+
+@pytest.mark.parametrize("message", [
+    "Что делает оператор?",
+    "Как связаться с оператором?",
+    "Номер телефона ЖК",
+    "Есть ли отделка в квартире?",
+])
+def test_contact_information_and_property_questions_reach_model_path(message):
+    p1 = Port([result({"action": "continue", "facts": [], "near": [], "missing": [], "params": {}})])
+    p2 = Port([result({"action": "reply", "response": "Обычный ответ.", "final_question": ""})])
+    outcome = run(p1, p2, text=message)
+    assert classify_contact_intent(message) == "none"
+    assert outcome.status == "completed" and outcome.model_calls == 2
+    assert len(p1.calls) == 1 and len(p2.calls) == 1
 
 
 def test_p2_cannot_enter_phone_flow_when_p1_continues():

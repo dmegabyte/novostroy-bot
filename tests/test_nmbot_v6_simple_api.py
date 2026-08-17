@@ -12,7 +12,7 @@ from scripts.nmbot_api_server import (
     _mark_v6_bot_message_returned, _reset_state_for_session_runtime, build_jivo_bot_message,
 )
 from scripts.nmbot_runtime_adapter import run_runtime_turn
-from scripts.nmbot_v6_simple_adapter import run_v6_simple_turn
+from scripts.nmbot_v6_simple_adapter import OPERATOR_UNAVAILABLE_CALLBACK, run_v6_simple_turn
 
 
 class Port:
@@ -75,19 +75,46 @@ def test_v1_and_v4_selectors_remain_isolated_from_simple_v6(monkeypatch):
     assert called == ["v1", "v4"]
 
 
-def test_actual_simple_operator_request_prepares_bot_message_without_handoff():
-    p1 = Port({"action": "request_phone"})
-    p2 = Port({"action": "request_phone", "response": "", "final_question": ""})
+def test_actual_simple_operator_request_prepares_typed_online_handoff():
+    p1 = Port({"must": "not run"})
+    p2 = Port({"must": "not run"})
     app = {"state_store": Store(), "v6_simple_prompt1_port": p1, "v6_simple_prompt2_port": p2}
-    result = asyncio.run(run_v6_simple_turn(app, user_id="s", message="Позовите специалиста", channel="jivo"))
-    event = build_jivo_bot_message({"client_id": "c", "chat_id": "h"}, result["answer"])
-    assert event["event"] == "BOT_MESSAGE" and result["handoff_to_operator"] is False
-    assert result["answer"] == "На какой номер вам позвонить?"
-    assert p1.calls == 1 and p2.calls == 0
+    result = asyncio.run(run_v6_simple_turn(app, user_id="s", message="Позовите оператора", channel="jivo", meta={"agents_online": True}))
+    assert result["handoff_to_operator"] is True and result["answer"] == ""
+    assert p1.calls == 0 and p2.calls == 0
     stages = {item["stage"]: item["status"] for item in result["meta"]["v6_trace"]["stages"]}
-    assert stages["prompt1"] == "accepted" and stages["prompt2"] == "not_called" and stages["state"] == "accepted"
-    _mark_v6_bot_message_returned(result)
-    assert result["meta"]["v6_trace"]["stages"][-1]["status"] == "returned"
+    assert stages["prompt1"] == "not_called" and stages["prompt2"] == "not_called"
+
+
+def test_offline_operator_request_persists_callback_and_short_phone_stays_guarded():
+    store = Store()
+    p1 = Port({"must": "not run"})
+    p2 = Port({"must": "not run"})
+    app = {"state_store": store, "v6_simple_prompt1_port": p1, "v6_simple_prompt2_port": p2}
+    result = asyncio.run(run_v6_simple_turn(app, user_id="s", message="Подключите менеджера", channel="jivo", meta={"agents_online": False}))
+    assert result["handoff_to_operator"] is False and result["answer"] == OPERATOR_UNAVAILABLE_CALLBACK
+    assert result["awaiting_phone"] is True and store.value["nmbot_v6"]["awaiting_phone"] is True
+    assert p1.calls == 0 and p2.calls == 0
+    stages = {item["stage"]: item["status"] for item in result["meta"]["v6_trace"]["stages"]}
+    assert stages["prompt1"] == stages["prompt2"] == "not_called"
+
+    invalid = asyncio.run(run_v6_simple_turn(app, user_id="s", message="7988", channel="jivo", meta={"agents_online": False}))
+    assert invalid["meta"]["status"] == "invalid_phone"
+    assert "+7 999 123-45-67" in invalid["answer"] and invalid["awaiting_phone"] is True
+    assert p1.calls == 0 and p2.calls == 0
+
+
+def test_explicit_callback_is_deterministic_and_commits_phone_state():
+    store = Store()
+    p1 = Port({"must": "not run"})
+    p2 = Port({"must": "not run"})
+    result = asyncio.run(run_v6_simple_turn(
+        {"state_store": store, "v6_simple_prompt1_port": p1, "v6_simple_prompt2_port": p2},
+        user_id="s", message="Перезвоните мне", channel="jivo",
+    ))
+    assert result["answer"] == "На какой номер вам позвонить?"
+    assert result["awaiting_phone"] is True and store.value["nmbot_v6"]["awaiting_phone"] is True
+    assert result["meta"]["model_calls"] == 0 and p1.calls == p2.calls == 0
 
 
 def test_public_trace_omits_phone_shaped_attempt_reference():

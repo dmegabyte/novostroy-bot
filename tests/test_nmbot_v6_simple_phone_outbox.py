@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from nmbot_v6.simple_runtime import MULTIPLE_PHONES_TEXT, SimpleRuntime
+from nmbot_v6.simple_runtime import INVALID_PHONE_TEXT, MULTIPLE_PHONES_TEXT, SimpleRuntime
 from nmbot_v6.phone import parse_phone
 from nmbot_v6.simple_state import SimpleState
 from scripts.nmbot_crm_outbox import LocalCallbackOutbox
@@ -52,6 +52,50 @@ def test_mixed_phone_terminal_multiple_and_numeric_negative():
             self.calls.append(payload); return SimpleGatewayResult(self.value, "a")
     a, b = ReplyPort({"action": "continue", "facts": [], "near": [], "missing": [], "params": {}, "ambiguity": None}), ReplyPort({"action": "reply", "response": "Принято.", "final_question": ""})
     assert asyncio.run(SimpleRuntime(a, b, phone_backend=Backend()).run("Бюджет 18000000", SimpleState())).status == "completed"
+
+
+@pytest.mark.parametrize("phone", ["7988", "987654654654", "84565465465498"])
+def test_invalid_phone_while_awaiting_returns_format_hint_without_models(phone):
+    p1, p2 = Port(), Port()
+    state = SimpleState(awaiting_phone=True)
+
+    out = asyncio.run(SimpleRuntime(p1, p2, phone_backend=Backend()).run(phone, state))
+
+    assert out.status == "invalid_phone"
+    assert out.text == INVALID_PHONE_TEXT
+    assert out.state == state
+    assert not p1.calls and not p2.calls
+
+
+@pytest.mark.parametrize("phone", ["7988", "987654654654"])
+def test_adapter_keeps_waiting_after_invalid_phone(phone):
+    state = SimpleState(awaiting_phone=True)
+    store = Store({"nmbot_v6": state.plain()})
+    p1, p2 = Port(), Port()
+    app = {
+        "state_store": store,
+        "v6_simple_prompt1_port": p1,
+        "v6_simple_prompt2_port": p2,
+        "v6_phone_backend": Backend(),
+    }
+
+    result = asyncio.run(
+        run_v6_simple_turn(
+            app,
+            user_id="chat",
+            message=phone,
+            channel="jivo",
+            meta={"event_id": "invalid-phone"},
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["answer"] == INVALID_PHONE_TEXT
+    assert result["awaiting_phone"] is True
+    assert result["meta"]["status"] == "invalid_phone"
+    assert result["meta"]["state_commit"] is False
+    assert store.saves == []
+    assert not p1.calls and not p2.calls
 
 
 def test_adapter_outbox_queue_duplicate_restart_and_safe_context(tmp_path):

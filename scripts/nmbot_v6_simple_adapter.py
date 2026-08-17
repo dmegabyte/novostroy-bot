@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import re
+from dataclasses import replace
 from typing import Any, Mapping
 
 from nmbot_v6.simple_runtime import SimpleRuntime, TECHNICAL_TEXT
@@ -11,6 +12,7 @@ from nmbot_v6.simple_state import SimpleState
 
 PHONE_SUCCESS = "Спасибо, специалист свяжется с вами."
 PHONE_SAVE_FAILURE = "Не удалось сохранить номер. Пожалуйста, отправьте его ещё раз."
+OPERATOR_UNAVAILABLE_CALLBACK = "Сейчас оператор не в сети. Оставьте, пожалуйста, полный номер в формате +7 999 123-45-67, чтобы оформить заявку на обратный звонок."
 _SAFE_ATTEMPT_REF = re.compile(r"[A-Za-z0-9._:-]{1,200}")
 _PHONEISH_REF = re.compile(r"(?<!\d)(?:\+?\d[\s().-]*){10,18}(?!\d)")
 
@@ -24,6 +26,44 @@ def simple_envelope(existing: Mapping[str, Any] | None, state: SimpleState) -> d
 def safe_outbox_context(state: SimpleState, channel: str) -> dict[str, Any]:
     excerpt = [dict(item) for item in state.history[-6:]]
     return {"runtime": "v6_simple", "channel": str(channel or "")[:40], "dialogue_excerpt": excerpt}
+
+
+async def establish_v6_unavailable_fallback(
+    app: Any,
+    *,
+    user_id: str,
+    source_message: str | None = None,
+) -> dict[str, Any]:
+    """Persist the V6 phone fallback used by offline and unavailable operators."""
+    get = app.get if hasattr(app, "get") else lambda key, default=None: default
+    store = get("state_store")
+    if store is None:
+        return _public(False, TECHNICAL_TEXT, "configuration_failure", v6_trace=_trace("not_called", "not_called", "not_called", "not_called"))
+    try:
+        envelope_value = await store.get(user_id)
+        envelope = dict(envelope_value) if isinstance(envelope_value, Mapping) else {}
+        raw = envelope.get("nmbot_v6")
+        state = SimpleState.from_mapping(raw) if isinstance(raw, Mapping) else SimpleState()
+        # Phone-shaped text is intentionally forbidden in public V6 history.
+        # Persist the typed transition without copying the format example into it.
+        next_state = replace(
+            state,
+            revision=state.revision + 1,
+            awaiting_phone=True,
+            client_turn_count=state.client_turn_count + (1 if isinstance(source_message, str) and source_message.strip() else 0),
+            pending_offer="none",
+        )
+        await store.save(user_id, simple_envelope(envelope, next_state))
+    except Exception:
+        return _public(False, TECHNICAL_TEXT, "state_save_failure", v6_trace=_trace("not_called", "not_called", "not_called", "failed"))
+    return _public(
+        True,
+        OPERATOR_UNAVAILABLE_CALLBACK,
+        "operator_unavailable_callback",
+        awaiting_phone=True,
+        state_commit=True,
+        v6_trace=_trace("not_called", "not_called", "not_called", "accepted"),
+    )
 
 
 async def run_v6_simple_turn(app: Any, *, user_id: str, message: str, channel: str, meta: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -48,6 +88,15 @@ async def run_v6_simple_turn(app: Any, *, user_id: str, message: str, channel: s
         url_card_fetcher=url_card_fetcher if callable(url_card_fetcher) else None,
         url_card_extractor=url_card_extractor if callable(url_card_extractor) else None,
     ).run(str(message or ""), state)
+    if result.status == "operator_handoff":
+        if (meta or {}).get("agents_online") is False:
+            return await establish_v6_unavailable_fallback(
+                app, user_id=user_id, source_message=str(message or ""),
+            )
+        return _public(
+            True, "", "operator_handoff", handoff_to_operator=True,
+            v6_trace=_trace("not_called", "not_called", "not_called", "not_called"),
+        )
     if result.status == "phone":
         outbox = get("v6_callback_outbox")
         if outbox is None or result.private_phone is None:
@@ -71,7 +120,7 @@ async def run_v6_simple_turn(app: Any, *, user_id: str, message: str, channel: s
         except Exception:
             return _public(False, PHONE_SAVE_FAILURE, "state_save_failure", v6_trace=_trace("not_called", "not_called", "not_called", "failed"))
         return _public(True, PHONE_SUCCESS, "phone_accepted", awaiting_phone=False, state_commit=True, outbox_enqueue=status, v6_trace=_trace("not_called", "not_called", "not_called", "accepted"))
-    if result.status == "multiple_phones":
+    if result.status in {"multiple_phones", "invalid_phone"}:
         return _public(True, result.text, result.status, awaiting_phone=state.awaiting_phone, v6_trace=_trace("not_called", "not_called", "not_called", "not_called"))
     if result.status == "safe_failure":
         try:
@@ -137,6 +186,14 @@ def _runtime_trace(result: Any, *, state_status: str) -> dict[str, Any]:
             trace["material_source"] = result.material_source
             trace["tool_observation"] = result.tool_observation
         return trace
+    if result.model_calls == 0 and (result.status == "operator_handoff" or result.request_phone):
+        trace = _trace(
+            "not_called", "not_called", "not_called",
+            "failed" if result.failure_stage == "state" else state_status,
+        )
+        if result.failure_stage:
+            trace["failure_stage"] = result.failure_stage
+        return trace
     before_prompt1 = failed in {"input", "phone"}
     p1_status = "not_called" if before_prompt1 else ("failed" if result.prompt1_failed else "accepted")
     recovered_p1 = failed == "prompt1" and result.status == "completed"
@@ -158,13 +215,13 @@ def _runtime_trace(result: Any, *, state_status: str) -> dict[str, Any]:
     return trace
 
 
-def _public(ok: bool, answer: str, status: str, *, awaiting_phone: bool = False, state_commit: bool = False, **safe: Any) -> dict[str, Any]:
+def _public(ok: bool, answer: str, status: str, *, awaiting_phone: bool = False, handoff_to_operator: bool = False, state_commit: bool = False, **safe: Any) -> dict[str, Any]:
     return {
         "ok": ok,
         "answer": answer,
         "intent": "v6",
         "awaiting_phone": awaiting_phone,
-        "handoff_to_operator": False,
+        "handoff_to_operator": handoff_to_operator,
         "buttons": [],
         "meta": {"runtime": "v6", "engine": "v6_simple", "status": status, "state_commit": state_commit, **safe},
     }

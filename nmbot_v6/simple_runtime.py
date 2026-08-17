@@ -17,8 +17,21 @@ SPECIALIST_CTA = "Хотите, чтобы специалист проверил
 CLARIFICATION_FAILURE = "Не получилось уточнить запрос.\n\nМожете уточнить этот параметр поиска?"
 PHONE_QUESTION = "На какой номер вам позвонить?"
 MULTIPLE_PHONES_TEXT = "Пришлите, пожалуйста, один номер для связи."
+INVALID_PHONE_TEXT = "Похоже, номер указан неверно. Пришлите его, пожалуйста, в формате +7 999 123-45-67."
 URL_CARD_FAILURE_TEXT = "Не удалось открыть карточку по этой ссылке. Проверьте ссылку и попробуйте ещё раз."
 _CANDIDATE = re.compile(r"(?<!\d)(?:\+?\d[\s().-]*){10,18}(?!\d)")
+_SHORT_PHONE_ATTEMPT = re.compile(r"(?=.*\d)[\d\s().+-]+")
+_CONTACT_EDGE = " \t\r\n.,!?;:\"'«»"
+_LIVE_OPERATOR_COMMANDS = tuple(re.compile(pattern) for pattern in (
+    r"(?:позови|позовите|пригласи|пригласите|подключи|подключите)\s+(?:мне\s+)?(?:оператора|менеджера)",
+    r"(?:оператора|менеджера)\s+(?:позови|позовите|пригласи|пригласите|подключи|подключите)",
+    r"(?:соедини|соедините)\s+(?:меня\s+)?с\s+(?:(?:живым|реальным)\s+)?(?:оператором|менеджером|человеком)",
+))
+_CALLBACK_COMMANDS = tuple(re.compile(pattern) for pattern in (
+    r"(?:перезвони|перезвоните|позвони|позвоните)(?:\s+мне)?(?:\s+пожалуйста)?",
+    r"(?:закажи|закажите)\s+(?:мне\s+)?обратный\s+звонок",
+    r"(?:хочу|нужен)\s+обратный\s+звонок",
+))
 
 
 @dataclass(frozen=True)
@@ -66,7 +79,27 @@ def guard_phone(text: str, backend: PhoneMetadataBackend | None = None) -> Phone
         return PhoneGuardResult("single", next(iter(normalized.values())))
     if dependency_failed:
         return PhoneGuardResult("dependency_failure")
+    if plausible:
+        return PhoneGuardResult("invalid")
     return PhoneGuardResult("none")
+
+
+def _is_short_phone_attempt(text: str) -> bool:
+    """Recognize incomplete phone-only input while a phone is awaited."""
+    return bool(_SHORT_PHONE_ATTEMPT.fullmatch(text)) and sum(char.isdigit() for char in text) < 10
+
+
+def classify_contact_intent(text: str) -> str:
+    """Classify only standalone contact commands, never questions/explanations."""
+    normalized = str(text or "").casefold().replace("ё", "е")
+    normalized = re.sub(r"[,;:]", " ", normalized).strip(_CONTACT_EDGE)
+    normalized = re.sub(r"(?:^|\s)пожалуйста(?:\s|$)", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if any(pattern.fullmatch(normalized) for pattern in _CALLBACK_COMMANDS):
+        return "callback"
+    if any(pattern.fullmatch(normalized) for pattern in _LIVE_OPERATOR_COMMANDS):
+        return "live_operator"
+    return "none"
 
 
 class SimpleRuntime:
@@ -273,12 +306,30 @@ class SimpleRuntime:
             return SimpleRuntimeResult("multiple_phones", state, MULTIPLE_PHONES_TEXT)
         if guard.status == "dependency_failure":
             return SimpleRuntimeResult("failed", state, TECHNICAL_TEXT, failure_stage="phone")
+        if state.awaiting_phone and (guard.status == "invalid" or _is_short_phone_attempt(current_message)):
+            return SimpleRuntimeResult("invalid_phone", state, INVALID_PHONE_TEXT)
         # A plausible but invalid candidate is not allowed beyond the privacy
         # boundary. Proven non-phone numbers do not match this candidate shape.
         message = _CANDIDATE.sub("[phone_redacted]", current_message)[:4000]
         history = state.plain()["history"]
         calls = 0
         p1_attempt = None
+
+        contact_intent = classify_contact_intent(message)
+        if contact_intent == "live_operator":
+            return SimpleRuntimeResult("operator_handoff", state, "")
+        if contact_intent == "callback":
+            try:
+                next_state = state.accepted(
+                    message, PHONE_QUESTION, awaiting_phone=True, pending_offer="none",
+                )
+            except Exception:
+                return SimpleRuntimeResult(
+                    "failed", state, TECHNICAL_TEXT, failure_stage="state", request_phone=True,
+                )
+            return SimpleRuntimeResult(
+                "completed", next_state, PHONE_QUESTION, request_phone=True,
+            )
 
         def safe_failure(*, stage: str, code: str, field: str | None = None, prompt1_failed: bool = False, p2_attempt: str | None = None, mcp_calls: int = 0, material_status: str | None = None, observation: str | None = None) -> SimpleRuntimeResult:
             """Persist only the fixed public offer so related consent remains model-owned."""

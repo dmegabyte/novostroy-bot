@@ -186,6 +186,62 @@ def test_jivo_handler_returns_json_bot_message_when_runtime_raises(monkeypatch):
     asyncio.run(scenario())
 
 
+def test_v6_direct_operator_wire_invites_online_agent() -> None:
+    class ForbiddenPort:
+        async def run(self, *args: Any, **kwargs: Any):
+            raise AssertionError("contact command must bypass models")
+
+    async def scenario() -> None:
+        app = make_app()
+        await app["runtime_version_store"].set("V6")
+        app["v6_simple_prompt1_port"] = ForbiddenPort()
+        app["v6_simple_prompt2_port"] = ForbiddenPort()
+        response, status = await mod.process_jivo_client_message(
+            app, payload(event_id="v6-operator-online", text="Соедините с живым человеком"),
+        )
+        assert status == 200 and response["event"] == "INVITE_AGENT"
+
+    asyncio.run(scenario())
+
+
+def test_v6_agent_unavailable_persists_phone_fallback_and_non_v6_stays_legacy(monkeypatch) -> None:
+    from scripts.nmbot_v6_simple_adapter import OPERATOR_UNAVAILABLE_CALLBACK
+
+    class Request:
+        match_info = {"provider_token": "configured"}
+
+        def __init__(self, app: web.Application, chat_id: str) -> None:
+            self.app = app
+            self.chat_id = chat_id
+
+        async def json(self):
+            return {
+                "event": "AGENT_UNAVAILABLE", "site_id": "site1",
+                "client_id": f"client-{self.chat_id}", "chat_id": self.chat_id,
+            }
+
+    async def scenario() -> None:
+        monkeypatch.setenv("JIVO_PROVIDER_TOKEN", "configured")
+        v6_app = make_app()
+        await v6_app["runtime_version_store"].set("V6")
+        v6_response = await mod.handle_jivo(Request(v6_app, "v6-unavailable"))
+        v6_body = json.loads(v6_response.body)
+        v6_key = "jivo:site1:v6-unavailable:client-v6-unavailable"
+        assert v6_body["event"] == "BOT_MESSAGE"
+        assert v6_body["message"]["text"] == OPERATOR_UNAVAILABLE_CALLBACK
+        assert v6_app["state_store"].states[v6_key]["nmbot_v6"]["awaiting_phone"] is True
+
+        legacy_app = make_app()
+        legacy_response = await mod.handle_jivo(Request(legacy_app, "legacy-unavailable"))
+        legacy_body = json.loads(legacy_response.body)
+        legacy_key = "jivo:site1:legacy-unavailable:client-legacy-unavailable"
+        assert legacy_body["event"] == "BOT_MESSAGE"
+        assert legacy_body["message"]["text"] != OPERATOR_UNAVAILABLE_CALLBACK
+        assert "nmbot_v6" not in legacy_app["state_store"].states[legacy_key]
+
+    asyncio.run(scenario())
+
+
 def test_jivo_trace_header_is_hashed_and_invalid_header_ignored(monkeypatch):
     raw_uuid = "123e4567-e89b-12d3-a456-426614174000"
     safe_ref = "trace_" + hashlib.sha256(raw_uuid.encode("utf-8")).hexdigest()[:12]

@@ -386,6 +386,45 @@ its former root is not the active API contour.
 
 ### Unified TEST dialogue runner
 
+#### Mandatory target identity preflight
+
+No dialogue, provider, MCP or Jivo request may start until the test target is
+bound to a fresh identity receipt. This applies to the documented runner and to
+isolated candidate probes.
+
+For an unnamed target such as “new version”, “current version” or “TEST”, first
+run the read-only command below. The returned `current.target_name` is the only
+allowed target; a local worktree remembered from earlier work is not “new”.
+
+```bash
+python3 scripts/nmbot_atomic_release.py recon \
+  --host neiro@193.107.155.236 --port 1905
+```
+
+Before the first external/model call, record:
+
+```text
+requested_target: <exact user wording>
+target_kind: deployed_test | local_candidate
+active_test_release: <fresh recon current.target_name>
+expected_release: <release id or n/a>
+candidate_root: <absolute path or n/a>
+candidate_commit: <full git SHA or n/a>
+candidate_status: clean | dirty | n/a
+decision: proceed | stop_mismatch
+```
+
+For `local_candidate`, obtain `candidate_commit` and `candidate_status` from
+that exact root. Proceed only if the user named the commit/artifact or explicitly
+confirmed the candidate after seeing this receipt. A different active release,
+dirty candidate, missing identity or ambiguous request is `stop_mismatch`.
+This stop happens before file transfer and before provider/MCP/Jivo calls.
+
+Use the documented runner below for an already deployed release. Do not assemble
+temporary remote `dialogue.py` wrappers. An exceptional ad-hoc runner is allowed
+only when the documented runner cannot exercise the explicitly confirmed local
+candidate; its manifest must contain the same target receipt before execution.
+
 For an already deployed TEST runtime, use the local helper instead of assembling
 temporary Jivo wrappers. It creates a synthetic TEST session, stops on the first
 failed stage, and prints only opaque event references, event kinds and boolean

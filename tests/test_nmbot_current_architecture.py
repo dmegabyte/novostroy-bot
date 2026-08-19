@@ -208,3 +208,19 @@ def test_agents_routes_include_current_architecture_and_archive_index() -> None:
 
     assert "Current high-level system map | `docs/CURRENT_ARCHITECTURE.md`" in text
     assert "Historical planning records and old evidence | `docs/ARCHIVE_INDEX.md`" in text
+
+
+def test_external_test_target_identity_gate_is_fail_closed() -> None:
+    agents = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    runbook = (ROOT / "docs" / "NMBOT_RUNBOOK.md").read_text(encoding="utf-8")
+
+    assert "### Test target identity gate" in agents
+    assert "before the first paid or external call" in agents
+    assert "active TEST release returned by" in agents
+    assert "An ad-hoc VPS `/tmp` runner is forbidden" in agents
+
+    assert "#### Mandatory target identity preflight" in runbook
+    assert "active_test_release:" in runbook
+    assert "candidate_commit:" in runbook
+    assert "decision: proceed | stop_mismatch" in runbook
+    assert "This stop happens before file transfer and before provider/MCP/Jivo calls." in runbook

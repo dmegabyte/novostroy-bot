@@ -65,6 +65,29 @@ scenario impact are known.
 
 ## Mandatory safeguards
 
+### Test target identity gate
+
+Before any model/provider/MCP/Jivo test, including an isolated temporary probe,
+identify the target **before the first paid or external call**:
+
+1. For “current”, “new”, “TEST” or otherwise unnamed versions, first run fresh
+   read-only TEST `recon`; these words mean the active TEST release returned by
+   recon, never a remembered worktree, old commit, notebook note or local path.
+2. Record a compact target receipt: user-request wording, target kind
+   (`deployed_test` or `local_candidate`), active TEST release ID, and either the
+   expected release ID or the candidate root plus exact Git commit and clean
+   status.
+3. A local candidate may be tested only when the user named its commit/artifact
+   or confirmed it after seeing both the active TEST release and candidate
+   identity. If identities differ or intent is ambiguous, stop before copying
+   files or calling a model/MCP/Jivo route.
+4. Use the documented TEST runner. An ad-hoc VPS `/tmp` runner is forbidden
+   unless the documented runner cannot exercise the required candidate and the
+   user explicitly approves the shown candidate identity and exceptional route.
+
+Do not spend model tokens to discover that the wrong version was selected. The
+full receipt and command order live in `docs/NMBOT_RUNBOOK.md`.
+
 ### Production-affecting work
 
 Before any NMBot production code change, first run a fresh read-only VPS source

@@ -1,6 +1,20 @@
 # Client Production Jivo contour
 
-Статус на 2026-07-24: **серверная часть и отдельный n8n route развёрнуты; Jivo Bot API operator ещё не подключён**.
+## Current status — 2026-08-20
+
+The public Jivo entry is https://jivo.chat/Q5FRTBLR32. The real public
+`client-production` contour has been migrated to immutable V6 release
+`v6-client-production-20260820t1515z`.
+
+Fresh VPS post-check proved that both client-production services are active,
+their systemd units run from `current`, `current` points to that release, API
+`:8188` and bridge `:8193` health checks pass, release identity matches, and
+the actual runtime selector is `V6`.
+
+No new end-user Jivo/model smoke was sent after migration because the account
+balance was unavailable. Therefore deployment and service health are proven;
+a fresh customer-answer check remains pending. The earlier 2026-07-24 setup
+notes below are historical context, not current status.
 
 Этот документ — точка продолжения работ по отдельному клиентскому production-контуру. Действующий Jivo-контур `/home/neiro/novostroy-bot` и его systemd units менять нельзя.
 
@@ -11,8 +25,7 @@
 - отдельный Jivo bot/webhook;
 - отдельные API и bridge processes;
 - отдельные env, state, runtime selector, outbox, logs и release identity;
-- административный выбор V0, V2 или V3;
-- V3 при первом запуске;
+- административный выбор runtime version, currently V6;
 - отсутствие версий и технических маркеров в клиентских сообщениях;
 - сбой нового контура не должен затронуть действующий тестовый контур.
 
@@ -46,7 +59,7 @@ Jivo bot #2
   -> отдельный HTTPS/webhook
   -> novostroy-bot-client-production-n8n-bridge.service :8193
   -> novostroy-bot-client-production-api.service 127.0.0.1:8188
-  -> runtime V0/V2/V3
+  -> runtime V6
   -> BOT_MESSAGE через общий egress guard
 ```
 
@@ -60,7 +73,7 @@ Jivo bot #2
 | Bridge | `0.0.0.0:8193` |
 | API unit | `novostroy-bot-client-production-api.service` |
 | Bridge unit | `novostroy-bot-client-production-n8n-bridge.service` |
-| Initial runtime | `V3` |
+| Active runtime | `V6` |
 
 Фактический live status на 2026-07-24 09:28 UTC: оба новых units `active`,
 `NRestarts=0`, API health и bridge health зелёные. Тестовый API/bridge также
@@ -78,7 +91,7 @@ Jivo bot #2
 
 Файл `.env.client-production` должен иметь права `0600`. Значения секретов нельзя добавлять в git, README, task output или логи.
 
-## Что требовалось со стороны Jivo/инфраструктуры
+## Historical initial Jivo/infrastructure setup
 
 1. Подтвердить `JIVO_PROVIDER_ID` нового бота. Если используется тот же provider account, проверить возможность безопасно использовать существующий Provider ID; не угадывать значение.
 2. Создать/подключить новый Bot API operator в Jivo.
@@ -96,21 +109,22 @@ https://n8n.it-system.io/webhook/msknmbot-prod/jivo_prod_9jr6O6BreVALjGKnX9Xagl
 
 Workflow ID: `jJVAxNz4MQefwADR`.
 Он направляет события только на bridge `193.107.155.236:8193`.
-Jivo Bot API operator и назначение канала пока остаются внешним блокером.
+This was the initial setup state on 2026-07-24. It is superseded by the live
+public delivery evidence and V6 migration status above.
 
-## Точка остановки и что осталось
+## Historical initial rollout checkpoint
 
-Работа остановлена на границе **Jivo UI → новый Bot API operator**. Всё, что находится
-до этой границы, уже собрано и проверено:
+This section records the 2026-07-24 checkpoint before public activation. It is
+not the current production status.
 
 - отдельный VPS-контур запущен: API `:8188`, bridge `:8193`;
-- selector нового контура установлен в `V3`;
+- selector was then configured for `V3`;
 - V2 manager rewriter выключен, V3 работает в `publish`/free mode;
 - отдельный n8n workflow активен и направляет события только в новый bridge;
 - безопасный `CHAT_CLOSED` probe прошёл: HTTP 200, execution `1353238` — `success`;
 - старый test-контур и route `msknmbot` не менялись.
 
-Осталось сделать вручную в Jivo:
+At that historical checkpoint, the planned manual Jivo steps were:
 
 1. Создать отдельного **Bot API operator** в том же аккаунте Jivo.
 2. Передать ему provider token нового контура по защищённому каналу. Значение берётся
@@ -120,8 +134,8 @@ Jivo Bot API operator и назначение канала пока остают
 5. Проверить correlated trace: один `CLIENT_MESSAGE`, один terminal `BOT_MESSAGE`,
    отсутствие технических маркеров и отсутствие новых записей в старом контуре.
 
-До выполнения этих шагов **реальный Jivo production smoke не подтверждён**. Поэтому
-контур технически развёрнут, но клиентский production запуск ещё не считается завершённым.
+The historical public smoke was not proof of the later V6 migration. The
+current post-migration limitation is stated at the beginning of this document.
 
 Отдельно: provider token и n8n API key, которые ранее были показаны в чате, считаются
 скомпрометированными. Перед полноценным запуском их нужно перевыпустить и обновить

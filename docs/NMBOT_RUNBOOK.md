@@ -15,6 +15,23 @@ Source: confirmed by the release owner on 2026-08-20. This link opens the
 client chat; it is not proof of API health, active runtime version or message
 delivery. Use the VPS read-only diagnostics below for those checks.
 
+### Current public V6 release
+
+On 2026-08-20 the actual `client-production` contour was migrated to immutable
+release `v6-client-production-20260820t1515z`. Fresh VPS post-check confirmed:
+
+- `current` points to `releases/v6-client-production-20260820t1515z`;
+- `novostroy-bot-client-production-api.service` and
+  `novostroy-bot-client-production-n8n-bridge.service` are active and run from
+  `current`;
+- API `:8188/health` and bridge `:8193/health` are healthy;
+- external release identity matches the release, and the actual selector is
+  `V6` at `data/runtime_selector.json`.
+
+This proves deployment and service health, not an end-user response. A new
+public Jivo/model smoke was intentionally not sent because the account balance
+was unavailable. Do not use the TEST-only smoke runner for this contour.
+
 ## Quick V2 contour comparison
 
 To check whether the test and client-production contours run the same V2

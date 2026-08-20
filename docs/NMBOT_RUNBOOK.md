@@ -7,6 +7,14 @@ Commands marked **VPS** use network/SSH and observe production. Commands marked 
 
 `bash scripts/nmbot_diag.sh --local` is local read-only and never invokes SSH or deploy smoke. `bash scripts/nmbot_diag.sh --local --json` emits the local runtime-version and configuration-shape report without secret values. `bash scripts/nmbot_diag.sh --vps --json` is VPS read-only; unavailable or malformed evidence is reported as `unverified`, never healthy.
 
+## Public Jivo PROD entry
+
+Public production Jivo chat: https://jivo.chat/Q5FRTBLR32
+
+Source: confirmed by the release owner on 2026-08-20. This link opens the
+client chat; it is not proof of API health, active runtime version or message
+delivery. Use the VPS read-only diagnostics below for those checks.
+
 ## Quick V2 contour comparison
 
 To check whether the test and client-production contours run the same V2

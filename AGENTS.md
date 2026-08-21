@@ -11,11 +11,15 @@ runbook commands here; open the linked owner document for details.
   - `client-production`: `/home/neiro/novostroy-bot-client-production`,
     `novostroy-bot-client-production-api.service` and
     `novostroy-bot-client-production-n8n-bridge.service`.
-- Both bridge logs contain accepted Jivo-shaped requests. This alone does **not**
-  prove which contour receives public client traffic. Keep both
-  `traffic_role: unverified` until one deliberately marked Jivo dialogue is
-  correlated with a contour trace; never infer the public target from a root
-  name, health check or remembered documentation.
+- A deliberately marked Jivo dialogue was correlated with `primary`: inbound
+  request, upstream `200`, egress guard and terminal Jivo send `200` occurred
+  in one trace; `client-production` had no matching new trace. Therefore the
+  tested Jivo route was `primary` on 2026-08-21. This is a dated live receipt,
+  not a permanent routing guarantee: verify again before a release.
+- `config/nmbot_deployment_contours.json` deliberately keeps both
+  `traffic_role: unverified`; it is a safe target registry, not a live routing
+  status store. Never infer the public target from a root name, health check or
+  remembered documentation.
 - Inbound: Jivo `CLIENT_MESSAGE` → bridge → private API. Outbound: terminal
   `BOT_MESSAGE`; `INVITE_AGENT` only for live operator handoff.
 - Runtime selector/version docs cover V0/V1/V2/V3/V4 as separate contracts:

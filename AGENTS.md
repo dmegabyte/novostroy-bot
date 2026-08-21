@@ -5,10 +5,17 @@ runbook commands here; open the linked owner document for details.
 
 ## Current source of truth
 
-- Current client-facing production contour is only Jivo on VPS
-  `/home/neiro/novostroy-bot`:
-  - `novostroy-bot-api.service` → `scripts/nmbot_api_server.py`;
-  - `novostroy-bot-n8n-bridge.service` → `scripts/nmbot_n8n_bridge_server.py`.
+- Fresh read-only evidence confirms two live VPS contours:
+  - `primary`: `/home/neiro/novostroy-bot`,
+    `novostroy-bot-api.service` and `novostroy-bot-n8n-bridge.service`;
+  - `client-production`: `/home/neiro/novostroy-bot-client-production`,
+    `novostroy-bot-client-production-api.service` and
+    `novostroy-bot-client-production-n8n-bridge.service`.
+- Both bridge logs contain accepted Jivo-shaped requests. This alone does **not**
+  prove which contour receives public client traffic. Keep both
+  `traffic_role: unverified` until one deliberately marked Jivo dialogue is
+  correlated with a contour trace; never infer the public target from a root
+  name, health check or remembered documentation.
 - Inbound: Jivo `CLIENT_MESSAGE` → bridge → private API. Outbound: terminal
   `BOT_MESSAGE`; `INVITE_AGENT` only for live operator handoff.
 - Runtime selector/version docs cover V0/V1/V2/V3/V4 as separate contracts:

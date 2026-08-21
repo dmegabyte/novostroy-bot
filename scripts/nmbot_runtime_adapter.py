@@ -54,9 +54,14 @@ from scripts.nmbot_prompt_ledger import append_attempt as append_prompt_ledger_a
 from scripts.nmbot_gateway_client import _log_error_event
 
 try:
-    from scripts.nmbot_crm_outbox import LocalCallbackOutbox, build_callback_lead_context
+    from scripts.nmbot_crm_outbox import LocalCallbackOutbox, build_callback_lead_context, build_callback_provenance
 except ImportError:  # pragma: no cover - direct scripts/ execution fallback
-    from nmbot_crm_outbox import LocalCallbackOutbox, build_callback_lead_context  # type: ignore
+    from nmbot_crm_outbox import LocalCallbackOutbox, build_callback_lead_context, build_callback_provenance  # type: ignore
+
+try:
+    from scripts.nmbot_release_identity import current_release_id
+except ImportError:  # pragma: no cover - direct scripts/ execution fallback
+    from nmbot_release_identity import current_release_id  # type: ignore
 
 try:
     from scripts import bluesminds_answer_interceptor
@@ -1109,6 +1114,7 @@ def _try_v1_pre_model_callback(
         normalized_phone=phone,
         context=lead_context,
         summary_input=lead_context,
+        provenance=build_callback_provenance(runtime_version="V1", release_id=current_release_id()),
     )
     if outbox_result.status not in {"queued", "duplicate"}:
         public = _v1_fail_closed_public(
@@ -3031,7 +3037,15 @@ def _enqueue_callback(app: Any, *, user_id: str, channel: str, meta: dict[str, A
     if outbox is None or not hasattr(outbox, "enqueue_callback"):
         return None
     context = _build_callback_summary_snapshot(state, runtime_version=runtime_version, channel=channel, meta=meta, engine_version=engine_version)
-    return outbox.enqueue_callback(session_key=user_id, event_id=str(meta.get("event_id") or ""), contact_name=name, normalized_phone=_normalize_phone_v2(phone), context=context, summary_input=context)
+    return outbox.enqueue_callback(
+        session_key=user_id,
+        event_id=str(meta.get("event_id") or ""),
+        contact_name=name,
+        normalized_phone=_normalize_phone_v2(phone),
+        context=context,
+        summary_input=context,
+        provenance=build_callback_provenance(runtime_version=runtime_version, release_id=current_release_id()),
+    )
 
 
 def _v2_public_callback_result(answer: str, intent: str, awaiting_phone: bool, state: ConversationState, *, callback_ref: str | None = None, outbox_result: Any | None = None) -> dict[str, Any]:

@@ -113,6 +113,30 @@ python scripts/nmbot_check.py docs --dry-run
 
 Then run the relevant local scope only: `docs`, `contracts`, `v0`, `v2`, `runtime` or `audit`. Expected evidence is printed as run/skipped/passed/failed. This does not prove production behavior.
 
+## Callback CRM delivery
+
+CRM callback delivery is **off by default**. A lead is durably recorded first;
+Google Sheets and CRM then have separate delivery branches, so one external
+failure never suppresses the other. The CRM worker sends only `phone`, `name`
+and `request` in the background. Endpoint credentials belong only in the
+protected environment and must never appear in commands, logs, Git or reports.
+
+Check or change one contour explicitly:
+
+```bash
+python3 scripts/nmbot_callback_crm_control.py --contour PROD status
+python3 scripts/nmbot_callback_crm_control.py --contour PROD set on --dry-run
+python3 scripts/nmbot_callback_crm_control.py --contour PROD set on --confirm
+python3 scripts/nmbot_callback_crm_control.py --contour PROD set off --confirm
+```
+
+The control-file location comes from `NMBOT_CALLBACK_CRM_CONTROL_FILE`. Missing,
+unreadable or malformed control means off. Enabling applies only to leads
+created afterwards; it does not backfill old records. A timeout after a CRM POST
+is marked `uncertain` and is not retried automatically, preventing duplicates.
+Before a real enablement, deploy the reviewed artifact through the normal release
+route and obtain separate approval for the external CRM call.
+
 ## Broad inventory gate
 
 Фильтр не показывает ЖК без подтверждённого продаваемого лота. Подтверждение

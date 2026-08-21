@@ -52,7 +52,7 @@ from nmbot_gateway_client import (
     CHAT_MODEL,
     _log_error_event,
 )
-from nmbot_crm_outbox import CallbackOutboxResult, LocalCallbackOutbox, build_callback_lead_context
+from nmbot_crm_outbox import CallbackOutboxResult, LocalCallbackOutbox, build_callback_lead_context, build_callback_provenance
 from dialogue_journal import append_event as append_journal_event
 from nmbot_v1.execution_path import append_jivo_api_prepare as append_v1_jivo_api_prepare, sanitize_execution_path as sanitize_v1_execution_path
 from nmbot_v1.provider_adapters import V1GatewayOneModelResponsePort, V1GatewayPlannerPort, V1GatewaySearchPort
@@ -2441,6 +2441,7 @@ async def _run_chat_v1(app: web.Application, *, user_id: str, message: str, chan
             normalized_phone=normalized_phone,
             context=lead_context,
             summary_input=_safe_summary_input_from_state(state, channel=channel, meta=meta),
+            provenance=build_callback_provenance(runtime_version="V1", release_id=current_release_id()),
         )
 
     if phone:

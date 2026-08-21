@@ -259,7 +259,7 @@ First command (**local read-only**):
 python scripts/nmbot_release_preflight.py
 ```
 
-Expected evidence: local file hashes, manifest scope plan for `docs/contracts`, local/fixture/VPS/direct-API/Jivo evidence buckets, and overall `incomplete`. This command is pre-release local evidence only, not post-deploy proof. It does not import or run `scripts/nmbot_release.py`; by default it does not run tests. Use `python scripts/nmbot_release_preflight.py --run-checks` only when you explicitly want the local `scripts/nmbot_check.py` scopes to run.
+Expected evidence: local file hashes, manifest scope plan for `docs/contracts`, local/fixture/VPS/direct-API/Jivo evidence buckets, and overall `incomplete`. This command is pre-release local evidence only, not post-deploy proof. By default it does not run tests. Use `python scripts/nmbot_release_preflight.py --run-checks` only when you explicitly want the local `scripts/nmbot_check.py` scopes to run.
 
 Before an approved deploy, assign an immutable release identifier and inspect its
 local manifest with `python3 scripts/nmbot_release_identity.py show`. The actual
@@ -307,9 +307,9 @@ user input → owner/prompt → provider/MCP → validator → state → publica
 
 Без положительного ответа на этот gate commit и release запрещены.
 
-Existing `scripts/nmbot_release.py status` uses SSH and `deploy` mutates remote state, so neither is part of local preflight. Post-deploy read-only verify needs separately authorized VPS/Jivo/direct-API route evidence. If Jivo smoke is missing, the release state is `incomplete`, never green. Backup, deploy, restart and live Jivo smoke require explicit release owner stop/go.
+`scripts/nmbot_contour_recon.py --contour <id>` is a separately authorized SSH read-only receipt, never part of local preflight. Post-deploy read-only verify needs separately authorized VPS/Jivo/direct-API route evidence. If Jivo smoke is missing, the release state is `incomplete`, never green. Backup, deploy, restart and live Jivo smoke require explicit release owner stop/go.
 
-Reference: `docs/NMBOT_OPERATIONS_MAP.md`; `scripts/nmbot_release.py`; `scripts/nmbot_release_preflight.py`; `scripts/nmbot.py preflight`.
+Reference: `docs/NMBOT_OPERATIONS_MAP.md`; `scripts/nmbot_atomic_release.py`; `scripts/nmbot_contour_recon.py`; `scripts/nmbot_release_preflight.py`; `scripts/nmbot.py preflight`.
 
 ## 5. Rollback
 
@@ -433,29 +433,31 @@ service, a selector or an environment file. The retired
 `client-production-helper-overlay` command is intentionally unavailable because
 its former root is not the active API contour.
 
-### Unified TEST dialogue runner
+### Explicit contour identity preflight
 
 #### Mandatory target identity preflight
 
-No dialogue, provider, MCP or Jivo request may start until the test target is
-bound to a fresh identity receipt. This applies to the documented runner and to
+No dialogue, provider, MCP or Jivo request may start until its target is bound
+to a fresh identity receipt. This applies to the documented runner and to
 isolated candidate probes.
 
-For an unnamed target such as “new version”, “current version” or “TEST”, first
-run the read-only command below. The returned `current.target_name` is the only
-allowed target; a local worktree remembered from earlier work is not “new”.
+For an unnamed target such as “new version”, “current version” or “TEST”, do
+not choose a VPS root from the label. First ask for an explicit contour ID. The
+registry currently records `primary` and `client-production`, but deliberately
+does not claim which one receives public Jivo traffic without a correlated Jivo
+trace. Then run the read-only command below.
 
 ```bash
-python3 scripts/nmbot_atomic_release.py recon \
-  --host neiro@193.107.155.236 --port 1905
+python3 scripts/nmbot_contour_recon.py --contour <primary|client-production>
 ```
 
 Before the first external/model call, record:
 
 ```text
 requested_target: <exact user wording>
-target_kind: deployed_test | local_candidate
-active_test_release: <fresh recon current.target_name>
+contour: <explicit registry ID>
+target_kind: deployed_contour | local_candidate
+active_release: <fresh recon release_id>
 expected_release: <release id or n/a>
 candidate_root: <absolute path or n/a>
 candidate_commit: <full git SHA or n/a>
@@ -466,8 +468,9 @@ decision: proceed | stop_mismatch
 For `local_candidate`, obtain `candidate_commit` and `candidate_status` from
 that exact root. Proceed only if the user named the commit/artifact or explicitly
 confirmed the candidate after seeing this receipt. A different active release,
-dirty candidate, missing identity or ambiguous request is `stop_mismatch`.
-This stop happens before file transfer and before provider/MCP/Jivo calls.
+dirty candidate, missing identity, unselected contour or ambiguous request is
+`stop_mismatch`. This stop happens before file transfer and before
+provider/MCP/Jivo calls.
 
 Use the documented runner below for an already deployed release. Do not assemble
 temporary remote `dialogue.py` wrappers. An exceptional ad-hoc runner is allowed
@@ -589,4 +592,4 @@ instructions describe the legacy Telegram contour. They may be used only for an
 explicitly requested rollback/debug task and never as proof that Jivo production
 works. Current Jivo work must not restart those services.
 
-Source references: `docs/NMBOT_PROJECT_SIMPLIFICATION_PLAN.md:165-188,478-509,529-543,558-571`; `docs/NMBOT_OPERATIONS_MAP.md:3,23-27`; `docs/NMBOT_RUNTIME_REGISTRY.md`; `docs/BOT_ARCHITECTURE.md`; `scripts/nmbot_diag.sh:88-118`; `scripts/nmbot_release.py:175-180`; `scripts/nmbot_release_preflight.py`; `scripts/nmbot_project_audit.py`; `scripts/nmbot.py`.
+Source references: `docs/NMBOT_PROJECT_SIMPLIFICATION_PLAN.md:165-188,478-509,529-543,558-571`; `docs/NMBOT_OPERATIONS_MAP.md:3,23-27`; `docs/NMBOT_RUNTIME_REGISTRY.md`; `docs/BOT_ARCHITECTURE.md`; `scripts/nmbot_diag.sh:88-118`; `scripts/nmbot_atomic_release.py`; `scripts/nmbot_contour_recon.py`; `scripts/nmbot_release_preflight.py`; `scripts/nmbot_project_audit.py`; `scripts/nmbot.py`.

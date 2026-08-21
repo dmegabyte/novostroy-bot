@@ -122,16 +122,16 @@
       "notes": "Direct tool has mutating create --write; wrapper alias is intentionally restricted to read/show and remains read-only. Not deploy."
     },
     {
-      "name": "nmbot_release.py status",
+      "name": "nmbot_contour_recon.py",
       "status": "specialized",
-      "path": "scripts/nmbot_release.py",
-      "purpose": "Explicit release status route.",
-      "canonical_wrapper": "python3 scripts/nmbot.py release status",
+      "path": "scripts/nmbot_contour_recon.py",
+      "purpose": "Read-only identity receipt for one explicitly selected deployment contour.",
+      "canonical_wrapper": "python3 scripts/nmbot.py contour recon --contour <id>",
       "evidence_scope": "live",
       "network": true,
       "side_effects": false,
       "replacement": null,
-      "notes": "Only status is aliased; deploy/atomic release routes are intentionally not aliased."
+      "notes": "Requires an explicit registry contour and reports traffic role as unverified without a correlated Jivo trace. Deploy routes are intentionally not aliased."
     },
     {
       "name": "nmbot_architecture_preflight.py",

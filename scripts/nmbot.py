@@ -40,7 +40,7 @@ NAMESPACE_ALIASES = {
     ("planner", "find"): [sys.executable, "scripts/find_planner_trace.py"],
     ("runtime", "compare"): [sys.executable, "scripts/nmbot_v2_version_compare.py"],
     ("release", "identity"): [sys.executable, "scripts/nmbot_release_identity.py"],
-    ("release", "status"): [sys.executable, "scripts/nmbot_release.py", "status"],
+    ("contour", "recon"): [sys.executable, "scripts/nmbot_contour_recon.py"],
     ("architecture", None): [sys.executable, "scripts/nmbot_architecture_preflight.py"],
 }
 
@@ -1321,7 +1321,7 @@ def _run_tools(args: list[str]) -> int:
 def _run_namespace(command: str, rest: list[str]) -> int | None:
     if command == "architecture":
         return _run([*NAMESPACE_ALIASES[("architecture", None)], *rest])
-    if command not in {"trace", "dialogue", "planner", "runtime", "release"}:
+    if command not in {"trace", "dialogue", "planner", "runtime", "release", "contour"}:
         return None
     if not rest:
         print(f"ERROR: missing {command} subcommand", file=sys.stderr)
@@ -1348,7 +1348,7 @@ def _run_namespace(command: str, rest: list[str]) -> int | None:
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] in {"-h", "--help"}:
-        print("usage: nmbot.py {check|audit|preflight|diag|diagnose|tools|trace|dialogue|planner|runtime|release|architecture|context|retrieve|navigate|context-gate|docs-gate|memory-registry|memory-outcomes|experiment|recipes|explain} [args...]\n")
+        print("usage: nmbot.py {check|audit|preflight|diag|diagnose|tools|trace|dialogue|planner|runtime|release|contour|architecture|context|retrieve|navigate|context-gate|docs-gate|memory-registry|memory-outcomes|experiment|recipes|explain} [args...]\n")
         print("Thin wrapper: delegates by direct argv and preserves exit codes.")
         print("context prints local-only documentation context packs and never runs checks.")
         print("retrieve delegates to scripts/nmbot_retrieval.py for local SQLite FTS candidate cards; optional --source-cards adds navigation context only, for example: retrieve \"finance disclaimer first list\" --term runtime --json.")
@@ -1365,7 +1365,7 @@ def main(argv: list[str] | None = None) -> int:
         print("diag delegates to bash scripts/nmbot_diag.sh only when explicitly invoked; user args may select VPS/network mode.")
         print("diagnose [--trace TRACE_ID|--task TASK_ID|--latest|--recent N|--summary 1h] [--timeline] [--plan] [--json|--human] runs safe diagnostics; --recent/--summary are local JSONL aggregation, and omitted selector means --latest.")
         print("tools [--json|--human] reads local config/nmbot_diagnostic_tools.json and marks legacy diagnostic tools without executing them.")
-        print("trace/dialogue/planner/runtime/release/architecture expose allowlisted direct-argv diagnostic aliases only; release identity is restricted to read/show.")
+        print("trace/dialogue/planner/runtime/release/contour/architecture expose allowlisted direct-argv diagnostic aliases only; release identity is restricted to read/show and contour recon requires --contour.")
         return 0 if args and args[0] in {"-h", "--help"} else 2
 
     command, rest = args[0], args[1:]

@@ -1445,7 +1445,7 @@ def test_namespace_aliases_delegate_direct_argv_and_reject_unknown(monkeypatch) 
     assert mod.main(["planner", "find", "--q", "abc"]) == 23
     assert mod.main(["runtime", "compare", "--json"]) == 23
     assert mod.main(["release", "identity", "read"]) == 23
-    assert mod.main(["release", "status", "--json"]) == 23
+    assert mod.main(["contour", "recon", "--contour", "primary"]) == 23
     assert mod.main(["architecture", "--strict"]) == 23
     assert calls == [
         {"argv": [sys.executable, "scripts/nmbot_jivo_trace_analyze.py", "log.jsonl", "--strict"], "cwd": mod.ROOT, "check": False},
@@ -1454,11 +1454,12 @@ def test_namespace_aliases_delegate_direct_argv_and_reject_unknown(monkeypatch) 
         {"argv": [sys.executable, "scripts/find_planner_trace.py", "--q", "abc"], "cwd": mod.ROOT, "check": False},
         {"argv": [sys.executable, "scripts/nmbot_v2_version_compare.py", "--json"], "cwd": mod.ROOT, "check": False},
         {"argv": [sys.executable, "scripts/nmbot_release_identity.py", "read"], "cwd": mod.ROOT, "check": False},
-        {"argv": [sys.executable, "scripts/nmbot_release.py", "status", "--json"], "cwd": mod.ROOT, "check": False},
+        {"argv": [sys.executable, "scripts/nmbot_contour_recon.py", "--contour", "primary"], "cwd": mod.ROOT, "check": False},
         {"argv": [sys.executable, "scripts/nmbot_architecture_preflight.py", "--strict"], "cwd": mod.ROOT, "check": False},
     ]
     calls.clear()
-    assert mod.main(["release", "deploy"]) == 2
+    assert mod.main(["release", "status"]) == 2
+    assert mod.main(["contour", "status"]) == 2
     assert mod.main(["release", "identity"]) == 2
     assert mod.main(["release", "identity", "create", "--release-id", "x", "--write"]) == 2
     assert mod.main(["release", "identity", "read", "--json"]) == 2

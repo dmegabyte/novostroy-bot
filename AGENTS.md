@@ -70,13 +70,16 @@ scenario impact are known.
 Before any model/provider/MCP/Jivo test, including an isolated temporary probe,
 identify the target **before the first paid or external call**:
 
-1. For “current”, “new”, “TEST” or otherwise unnamed versions, first run fresh
-   read-only TEST `recon`; these words mean the active TEST release returned by
-   recon, never a remembered worktree, old commit, notebook note or local path.
-2. Record a compact target receipt: user-request wording, target kind
-   (`deployed_test` or `local_candidate`), active TEST release ID, and either the
-   expected release ID or the candidate root plus exact Git commit and clean
-   status.
+1. For “current”, “new”, “TEST” or otherwise unnamed versions, do not infer a
+   VPS root from the label. First name an explicit contour from
+   `config/nmbot_deployment_contours.json`, then run its fresh read-only receipt:
+   `python3 scripts/nmbot_contour_recon.py --contour <id>`. If the user did not
+   name the contour, stop before any external call. `TEST` is not an alias for a
+   remembered root, old commit, notebook note or local path.
+2. Record a compact target receipt: user-request wording, explicit contour ID,
+   target kind (`deployed_contour` or `local_candidate`), active release ID, and
+   either the expected release ID or the candidate root plus exact Git commit
+   and clean status.
 3. A local candidate may be tested only when the user named its commit/artifact
    or confirmed it after seeing both the active TEST release and candidate
    identity. If identities differ or intent is ambiguous, stop before copying

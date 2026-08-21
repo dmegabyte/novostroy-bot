@@ -40,16 +40,19 @@ changed hashes.
 
 ## Deploy and rollback boundary
 
-The mutating deploy route now requires an identifier:
+An approved immutable release must carry an identifier. The release helper is
+invoked only after a source snapshot, comparison, isolated worktree and local
+artifact preflight:
 
 ```bash
-python3 scripts/nmbot_release.py deploy \
-  --release-id 2026-07-22.v2-financing-copy.1
+python3 scripts/nmbot_atomic_release.py deploy \
+  --release-id 2026-07-22.v2-financing-copy.1 \
+  --archive <artifact.tar.gz> --manifest <artifact.manifest.json> \
+  --host neiro@193.107.155.236 --source-snapshot-manifest-sha256 <sha256> --confirm
 ```
 
-It writes the manifest before copying files and includes it in the remote backup
-and deploy set. This command uses SSH, SCP and service restart; it requires an
-explicit release stop/go and is not run by local checks.
+This command uses SSH, SCP and service restart; it requires an explicit release
+stop/go and is not run by local checks.
 
 Before a rollback, collect fresh read-only VPS/Jivo evidence, locate the affected
 `release_id` in `nmbot_dialogue_report.py`, compare the manifest hashes with the
@@ -58,5 +61,5 @@ the source bundle traceable; it does not prove a healthy deploy, Jivo delivery,
 or response quality.
 
 Sources: `scripts/nmbot_release_identity.py`; `scripts/dialogue_journal.py`;
-`scripts/nmbot_dialogue_report.py`; `scripts/nmbot_release.py`;
+`scripts/nmbot_dialogue_report.py`; `scripts/nmbot_atomic_release.py`;
 `nmbot_v2/prompt_provenance.py`.

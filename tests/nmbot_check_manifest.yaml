@@ -21,7 +21,7 @@
       "description": "External contract fixtures: Jivo API, callback outbox/worker and manifest/release static checks.",
       "commands": [
         {"name": "compile_contract_modules", "argv": ["{python}", "-m", "py_compile", "scripts/nmbot_api_server.py", "scripts/nmbot_crm_outbox.py", "scripts/nmbot_callback_sheet_worker.py"], "evidence": ["contract modules compile"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
-        {"name": "contract_targeted_pytest", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_callback_flow.py", "tests/test_nmbot_callback_worker.py", "tests/test_nmbot_api_jivo_p1.py", "tests/test_nmbot_release_manifest.py", "tests/test_nmbot_ci_workflow.py", "tests/test_nmbot_test_release_workflow.py", "-q"], "evidence": ["targeted contract tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"}
+        {"name": "contract_targeted_pytest", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_callback_flow.py", "tests/test_nmbot_callback_worker.py", "tests/test_nmbot_api_jivo_p1.py", "tests/test_nmbot_ci_workflow.py", "tests/test_nmbot_test_release_workflow.py", "-q"], "evidence": ["targeted contract tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"}
       ]
     },
     "v0": {
@@ -50,7 +50,7 @@
       "description": "Local static runtime selector/API/bridge checks; production selection requires live evidence outside this command.",
       "commands": [
         {"name": "compile_runtime_entrypoints", "argv": ["{python}", "-m", "py_compile", "scripts/nmbot_api_server.py", "scripts/nmbot_n8n_bridge_server.py", "scripts/nmbot_runtime_adapter.py"], "evidence": ["runtime entrypoints compile"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"},
-        {"name": "runtime_static_tests", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_runtime_adapter.py", "tests/test_nmbot_diag_script_static.py", "tests/test_nmbot_release_manifest.py", "-q"], "evidence": ["selector, diagnostic and release manifest static tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"},
+        {"name": "runtime_static_tests", "argv": ["{python}", "-m", "pytest", "tests/test_nmbot_runtime_adapter.py", "tests/test_nmbot_diag_script_static.py", "-q"], "evidence": ["selector and diagnostic static tests pass"], "time": "targeted", "cost": "none", "network": "none", "side_effects": "local pytest temp files only"},
         {"name": "architecture_preflight", "argv": ["{python}", "scripts/nmbot_architecture_preflight.py", "--repo", ".", "--json"], "evidence": ["static architecture preflight runs locally"], "time": "fast", "cost": "none", "network": "none", "side_effects": "none"}
       ]
     },

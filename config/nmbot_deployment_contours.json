@@ -1,0 +1,35 @@
+{
+  "schema_version": "nmbot.deployment_contours.v1",
+  "contours": {
+    "primary": {
+      "host": "neiro@193.107.155.236",
+      "port": "1905",
+      "remote_root": "/home/neiro/novostroy-bot",
+      "environment_file": "/home/neiro/novostroy-bot/.env",
+      "services": {
+        "api": "novostroy-bot-api.service",
+        "bridge": "novostroy-bot-n8n-bridge.service"
+      },
+      "health_urls": {
+        "api": "http://127.0.0.1:8088/health",
+        "bridge": "http://127.0.0.1:8093/health"
+      },
+      "traffic_role": "unverified"
+    },
+    "client-production": {
+      "host": "neiro@193.107.155.236",
+      "port": "1905",
+      "remote_root": "/home/neiro/novostroy-bot-client-production",
+      "environment_file": "/home/neiro/novostroy-bot-client-production/.env.client-production",
+      "services": {
+        "api": "novostroy-bot-client-production-api.service",
+        "bridge": "novostroy-bot-client-production-n8n-bridge.service"
+      },
+      "health_urls": {
+        "api": "http://127.0.0.1:8188/health",
+        "bridge": "http://127.0.0.1:8193/health"
+      },
+      "traffic_role": "unverified"
+    }
+  }
+}

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Local-only release evidence preflight for nmbot.
 
-This script intentionally does not import or execute scripts/nmbot_release.py.
+This script intentionally does not import or execute release tooling.
 It collects static local evidence and can optionally invoke only the local
 scripts/nmbot_check.py dispatcher with direct argv and cwd.
 """

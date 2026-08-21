@@ -64,6 +64,12 @@ Prompt-уровни тратят токены и требуют одноврем
 | 2026-08-17 10:34 | integrated candidate v2 на Gemini 3.6 Flash | `eval-obo-2026-08-17T10:34:08` | **0/5** | тот же Prompt2-набор; OpenRouter принял `google/gemini-3.6-flash` | **Не принимать**: модель вернула рассуждения и текст вне требуемого JSON |
 | 2026-08-17 10:35 | integrated candidate v2 на Gemini 2.5 Flash | `eval-m45-2026-08-17T10:35:36` | **3/5** | тот же Prompt2-набор; OpenRouter принял `google/gemini-2.5-flash` | **Не принимать**: multi-missing и ambiguity-кейсы не прошли |
 | 2026-08-17 10:43 | integrated candidate v2 на GPT-5.6 Luna | `eval-tqL-2026-08-17T10:43:19` | **3/5** | тот же Prompt2-набор; OpenRouter ID `openai/gpt-5.6-luna` | **Не принимать**: standalone price и specialist CTA вернули рассуждения вместо чистого JSON |
+| 2026-08-17 11:00 | Luna + усиленный prompt-only запрет видимого reasoning, прогон 1 | `eval-XXW-2026-08-17T11:00:24` | **3/5** | требование первого символа `{`, последнего `}`, запрет `Thinking:`/`Analysis:`/Markdown | **Не принимать**: unique-area снова вернул `Thinking:`; ещё один JSON-кейс не прошёл строгую проверку grounded-значения из-за другого форматирования числа |
+| 2026-08-17 11:01 | Luna + тот же запрет, независимый прогон 2 | `eval-enB-2026-08-17T11:01:43` | **3/5** | неизменные model, temperature, пять кейсов и assertions | **Не принимать**: `Thinking:` появился уже в standalone-price и unique-area; prompt-only запрет не обеспечивает JSON-only output |
+| 2026-08-17 11:05 | Luna + JSON-only wording, `temperature=0`, прогон 1 | `eval-4SI-2026-08-17T11:05:19` | **4/5** | тот же набор; изменена только температура с `0.2` на `0` | **Не принимать**: multi-missing вернул `Thinking:`; JSON-only гарантия не достигнута |
+| 2026-08-17 11:05 | Luna + JSON-only wording, `temperature=0`, прогон 2 | `eval-2SX-2026-08-17T11:05:45` | **3/5** | независимый no-cache повтор при неизменном конфиге | **Не принимать**: `Thinking:` появился в standalone-price и multi-missing; результат нестабилен |
+| 2026-08-17 11:24 | Gemini 2.5 Flash, `temperature=0`, прогон 1 | `eval-8rC-2026-08-17T11:24:02` | **3/5** | тот же набор; OpenRouter ID `google/gemini-2.5-flash` | **Не принимать**: JSON чистый, но multi-missing и ambiguity не прошли |
+| 2026-08-17 11:24 | Gemini 2.5 Flash, `temperature=0`, прогон 2 | `eval-GLc-2026-08-17T11:24:21` | **4/5** | независимый no-cache повтор при неизменном конфиге | **Не принимать**: JSON чистый; multi-missing снова выбрал бюджет вместо `ANSWER_ONLY` |
 
 ### Сводка по моделям и стоимости
 
@@ -72,7 +78,8 @@ Prompt-уровни тратят токены и требуют одноврем
 | `google/gemini-3.1-flash-lite-preview` | **5/5**, затем повтор **3/5** | `$0.25 / $1.50` | Нестабильный результат; в production не переносить новый candidate |
 | `google/gemini-2.5-flash` | **3/5** | `$0.30 / $2.50` | Не прошли multi-missing и ambiguity |
 | `google/gemini-3.6-flash` | **0/5** | `$0.75 / $3.75` | Рассуждения и текст вне JSON |
-| `openai/gpt-5.6-luna` | **3/5** | `$0.10 / $0.60` | Дешевле Gemini 3.6; два кейса нарушили JSON/output-контракт |
+| `openai/gpt-5.6-luna` | **3/5** в трёх зафиксированных вариантах/повторах | `$0.10 / $0.60` | Дешевле Gemini 3.6; усиленный prompt-only запрет не устранил видимый reasoning |
+| `google/gemini-2.5-flash` | **3/5**, затем **4/5** при `temperature=0` | `$0.30 / $2.50` | JSON стабильно чистый; multi-missing стабильно нарушает правило abstention |
 
 По опубликованным карточкам OpenRouter GPT-5.6 Luna примерно в 6–7,5 раза
 дешевле Gemini 3.6 Flash. Однако по этому малому набору нельзя объявлять Luna
@@ -88,6 +95,9 @@ Prompt-уровни тратят токены и требуют одноврем
 - Gemini 3.6 Flash: **0/5**, eval `eval-obo-2026-08-17T10:34:08`; дополнительно зафиксировано нарушение JSON/output-контракта.
 - Gemini 2.5 Flash: **3/5**, eval `eval-m45-2026-08-17T10:35:36`; прошли price, unique-area и specialist CTA.
 - GPT-5.6 Luna: **3/5**, eval `eval-tqL-2026-08-17T10:43:19`; OpenRouter-маршрут работает, но output-контракт нарушен в двух кейсах.
+- GPT-5.6 Luna с усиленным JSON-only wording: два независимых прогона по **3/5**, eval `eval-XXW-2026-08-17T11:00:24` и `eval-enB-2026-08-17T11:01:43`; `Thinking:` сохранился.
+- GPT-5.6 Luna с тем же wording и `temperature=0`: **4/5**, затем **3/5**, eval `eval-4SI-2026-08-17T11:05:19` и `eval-2SX-2026-08-17T11:05:45`; нулевая температура снизила вариативность только в одном прогоне, но не устранила `Thinking:`.
+- Gemini 2.5 Flash при `temperature=0`: **3/5**, затем **4/5**, eval `eval-8rC-2026-08-17T11:24:02` и `eval-GLc-2026-08-17T11:24:21`; оба раза без `Thinking:`, но multi-missing не выдержан.
 - Следствие: contextual follow-up правило пока не переносится в production Prompt2.
 
 ### Зафиксированные дефекты кандидатов

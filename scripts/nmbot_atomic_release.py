@@ -51,6 +51,8 @@ AUTHORIZED_DEPLOY_PORT = "1905"
 API_SERVICE = "novostroy-bot-api.service"
 BRIDGE_SERVICE = "novostroy-bot-n8n-bridge.service"
 WORKER_SERVICE = "novostroy-bot-worker.service"
+CALLBACK_WORKER_SERVICE = "nmbot-callback-sheet-worker.service"
+CALLBACK_WORKER_UNIT = "/home/neiro/.config/systemd/user/nmbot-callback-sheet-worker.service"
 API_HEALTH_URL = "http://127.0.0.1:8088/health"
 BRIDGE_HEALTH_URL = "http://127.0.0.1:8093/health"
 BRIDGE_SCHEMA_VERSION = "nmbot.bridge_release.v1"
@@ -98,8 +100,11 @@ IMPORT_MODULES = (
     "nmbot_v2.manager_rewriter",
 )
 V6_ONLY_PROFILE = "v6-only"
+V6_CALLBACK_WORKER_PROFILE = "v6-callback-worker"
 V6_ONLY_IMPORT_MODULES = ("scripts.nmbot_api_server",)
 V6_ONLY_REQUIRED_DEPENDENCIES = ("aiohttp", "phonenumbers")
+V6_CALLBACK_WORKER_IMPORT_MODULES = ("scripts.nmbot_api_server", "nmbot_callback_sheet_worker")
+V6_CALLBACK_WORKER_REQUIRED_DEPENDENCIES = ("aiohttp", "phonenumbers", "google.oauth2", "googleapiclient.discovery")
 CONFIG_REQUIREMENTS = {
     "required_secret_names": sorted(("JIVO_PROVIDER_ID", "JIVO_PROVIDER_TOKEN", "NMBOT_API_TOKEN")),
     "required_setting_names": sorted((
@@ -117,6 +122,12 @@ CONFIG_REQUIREMENTS = {
 V6_ONLY_CONFIG_REQUIREMENTS = {
     **CONFIG_REQUIREMENTS,
     "required_mode_names": [],
+}
+V6_CALLBACK_WORKER_CONFIG_REQUIREMENTS = {
+    **V6_ONLY_CONFIG_REQUIREMENTS,
+    "required_setting_names": sorted(set(V6_ONLY_CONFIG_REQUIREMENTS["required_setting_names"]) | {
+        "NMBOT_CALLBACK_SHEET_ID", "NMBOT_CALLBACK_SHEET_TAB", "NMBOT_CALLBACK_LEDGER_DIR"
+    }),
 }
 CANONICAL_API_ENV_VALUES = {
     "NMBOT_API_HOST": "127.0.0.1",
@@ -240,10 +251,17 @@ V6_ONLY_RUNTIME_FILES = frozenset({
     "scripts/nmbot_release_identity.py",
     "scripts/nmbot_diag.sh",
     "scripts/nmbot_v6_jivo_smoke.py",
-    "scripts/nmbot_v6_journal.py",
     "scripts/nmbot_v6_simple_adapter.py",
 })
+V6_CALLBACK_WORKER_RUNTIME_FILES = frozenset((set(V6_ONLY_RUNTIME_FILES) - {"scripts/nmbot_diag.sh"}) | {
+    "scripts/nmbot_callback_sheet_worker.py",
+    "scripts/nmbot_callback_summary.py",
+    "scripts/nmbot_google_sheets.py",
+    "scripts/nmbot_callback_crm.py",
+    "scripts/nmbot_callback_crm_control.py",
+})
 V6_ONLY_PREFLIGHT_PY_FILES = tuple(sorted(path for path in V6_ONLY_RUNTIME_FILES if path.endswith(".py")))
+V6_CALLBACK_WORKER_PREFLIGHT_PY_FILES = tuple(sorted(path for path in V6_CALLBACK_WORKER_RUNTIME_FILES if path.endswith(".py")))
 NMBOT_DIALOGUE_EXPORTER_SCRIPT = "scripts/nmbot_dialogue_sheet_exporter.py"
 NMBOT_DIALOGUE_EXPORTER_SERVICE_TEMPLATE = "deploy/systemd/nmbot-dialogue-sheet-export.service"
 NMBOT_DIALOGUE_EXPORTER_TIMER_TEMPLATE = "deploy/systemd/nmbot-dialogue-sheet-export.timer"
@@ -466,8 +484,10 @@ def _validate_live_api_helper_overlay_paths(paths: list[str]) -> list[str]:
     return paths
 
 
-def _is_allowed_runtime_file_for_policy(rel: str, *, include_dialogue_exporter: bool = False, test_api_overlay_paths: set[str] | frozenset[str] = frozenset()) -> bool:
+def _is_allowed_runtime_file_for_policy(rel: str, *, include_dialogue_exporter: bool = False, test_api_overlay_paths: set[str] | frozenset[str] = frozenset(), profile: str | None = None) -> bool:
     if rel in test_api_overlay_paths and _is_allowed_test_api_overlay_file(rel):
+        return True
+    if profile == V6_CALLBACK_WORKER_PROFILE and rel in V6_CALLBACK_WORKER_RUNTIME_FILES:
         return True
     return _is_allowed_runtime_file(rel, include_dialogue_exporter=include_dialogue_exporter)
 
@@ -586,6 +606,21 @@ def _v6_only_runtime_files(root: Path) -> list[Path]:
     return files
 
 
+def _profile_runtime_files(root: Path, allowlist: frozenset[str], label: str) -> list[Path]:
+    files: list[Path] = []
+    missing: list[str] = []
+    for rel in sorted(allowlist):
+        path = root / rel
+        if not path.is_file() or path.is_symlink():
+            missing.append(rel)
+            continue
+        _reject_secret_like(path, rel)
+        files.append(path)
+    if missing:
+        raise ReleaseError(f"{label} runtime file missing: " + ",".join(missing))
+    return files
+
+
 def _runtime_files_for_profile(
     root: Path,
     *,
@@ -597,6 +632,10 @@ def _runtime_files_for_profile(
         if include_dialogue_exporter or test_api_overlay_paths:
             raise ReleaseError("V6-only profile does not permit release overlays")
         return _v6_only_runtime_files(root)
+    if profile == V6_CALLBACK_WORKER_PROFILE:
+        if include_dialogue_exporter or test_api_overlay_paths:
+            raise ReleaseError("V6 callback-worker profile does not permit release overlays")
+        return _profile_runtime_files(root, V6_CALLBACK_WORKER_RUNTIME_FILES, "V6 callback-worker")
     if profile is not None:
         raise ReleaseError(f"unknown release profile: {profile}")
     return iter_snapshot_files(root, include_dialogue_exporter=include_dialogue_exporter, test_api_overlay_paths=test_api_overlay_paths)
@@ -664,14 +703,14 @@ def build(*, release_id: str | None = None, out_dir: Path = DEFAULT_OUT_DIR, roo
     out_dir.mkdir(parents=True, exist_ok=True)
     files = _runtime_files_for_profile(root, profile=profile, include_dialogue_exporter=include_dialogue_exporter, test_api_overlay_paths=test_api_overlay_paths)
     selected_paths = {p.relative_to(root).as_posix() for p in files}
-    if profile != V6_ONLY_PROFILE:
+    if profile not in {V6_ONLY_PROFILE, V6_CALLBACK_WORKER_PROFILE}:
         _assert_required_runtime_resources_present(selected_paths, root=root)
     if include_dialogue_exporter and not NMBOT_DIALOGUE_EXPORTER_FILES.issubset(selected_paths):
         missing = sorted(NMBOT_DIALOGUE_EXPORTER_FILES - selected_paths)
         raise ReleaseError("dialogue exporter allowlist files missing from release source: " + ",".join(missing))
     if not include_dialogue_exporter and selected_paths & NMBOT_DIALOGUE_EXPORTER_FILES:
         raise ReleaseError("dialogue exporter files require explicit opt-in")
-    if profile != V6_ONLY_PROFILE:
+    if profile not in {V6_ONLY_PROFILE, V6_CALLBACK_WORKER_PROFILE}:
         _assert_remote_preflight_sources_present(root, selected_paths)
     metadata_records = _file_records_with_metadata(files, root)
     _validate_size_limits(metadata_records, label="release")
@@ -710,10 +749,10 @@ def build(*, release_id: str | None = None, out_dir: Path = DEFAULT_OUT_DIR, roo
         "archive_sha256": archive_sha,
         "files": file_records,
         "entrypoints": list(ENTRYPOINTS),
-        "import_modules": list(V6_ONLY_IMPORT_MODULES if profile == V6_ONLY_PROFILE else IMPORT_MODULES),
+        "import_modules": list(V6_ONLY_IMPORT_MODULES if profile == V6_ONLY_PROFILE else V6_CALLBACK_WORKER_IMPORT_MODULES if profile == V6_CALLBACK_WORKER_PROFILE else IMPORT_MODULES),
         "service": API_SERVICE,
-        "forbidden_services": [BRIDGE_SERVICE, WORKER_SERVICE],
-        "config_schema_requirements": V6_ONLY_CONFIG_REQUIREMENTS if profile == V6_ONLY_PROFILE else CONFIG_REQUIREMENTS,
+        "forbidden_services": [BRIDGE_SERVICE] if profile == V6_CALLBACK_WORKER_PROFILE else [BRIDGE_SERVICE, WORKER_SERVICE],
+        "config_schema_requirements": V6_ONLY_CONFIG_REQUIREMENTS if profile == V6_ONLY_PROFILE else V6_CALLBACK_WORKER_CONFIG_REQUIREMENTS if profile == V6_CALLBACK_WORKER_PROFILE else CONFIG_REQUIREMENTS,
         "external_runtime_strategy": "Keep .env, data, logs and backups outside immutable TEST API releases; deploy links manifest external_runtime_paths into each release before switching current.",
         "identity_path": IDENTITY_IN_RELEASE,
         "source_provenance": source_provenance or _source_provenance_absent(),
@@ -751,7 +790,8 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ReleaseError("manifest must restart only API service")
     if not all(isinstance(item, str) and item for item in manifest["forbidden_services"]):
         raise ReleaseError("invalid forbidden services")
-    if BRIDGE_SERVICE not in manifest["forbidden_services"] or WORKER_SERVICE not in manifest["forbidden_services"]:
+    callback_worker = manifest["import_modules"] == list(V6_CALLBACK_WORKER_IMPORT_MODULES)
+    if BRIDGE_SERVICE not in manifest["forbidden_services"] or (not callback_worker and WORKER_SERVICE not in manifest["forbidden_services"]):
         raise ReleaseError("manifest must forbid bridge/worker restart")
     if manifest["identity_path"] != IDENTITY_IN_RELEASE:
         raise ReleaseError("invalid release identity path")
@@ -768,7 +808,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         if rel in seen:
             raise ReleaseError(f"duplicate file in manifest: {rel}")
         seen.add(rel)
-        if rel != IDENTITY_IN_RELEASE and (_is_excluded(rel, Path(rel)) or (not _is_allowed_runtime_file(rel, include_dialogue_exporter=include_dialogue_exporter) and not _manifest_allows_test_api_overlay(manifest, rel))):
+        if rel != IDENTITY_IN_RELEASE and (_is_excluded(rel, Path(rel)) or (not _is_allowed_runtime_file_for_policy(rel, include_dialogue_exporter=include_dialogue_exporter, profile=V6_CALLBACK_WORKER_PROFILE if callback_worker else None) and not _manifest_allows_test_api_overlay(manifest, rel))):
             raise ReleaseError(f"excluded file in manifest: {rel}")
         if previous_path and rel <= previous_path:
             raise ReleaseError("manifest files must be sorted by path")
@@ -779,10 +819,14 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         expected_v6_paths = set(V6_ONLY_RUNTIME_FILES) | {IDENTITY_IN_RELEASE}
         if seen != expected_v6_paths:
             raise ReleaseError("V6-only manifest file set must exactly match its allowlist")
+    elif callback_worker:
+        expected_paths = set(V6_CALLBACK_WORKER_RUNTIME_FILES) | {IDENTITY_IN_RELEASE}
+        if seen != expected_paths:
+            raise ReleaseError("V6 callback-worker manifest file set must exactly match its allowlist")
     else:
         _assert_required_runtime_resources_present(seen)
     req = manifest["config_schema_requirements"]
-    expected_requirements = V6_ONLY_CONFIG_REQUIREMENTS if v6_only else CONFIG_REQUIREMENTS
+    expected_requirements = V6_ONLY_CONFIG_REQUIREMENTS if v6_only else V6_CALLBACK_WORKER_CONFIG_REQUIREMENTS if callback_worker else CONFIG_REQUIREMENTS
     if req != expected_requirements:
         raise ReleaseError("config requirements must exactly match release contract")
     encoded = json.dumps(req, ensure_ascii=False, sort_keys=True)
@@ -793,7 +837,7 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
     for rel in manifest["entrypoints"]:
         if _manifest_path(rel) not in seen:
             raise ReleaseError(f"entrypoint missing from manifest: {rel}")
-    expected_imports = V6_ONLY_IMPORT_MODULES if v6_only else IMPORT_MODULES
+    expected_imports = V6_ONLY_IMPORT_MODULES if v6_only else V6_CALLBACK_WORKER_IMPORT_MODULES if callback_worker else IMPORT_MODULES
     if manifest["import_modules"] != list(expected_imports):
         raise ReleaseError("manifest import_modules must exactly match release contract")
     if not all(isinstance(m, str) and MODULE_RE.fullmatch(m) for m in manifest["import_modules"]):
@@ -866,14 +910,14 @@ def validate_release_identity(identity: dict[str, Any], manifest: dict[str, Any]
         raise ReleaseError(f"{source} tracked_files mismatch")
 
 
-def safe_extract(archive: Path, dest: Path, *, include_dialogue_exporter: bool = False, test_api_overlay_paths: set[str] | frozenset[str] = frozenset()) -> None:
+def safe_extract(archive: Path, dest: Path, *, include_dialogue_exporter: bool = False, test_api_overlay_paths: set[str] | frozenset[str] = frozenset(), profile: str | None = None) -> None:
     with tarfile.open(archive, "r:gz") as tf:
         dest.mkdir(parents=True, exist_ok=True)
         for member in tf.getmembers():
             rel = _safe_rel(member.name)
             if not member.isfile() or member.isdir() or member.issym() or member.islnk() or member.isdev():
                 raise ReleaseError(f"unsafe tar member: {member.name}")
-            if rel != IDENTITY_IN_RELEASE and not _is_allowed_runtime_file_for_policy(rel, include_dialogue_exporter=include_dialogue_exporter, test_api_overlay_paths=test_api_overlay_paths):
+            if rel != IDENTITY_IN_RELEASE and not _is_allowed_runtime_file_for_policy(rel, include_dialogue_exporter=include_dialogue_exporter, test_api_overlay_paths=test_api_overlay_paths, profile=profile):
                 raise ReleaseError(f"unexpected tar member: {member.name}")
             target = (dest / rel).resolve()
             if not str(target).startswith(str(dest.resolve()) + os.sep):
@@ -890,7 +934,8 @@ def verify_archive_against_manifest(archive: Path, manifest: dict[str, Any]) -> 
         root = Path(tmp) / "extract"
         root.mkdir()
         test_api_overlay_paths = _manifest_test_api_overlay_paths(manifest)
-        safe_extract(archive, root, include_dialogue_exporter=_manifest_has_dialogue_exporter(manifest), test_api_overlay_paths=test_api_overlay_paths)
+        callback_worker = manifest.get("import_modules") == list(V6_CALLBACK_WORKER_IMPORT_MODULES)
+        safe_extract(archive, root, include_dialogue_exporter=_manifest_has_dialogue_exporter(manifest), test_api_overlay_paths=test_api_overlay_paths, profile=V6_CALLBACK_WORKER_PROFILE if callback_worker else None)
         expected = {item["path"]: item["sha256"] for item in manifest["files"]}
         actual = _file_records([p for p in sorted(root.rglob("*")) if p.is_file()], root)
         actual_map = {item["path"]: item["sha256"] for item in actual}
@@ -911,13 +956,15 @@ def local_preflight(*, archive: Path, manifest_path: Path) -> str:
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp) / "release"
         root.mkdir()
-        safe_extract(archive, root, include_dialogue_exporter=_manifest_has_dialogue_exporter(manifest), test_api_overlay_paths=test_api_overlay_paths)
+        callback_worker = manifest.get("import_modules") == list(V6_CALLBACK_WORKER_IMPORT_MODULES)
+        safe_extract(archive, root, include_dialogue_exporter=_manifest_has_dialogue_exporter(manifest), test_api_overlay_paths=test_api_overlay_paths, profile=V6_CALLBACK_WORKER_PROFILE if callback_worker else None)
         for rel in manifest["entrypoints"]:
             if not (root / rel).is_file():
                 raise ReleaseError(f"required entrypoint missing: {rel}")
         artifact_paths = {item["path"] for item in manifest["files"]}
         v6_only = manifest["import_modules"] == list(V6_ONLY_IMPORT_MODULES)
-        if not v6_only:
+        callback_worker = manifest["import_modules"] == list(V6_CALLBACK_WORKER_IMPORT_MODULES)
+        if not v6_only and not callback_worker:
             _assert_required_runtime_resources_present(artifact_paths, root=root)
             _assert_remote_preflight_sources_present(root, artifact_paths)
         identity = json.loads((root / IDENTITY_IN_RELEASE).read_text(encoding="utf-8"))
@@ -927,6 +974,11 @@ def local_preflight(*, archive: Path, manifest_path: Path) -> str:
             if artifact_paths != expected_v6_paths:
                 raise ReleaseError("V6-only local preflight file set must exactly match its allowlist")
             py_files = [root / rel for rel in V6_ONLY_PREFLIGHT_PY_FILES]
+        elif callback_worker:
+            expected_paths = set(V6_CALLBACK_WORKER_RUNTIME_FILES) | {IDENTITY_IN_RELEASE}
+            if artifact_paths != expected_paths:
+                raise ReleaseError("V6 callback-worker local preflight file set must exactly match its allowlist")
+            py_files = [root / rel for rel in V6_CALLBACK_WORKER_PREFLIGHT_PY_FILES]
         else:
             required_preflight_files = _remote_preflight_py_files(artifact_paths)
             py_files = sorted({*root.rglob("*.py"), *(root / rel for rel in required_preflight_files)})
@@ -936,7 +988,8 @@ def local_preflight(*, archive: Path, manifest_path: Path) -> str:
         env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
         pythonpath = os.pathsep.join([str(root), str(root / "scripts")])
         env["PYTHONPATH"] = pythonpath
-        import_names = [*manifest["import_modules"], *(V6_ONLY_REQUIRED_DEPENDENCIES if v6_only else ())]
+        required_dependencies = V6_ONLY_REQUIRED_DEPENDENCIES if v6_only else V6_CALLBACK_WORKER_REQUIRED_DEPENDENCIES if callback_worker else ()
+        import_names = [*manifest["import_modules"], *required_dependencies]
         proc = subprocess.run([sys.executable, "-c", code, json.dumps(import_names)], cwd=root, env=env, text=True, capture_output=True, check=False)
         if proc.returncode != 0:
             raise ReleaseError((proc.stdout + proc.stderr)[-2000:])
@@ -3493,20 +3546,22 @@ def _remote_preflight_command(
     *,
     profile: str | None = None,
 ) -> str:
-    if profile not in {None, V6_ONLY_PROFILE}:
+    if profile not in {None, V6_ONLY_PROFILE, V6_CALLBACK_WORKER_PROFILE}:
         raise ReleaseError(f"unknown remote preflight profile: {profile}")
-    expected_modules = list(V6_ONLY_IMPORT_MODULES if profile == V6_ONLY_PROFILE else IMPORT_MODULES)
+    expected_modules = list(V6_ONLY_IMPORT_MODULES if profile == V6_ONLY_PROFILE else V6_CALLBACK_WORKER_IMPORT_MODULES if profile == V6_CALLBACK_WORKER_PROFILE else IMPORT_MODULES)
     if modules is not None and modules != expected_modules:
         raise ReleaseError("remote preflight modules must exactly match release profile contract")
-    if profile == V6_ONLY_PROFILE:
-        selected_compile_files = list(V6_ONLY_PREFLIGHT_PY_FILES) if compile_files is None else compile_files
-        if selected_compile_files != list(V6_ONLY_PREFLIGHT_PY_FILES):
-            raise ReleaseError("V6-only remote preflight compile files must exactly match its allowlist")
+    if profile in {V6_ONLY_PROFILE, V6_CALLBACK_WORKER_PROFILE}:
+        expected_compile = V6_ONLY_PREFLIGHT_PY_FILES if profile == V6_ONLY_PROFILE else V6_CALLBACK_WORKER_PREFLIGHT_PY_FILES
+        expected_deps = V6_ONLY_REQUIRED_DEPENDENCIES if profile == V6_ONLY_PROFILE else V6_CALLBACK_WORKER_REQUIRED_DEPENDENCIES
+        selected_compile_files = list(expected_compile) if compile_files is None else compile_files
+        if selected_compile_files != list(expected_compile):
+            raise ReleaseError(f"{profile} remote preflight compile files must exactly match its allowlist")
         payload_data = {
-            "profile": V6_ONLY_PROFILE,
+            "profile": profile,
             "modules": expected_modules,
             "compile_files": selected_compile_files,
-            "required_dependencies": list(V6_ONLY_REQUIRED_DEPENDENCIES),
+            "required_dependencies": list(expected_deps),
         }
     else:
         allowed_compile_files = set(REMOTE_PREFLIGHT_PY_FILES) | {NMBOT_DIALOGUE_EXPORTER_SCRIPT} | set(NMBOT_DIALOGUE_EXPORTER_DEPENDENCY_FILES)
@@ -3540,8 +3595,8 @@ def snapshot():
             out[rel]=hashlib.sha256(p.read_bytes()).hexdigest()
     return out
 before=snapshot()
-if profile == "v6-only":
-    if compile_files != sorted(compile_files) or len(compile_files) != len(set(compile_files)): fail("V6-only compile file set is not exact")
+if profile in ("v6-only", "v6-callback-worker"):
+    if compile_files != sorted(compile_files) or len(compile_files) != len(set(compile_files)): fail("profile compile file set is not exact")
 else:
     compile_files=sorted(set(compile_files)|set(v1_py_files()))
 with tempfile.TemporaryDirectory(prefix="nmbot-preflight-pyc-") as td:
@@ -3795,6 +3850,57 @@ def _stop_api_command() -> str:
 
 def _start_api_command() -> str:
     return "systemctl --user start " + shlex.quote(API_SERVICE)
+
+
+def _callback_worker_install_command(remote_root: str, release_id: str) -> str:
+    payload = json.dumps({"root": remote_root, "unit": CALLBACK_WORKER_UNIT, "service": CALLBACK_WORKER_SERVICE, "backup": f"{remote_root}/backups/{release_id}.callback-worker.service.bak"}, sort_keys=True)
+    code = r'''
+import json, os, pathlib, shutil, subprocess, sys
+cfg=json.loads(sys.argv[1]); unit=pathlib.Path(cfg["unit"]); backup=pathlib.Path(cfg["backup"]); root=cfg["root"]
+def fail(msg): print(json.dumps({"ok":False,"error":msg})); sys.exit(2)
+if not unit.is_file() or unit.is_symlink(): fail("callback worker unit missing or unsafe")
+backup.parent.mkdir(mode=0o700, parents=True, exist_ok=True); shutil.copy2(unit, backup)
+text="""[Unit]
+Description=NMBOT callback Google Sheets worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={root}/current
+EnvironmentFile={root}/.env
+ExecStart=/usr/bin/python3 {root}/current/scripts/nmbot_callback_sheet_worker.py --loop --poll-seconds 5
+Restart=always
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
+""".format(root=root)
+tmp=unit.with_name("."+unit.name+".nmbot."+str(os.getpid())+".tmp")
+try:
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    if tmp.is_symlink() or tmp.read_text(encoding="utf-8") != text: fail("callback worker unit staging mismatch")
+    os.replace(tmp, unit)
+finally:
+    tmp.unlink(missing_ok=True)
+subprocess.run(["systemctl","--user","daemon-reload"], check=True, timeout=20)
+print(json.dumps({"ok":True,"backup":str(backup)}))
+'''
+    return "python3 -c " + shlex.quote(code) + " " + shlex.quote(payload)
+
+
+def _callback_worker_restore_command(remote_root: str, release_id: str) -> str:
+    payload = json.dumps({"unit": CALLBACK_WORKER_UNIT, "backup": f"{remote_root}/backups/{release_id}.callback-worker.service.bak", "service": CALLBACK_WORKER_SERVICE}, sort_keys=True)
+    code = r'''
+import json, pathlib, shutil, subprocess, sys
+cfg=json.loads(sys.argv[1]); unit=pathlib.Path(cfg["unit"]); backup=pathlib.Path(cfg["backup"])
+if not backup.is_file() or backup.is_symlink(): print(json.dumps({"ok":False,"error":"callback worker backup missing"})); sys.exit(2)
+shutil.copy2(backup, unit); subprocess.run(["systemctl","--user","daemon-reload"], check=True, timeout=20); print(json.dumps({"ok":True}))
+'''
+    return "python3 -c " + shlex.quote(code) + " " + shlex.quote(payload)
 
 
 def _remote_extract_command(staging: str, release_dir: str, manifest: dict[str, Any]) -> str:
@@ -4476,8 +4582,11 @@ def deploy(*, release_id: str, archive: Path, manifest_path: Path, confirm: bool
     if rid != manifest["release_id"]:
         raise ReleaseError("deploy release_id does not match manifest")
     include_dialogue_exporter = _manifest_has_dialogue_exporter(manifest)
+    callback_worker = manifest["import_modules"] == list(V6_CALLBACK_WORKER_IMPORT_MODULES)
     if include_dialogue_exporter and remote_root.rstrip("/") != DEFAULT_REMOTE_ROOT:
         raise ReleaseError("dialogue exporter remote paths are fixed to the default API root")
+    if callback_worker and remote_root.rstrip("/") != DEFAULT_REMOTE_ROOT:
+        raise ReleaseError("callback worker remote paths are fixed to the default API root")
     verify_archive_against_manifest(archive, manifest)
     _assert_remote_unit_migrated(remote, remote_root=remote_root)
     _remote_ok(remote.run(_remote_guard_command(remote_root, manifest)))
@@ -4485,6 +4594,7 @@ def deploy(*, release_id: str, archive: Path, manifest_path: Path, confirm: bool
     release_dir = f"{remote_root}/releases/{rid}"
     lock_dir = f"{remote_root}/.release_lock"
     cutover_started = False
+    worker_unit_changed = False
     lock_acquired = False
     cleanup_error: str | None = None
     deployment_error: Exception | None = None
@@ -4506,20 +4616,26 @@ def deploy(*, release_id: str, archive: Path, manifest_path: Path, confirm: bool
         for name in manifest["config_schema_requirements"]["external_runtime_paths"]:
             _remote_ok(remote.run("ln -sfn " + shlex.quote(remote_root + "/" + name) + " " + shlex.quote(release_dir + "/" + name)))
         v6_only = manifest["import_modules"] == list(V6_ONLY_IMPORT_MODULES)
-        compile_files = list(V6_ONLY_PREFLIGHT_PY_FILES if v6_only else REMOTE_PREFLIGHT_PY_FILES)
+        compile_files = list(V6_ONLY_PREFLIGHT_PY_FILES if v6_only else V6_CALLBACK_WORKER_PREFLIGHT_PY_FILES if callback_worker else REMOTE_PREFLIGHT_PY_FILES)
         if include_dialogue_exporter:
             _remote_ok(remote.run(_dialogue_exporter_backup_command(remote_root, rid)))
             compile_files.append(NMBOT_DIALOGUE_EXPORTER_SCRIPT)
             compile_files.extend(sorted(NMBOT_DIALOGUE_EXPORTER_DEPENDENCY_FILES))
-        _remote_ok(remote.run(_remote_preflight_command(release_dir, list(manifest["import_modules"]), sorted(compile_files), profile=V6_ONLY_PROFILE if v6_only else None)))
+        _remote_ok(remote.run(_remote_preflight_command(release_dir, list(manifest["import_modules"]), sorted(compile_files), profile=V6_ONLY_PROFILE if v6_only else V6_CALLBACK_WORKER_PROFILE if callback_worker else None)))
         tmp_link = f"{remote_root}/.current.{rid}.tmp"
         cutover_started = True
+        if callback_worker:
+            _remote_ok(remote.run("systemctl --user stop " + shlex.quote(CALLBACK_WORKER_SERVICE)))
+            _remote_ok(remote.run(_callback_worker_install_command(remote_root, rid)))
+            worker_unit_changed = True
         _remote_ok(remote.run(_stop_api_command()))
         _remote_ok(remote.run(_api_inactive_command()))
         _remote_ok(remote.run("ln -sfn " + shlex.quote("releases/" + rid) + " " + shlex.quote(tmp_link) + " && mv -Tf " + shlex.quote(tmp_link) + " " + shlex.quote(remote_root + "/current")))
         _remote_ok(remote.run(_publish_identity_command(remote_root, rid)))
         _remote_ok(remote.run(_start_api_command()))
         _remote_ok(remote.run(_health_and_identity_command(remote_root, rid, f"{remote_root.rstrip('/')}/{IDENTITY_EXTERNAL}")))
+        if callback_worker:
+            _remote_ok(remote.run("systemctl --user start " + shlex.quote(CALLBACK_WORKER_SERVICE)))
         if include_dialogue_exporter:
             _remote_ok(remote.run(_dialogue_exporter_install_command(release_dir, manifest)))
     except Exception as deploy_exc:
@@ -4534,10 +4650,15 @@ def deploy(*, release_id: str, archive: Path, manifest_path: Path, confirm: bool
                         rollback_errors.append(exporter_rollback_exc)
                 _remote_ok(remote.run(_stop_api_command()))
                 _remote_ok(remote.run(_api_inactive_command()))
+                if callback_worker and worker_unit_changed:
+                    _remote_ok(remote.run("systemctl --user stop " + shlex.quote(CALLBACK_WORKER_SERVICE)))
+                    _remote_ok(remote.run(_callback_worker_restore_command(remote_root, rid)))
                 tmp_prev = f"{remote_root}/.current.rollback.tmp"
                 _remote_ok(remote.run("ln -sfn " + shlex.quote("releases/" + prev_id) + " " + shlex.quote(tmp_prev) + " && mv -Tf " + shlex.quote(tmp_prev) + " " + shlex.quote(remote_root + "/current")))
                 _remote_ok(remote.run(_publish_identity_command(remote_root, prev_id)))
                 _remote_ok(remote.run(_start_api_command()))
+                if callback_worker and worker_unit_changed:
+                    _remote_ok(remote.run("systemctl --user start " + shlex.quote(CALLBACK_WORKER_SERVICE)))
                 _remote_ok(remote.run(_health_and_identity_command(remote_root, prev_id, f"{remote_root.rstrip('/')}/{IDENTITY_EXTERNAL}")))
             except Exception as rollback_exc:
                 rollback_errors.append(rollback_exc)
@@ -4641,7 +4762,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     bw.add_argument("--release-id")
     bw.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     bw.add_argument("--include-dialogue-exporter", action="store_true")
-    bw.add_argument("--profile", choices=(V6_ONLY_PROFILE,))
+    bw.add_argument("--profile", choices=(V6_ONLY_PROFILE, V6_CALLBACK_WORKER_PROFILE))
     pre = sub.add_parser("preflight")
     pre.add_argument("--archive", type=Path, required=True)
     pre.add_argument("--manifest", type=Path, required=True)

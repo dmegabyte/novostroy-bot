@@ -1565,6 +1565,41 @@ def test_dialogue_exporter_deploy_installs_fixed_paths_and_rolls_back_on_failure
     assert "ln -sfn releases/old" in failed_joined
 
 
+def test_callback_worker_profile_installs_atomic_unit_only_on_fixed_root(tmp_path: Path) -> None:
+    artifact = rel.build(release_id="REL-callback-worker", out_dir=tmp_path / "bundle", profile=rel.V6_CALLBACK_WORKER_PROFILE)
+    manifest = rel.load_manifest(artifact.manifest)
+    assert manifest["import_modules"] == list(rel.V6_CALLBACK_WORKER_IMPORT_MODULES)
+    assert manifest["forbidden_services"] == [rel.BRIDGE_SERVICE]
+
+    fake = FakeRemote(remote_root=rel.DEFAULT_REMOTE_ROOT)
+    out = rel.deploy(
+        release_id="REL-callback-worker",
+        archive=artifact.archive,
+        manifest_path=artifact.manifest,
+        confirm=True,
+        remote=fake,
+        remote_root=rel.DEFAULT_REMOTE_ROOT,
+    )
+    joined = "\n".join(fake.commands)
+    assert out.startswith("deploy=ok")
+    assert "callback worker unit staging mismatch" in joined
+    assert "os.replace(tmp, unit)" in joined
+    assert f"systemctl --user stop {rel.CALLBACK_WORKER_SERVICE}" in joined
+    assert f"systemctl --user start {rel.CALLBACK_WORKER_SERVICE}" in joined
+
+    wrong_target = FakeRemote(remote_root="/remote")
+    with pytest.raises(rel.ReleaseError, match="callback worker remote paths are fixed"):
+        rel.deploy(
+            release_id="REL-callback-worker",
+            archive=artifact.archive,
+            manifest_path=artifact.manifest,
+            confirm=True,
+            remote=wrong_target,
+            remote_root="/remote",
+        )
+    assert wrong_target.commands == []
+
+
 def test_snapshot_policy_allows_explicit_release_identity_script_only(tmp_path: Path, monkeypatch) -> None:
     remote_root = tmp_path / "synthetic-remote"
     _copy_contract_tree(remote_root)

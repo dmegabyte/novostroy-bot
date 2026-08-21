@@ -254,6 +254,7 @@ V6_ONLY_RUNTIME_FILES = frozenset({
     "scripts/nmbot_v6_simple_adapter.py",
 })
 V6_CALLBACK_WORKER_RUNTIME_FILES = frozenset((set(V6_ONLY_RUNTIME_FILES) - {"scripts/nmbot_diag.sh"}) | {
+    "scripts/nmbot_v6_journal.py",
     "scripts/nmbot_callback_sheet_worker.py",
     "scripts/nmbot_callback_summary.py",
     "scripts/nmbot_google_sheets.py",

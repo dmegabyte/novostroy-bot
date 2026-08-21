@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import ctypes
 import errno
 import gzip
 import hashlib
@@ -17,7 +16,6 @@ import json
 import os
 import py_compile
 import re
-import shutil
 import shlex
 import subprocess
 import stat
@@ -29,6 +27,16 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
+
+from scripts.nmbot_local_publish import (
+    ReleaseError,
+    cleanup_private_staging as _cleanup_private_staging,
+    fsync_dir as _fsync_dir,
+    make_private_staging_dir as _make_private_staging_dir,
+    rename_noreplace as _rename_noreplace,
+    renameat2_syscall_number as _renameat2_syscall_number,
+    write_new_file as _write_new_file,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -286,7 +294,11 @@ OPTIONAL_API_RUNTIME_SCRIPT_FILES = frozenset({
     "scripts/nmbot_v6_journal.py",
     "scripts/nmbot_v6_simple_adapter.py",
 })
-REMOTE_PREFLIGHT_PY_FILES = tuple(sorted((API_RUNTIME_SCRIPT_FILES - OPTIONAL_API_RUNTIME_SCRIPT_FILES) | {
+REMOTE_PREFLIGHT_PY_FILES = tuple(sorted({
+    path
+    for path in (API_RUNTIME_SCRIPT_FILES - OPTIONAL_API_RUNTIME_SCRIPT_FILES)
+    if path.endswith(".py")
+} | {
     "followup_intent_classifier.py",
     "search_profiles.py",
     "nmbot_v2/runtime.py",
@@ -318,10 +330,6 @@ SNAPSHOT_ROOTS = ("nmbot_v0", "nmbot_v1", "nmbot_v2", "nmbot_v4", "nmbot_v6", "s
 SNAPSHOT_ROOT_FILES = tuple(sorted(ROOT_RUNTIME_FILES))
 SNAPSHOT_MANIFEST_NAME = "snapshot-manifest.json"
 SNAPSHOT_SOURCE_PREFIX = "source/"
-
-
-class ReleaseError(RuntimeError):
-    pass
 
 
 class Remote(Protocol):
@@ -1061,108 +1069,9 @@ def render_migration_plan(*, remote_root: str = DEFAULT_REMOTE_ROOT) -> str:
 
 
 def _allowed_bootstrap_out_dir(out_dir: Path) -> Path:
-    original = out_dir.expanduser()
-    if ".." in original.parts:
-        raise ReleaseError("bootstrap output directory must not contain parent traversal")
-    allowed_roots = [Path("/tmp/opencode").resolve(strict=False), (ROOT / "release_bundles" / "bootstrap").resolve(strict=False)]
-    if os.path.lexists(original) and original.is_symlink():
-        raise ReleaseError("bootstrap output directory must not be a symlink")
-    cwd = Path.cwd().resolve(strict=False)
-    abs_original = original if original.is_absolute() else (cwd / original)
-    if ".." in abs_original.parts:
-        raise ReleaseError("bootstrap output directory must not contain parent traversal")
-    allowed_root: Path | None = None
-    for root in allowed_roots:
-        try:
-            abs_original.relative_to(root)
-            allowed_root = root
-            break
-        except ValueError:
-            continue
-    if allowed_root is None:
-        raise ReleaseError("bootstrap output directory must be under /tmp/opencode or project release_bundles/bootstrap")
-    probe = Path(abs_original.anchor)
-    for part in abs_original.parts[1:]:
-        probe = probe / part
-        if os.path.lexists(probe) and probe.is_symlink():
-            raise ReleaseError("bootstrap output path contains a symlink component")
-    return abs_original.resolve(strict=False)
+    from scripts.nmbot_local_publish import allowed_bootstrap_out_dir
 
-
-def _write_new_file(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() or path.is_symlink():
-        raise ReleaseError(f"refusing to overwrite bootstrap output: {path}")
-    path.write_text(content, encoding="utf-8")
-
-
-def _renameat2_syscall_number() -> int:
-    machine = os.uname().machine
-    if machine in {"x86_64", "amd64"}:
-        return 316
-    if machine in {"aarch64", "arm64"}:
-        return 276
-    raise ReleaseError(f"renameat2 RENAME_NOREPLACE is not supported by this platform: {machine}")
-
-
-def _fsync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _rename_noreplace(src: Path, dst: Path) -> None:
-    """Publish ``src`` at ``dst`` only if no lexical destination exists.
-
-    This intentionally uses Linux ``renameat2(RENAME_NOREPLACE)`` instead of
-    plain ``rename`` because plain directory rename may replace an empty
-    destination directory.  Unsupported kernels/filesystems fail closed.
-    """
-    if not src.is_dir() or src.is_symlink():
-        raise ReleaseError(f"rename_noreplace source must be a private real directory: {src}")
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    syscall_no = _renameat2_syscall_number()
-    libc = ctypes.CDLL(None, use_errno=True)
-    rename_noreplace = 1
-    at_fdcwd = -100
-    result = libc.syscall(
-        ctypes.c_long(syscall_no),
-        ctypes.c_int(at_fdcwd),
-        ctypes.c_char_p(os.fsencode(src)),
-        ctypes.c_int(at_fdcwd),
-        ctypes.c_char_p(os.fsencode(dst)),
-        ctypes.c_uint(rename_noreplace),
-    )
-    if result != 0:
-        err = ctypes.get_errno()
-        if err == errno.EEXIST:
-            raise ReleaseError(f"refusing to overwrite existing immutable release directory: {dst}")
-        if err in {errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP}:
-            raise ReleaseError(f"renameat2 RENAME_NOREPLACE is not supported here; refusing unsafe publish: {dst}")
-        if err == errno.EXDEV:
-            raise ReleaseError(f"release publication must stay on one filesystem: {src} -> {dst}")
-        raise OSError(err, os.strerror(err), str(dst))
-    _fsync_dir(dst.parent)
-
-
-def _make_private_staging_dir(out: Path) -> Path:
-    out.mkdir(parents=True, exist_ok=True)
-    return Path(tempfile.mkdtemp(prefix=".nmbot-capture-staging-", dir=out))
-
-
-def _cleanup_private_staging(staging: Path, out: Path) -> None:
-    try:
-        staging.relative_to(out)
-    except ValueError as exc:
-        raise ReleaseError(f"refusing to cleanup staging outside output parent: {staging}") from exc
-    if staging.name.startswith(".nmbot-capture-staging-") is False:
-        raise ReleaseError(f"refusing to cleanup unexpected staging path: {staging}")
-    if os.path.lexists(staging) and staging.is_symlink():
-        raise ReleaseError(f"refusing to cleanup symlink staging path: {staging}")
-    if staging.exists():
-        shutil.rmtree(staging)
+    return allowed_bootstrap_out_dir(out_dir, project_root=ROOT)
 
 
 def _safe_stderr_detail(stderr: bytes) -> str:

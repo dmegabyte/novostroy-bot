@@ -740,6 +740,8 @@ def test_local_preflight_requires_full_remote_preflight_source_closure(tmp_path:
     assert "scripts/chat_tester_bot.py" not in artifact_paths
     assert "scripts/nmbot_env_secrets.py" not in artifact_paths
     assert "scripts/nmbot_atomic_release.py" not in artifact_paths
+    assert "scripts/nmbot_diag.sh" in artifact_paths
+    assert "scripts/nmbot_diag.sh" not in rel.REMOTE_PREFLIGHT_PY_FILES
 
     remote_command = rel._remote_preflight_command("/remote/releases/REL-preflight-closure")
     for required_path in rel.REMOTE_PREFLIGHT_PY_FILES:
@@ -768,6 +770,12 @@ def test_local_preflight_requires_full_remote_preflight_source_closure(tmp_path:
         assert "scripts/nmbot_egress_policy.py" in str(exc)
     else:  # pragma: no cover
         raise AssertionError("build from source missing remote preflight file must fail")
+
+
+def test_remote_preflight_compile_list_contains_only_python_sources() -> None:
+    assert "scripts/nmbot_diag.sh" in rel.API_RUNTIME_SCRIPT_FILES
+    assert "scripts/nmbot_diag.sh" not in rel.REMOTE_PREFLIGHT_PY_FILES
+    assert all(path.endswith(".py") for path in rel.REMOTE_PREFLIGHT_PY_FILES)
 
 
 def test_v6_only_remote_preflight_renders_exact_profile_contract() -> None:

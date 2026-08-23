@@ -21,6 +21,7 @@ SUPPORTED_CHECK_SCOPES = {"docs", "contracts", "v0", "v2", "runtime", "audit", "
 SUPPORTED_CHECK_FLAGS = {"--dry-run", "--json"}
 DIAGNOSE_SCHEMA_VERSION = "nmbot.diagnose.v1"
 DIAGNOSE_EDIT_PLAN_SCHEMA_VERSION = "nmbot.diagnose.edit_plan.v1"
+MUTATION_GATE_SCHEMA_VERSION = "nmbot.mutation_gate.v1"
 DIAGNOSE_RECENT_SCHEMA_VERSION = "nmbot.diagnose.recent.v1"
 DIAGNOSTIC_ENVELOPE_SCHEMA_VERSION = "nmbot.diagnostic.v1"
 DIAGNOSE_TIMELINE_SCHEMA_VERSION = "nmbot.diagnose.timeline.v1"
@@ -254,6 +255,69 @@ def _build_edit_plan(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _build_mutation_gate(result: dict[str, Any]) -> dict[str, Any]:
+    envelope = result.get("diagnostic_envelope") if isinstance(result.get("diagnostic_envelope"), dict) else {}
+    edit_plan = result.get("edit_plan") if isinstance(result.get("edit_plan"), dict) else {}
+    stage = _safe_stage(result.get("stage"))
+    runtime_version = _safe_runtime_version(result.get("runtime_version"))
+    evidence_scope = envelope.get("evidence_scope") if envelope.get("evidence_scope") in EVIDENCE_SCOPES else "unknown"
+    correlation = envelope.get("correlation") if isinstance(envelope.get("correlation"), dict) else {}
+    status = result.get("status") if isinstance(result.get("status"), str) else "unknown"
+    confidence = result.get("confidence") if isinstance(result.get("confidence"), str) else "unknown"
+    owner_confidence = result.get("owner_confidence") if isinstance(result.get("owner_confidence"), str) else "unknown"
+    expected_runtime = stage.split(".", 1)[0].upper() if stage and stage.split(".", 1)[0].upper() in RUNTIME_VERSIONS else None
+    runtime_conflict = expected_runtime is not None and runtime_version != "UNKNOWN" and runtime_version != expected_runtime
+
+    reasons: list[str] = []
+    if status in {"no_evidence", "diagnostic_failed"}:
+        reasons.append("diagnostic_evidence_missing")
+    if result.get("kind") != "trace" or not correlation.get("trace_present"):
+        reasons.append("explicit_trace_missing")
+    if stage is None:
+        reasons.append("diagnostic_stage_missing")
+    if evidence_scope != "local":
+        reasons.append("local_evidence_missing")
+    if owner_confidence != "stage" or edit_plan.get("status") != "ready":
+        reasons.append("exact_owner_not_proven")
+    if confidence != "high":
+        reasons.append("trace_confidence_not_high")
+    if runtime_version == "UNKNOWN":
+        reasons.append("runtime_version_unknown")
+    if runtime_conflict:
+        reasons.append("runtime_stage_conflict")
+
+    no_evidence = status in {"no_evidence", "diagnostic_failed"} or stage is None or not correlation.get("trace_present")
+    if runtime_conflict:
+        verdict = "CONFLICT"
+    elif no_evidence:
+        verdict = "NO_EVIDENCE"
+    elif not reasons and status == "reported":
+        verdict = "PROVEN"
+    else:
+        verdict = "PARTIAL"
+
+    surface = edit_plan.get("suggested_change_surface") if isinstance(edit_plan.get("suggested_change_surface"), list) else []
+    allowed_paths = [path for path in (_existing_safe_repo_ref(item) for item in surface) if path is not None] if verdict == "PROVEN" else []
+    verification_command = edit_plan.get("verification_command") if verdict == "PROVEN" and isinstance(edit_plan.get("verification_command"), str) else None
+    if verdict == "PROVEN" and not allowed_paths:
+        verdict, allowed_paths, verification_command = "PARTIAL", [], None
+        reasons.append("allowed_surface_missing")
+
+    return {
+        "schema_version": MUTATION_GATE_SCHEMA_VERSION,
+        "verdict": verdict,
+        "mutation_scope": "local_source_only" if verdict == "PROVEN" else "none",
+        "reason_codes": [_bounded_error_code(reason) for reason in reasons],
+        "diagnostic_stage": stage,
+        "allowed_paths": allowed_paths,
+        "verification_command": verification_command,
+        "evidence_scope": evidence_scope,
+        "expires_in_seconds": 1800,
+        "production_authorized": False,
+        "deploy_authorized": False,
+    }
+
+
 def _diagnostic_failed(kind: str, error_code: str) -> dict[str, Any]:
     return {
         "schema_version": DIAGNOSE_SCHEMA_VERSION,
@@ -324,10 +388,12 @@ def _diagnose_output_format(args: list[str]) -> tuple[str | None, str | None]:
     return "human" if human else "json", None
 
 
-def _print_diagnose_result(result: dict[str, Any], output_format: str, *, include_plan: bool = False) -> None:
+def _print_diagnose_result(result: dict[str, Any], output_format: str, *, include_plan: bool = False, include_gate: bool = False) -> None:
     result = _with_owner_card(result)
-    if include_plan:
+    if include_plan or include_gate:
         result["edit_plan"] = _build_edit_plan(result)
+    if include_gate:
+        result["mutation_gate"] = _build_mutation_gate(result)
     if output_format == "human":
         fields = [
             ("Статус", result.get("status")),
@@ -794,7 +860,7 @@ def _extract_recent_request(args: list[str]) -> tuple[int | None, str | None, st
     idx = 0
     while idx < len(args):
         item = args[idx]
-        if item in {"--human", "--json"}:
+        if item in {"--human", "--json", "--gate"}:
             idx += 1
             continue
         if item == "--timeline":
@@ -906,6 +972,22 @@ def _validate_timeline_request(args: list[str]) -> str | None:
     return None
 
 
+def _validate_gate_request(args: list[str]) -> str | None:
+    if "--json" not in args or "--human" in args:
+        return "--gate requires JSON output via --json"
+    if any(item in args for item in {"--latest", "--recent", "--summary", "--timeline", "--task"}):
+        return "--gate requires only an explicit --trace TRACE_ID selector"
+    if args.count("--trace") != 1:
+        return "--gate requires exactly one explicit --trace TRACE_ID selector"
+    trace_index = args.index("--trace")
+    if trace_index + 1 >= len(args) or args[trace_index + 1].startswith("-"):
+        return "--gate requires a safe explicit trace ID"
+    trace_id = args[trace_index + 1]
+    if len(trace_id) > 128 or any(not (ch.isalnum() or ch in "_.:-") for ch in trace_id):
+        return "--gate requires a safe explicit trace ID"
+    return None
+
+
 def _trace_owner_layer(stage: Any) -> str:
     if not isinstance(stage, str):
         return "unknown"
@@ -966,6 +1048,9 @@ def _normalize_trace(payload: dict[str, Any]) -> dict[str, Any]:
         value = first_trace.get(key)
         if _is_safe_scalar(value):
             result[key] = value
+    runtime_version = _safe_runtime_version(first_trace.get("runtime_version"))
+    if runtime_version != "UNKNOWN":
+        result["runtime_version"] = runtime_version
     return result
 
 
@@ -1094,7 +1179,7 @@ def _build_diagnose_argv(args: list[str]) -> tuple[str | None, list[str] | None,
     idx = 0
     while idx < len(args):
         item = args[idx]
-        if item in {"--human", "--json", "--plan", "--timeline"}:
+        if item in {"--human", "--json", "--plan", "--timeline", "--gate"}:
             idx += 1
             continue
         if item == "--latest":
@@ -1157,12 +1242,18 @@ def _build_diagnose_argv(args: list[str]) -> tuple[str | None, list[str] | None,
 
 
 def _run_diagnose(args: list[str]) -> int:
-    include_plan = "--plan" in args
+    include_gate = "--gate" in args
+    include_plan = "--plan" in args or include_gate
     output_format, output_error = _diagnose_output_format(args)
     if output_error:
         print(f"ERROR: {output_error}", file=sys.stderr)
         return 2
     assert output_format is not None
+    if include_gate:
+        gate_error = _validate_gate_request(args)
+        if gate_error:
+            print(f"ERROR: {gate_error}", file=sys.stderr)
+            return 2
     if "--summary" in args:
         window, summary_date, summary_logs_dir, summary_error = _extract_summary_request(args)
         if summary_error:
@@ -1202,7 +1293,7 @@ def _run_diagnose(args: list[str]) -> int:
                     "last_successful_stage": None,
                     "correlation_coverage": {"trace": False, "task": False},
                 }
-            _print_diagnose_result(result, output_format, include_plan=include_plan)
+            _print_diagnose_result(result, output_format, include_plan=include_plan, include_gate=include_gate)
             return 0
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
@@ -1224,7 +1315,7 @@ def _run_diagnose(args: list[str]) -> int:
                     "last_successful_stage": None,
                     "correlation_coverage": {"trace": kind == "trace", "task": False},
                 }
-            _print_diagnose_result(no_evidence, output_format, include_plan=include_plan)
+            _print_diagnose_result(no_evidence, output_format, include_plan=include_plan, include_gate=include_gate)
             return 0
     completed = subprocess.run(child_argv, cwd=ROOT, check=False, capture_output=True, text=True)
     parsed = _parse_json_object(completed.stdout or "")
@@ -1232,13 +1323,13 @@ def _run_diagnose(args: list[str]) -> int:
         parsed = _parse_json_object(completed.stderr or "")
     if parsed is None:
         result = _add_diagnostic_envelope(_diagnostic_failed(kind, "child_json_parse_error"), evidence_scope="unknown", trace_present=kind == "trace", task_present=kind == "task")
-        _print_diagnose_result(result, output_format, include_plan=include_plan)
+        _print_diagnose_result(result, output_format, include_plan=include_plan, include_gate=include_gate)
         return completed.returncode if completed.returncode != 0 else 3
     result = _normalize_trace(parsed) if kind == "trace" else _normalize_task(parsed)
     result = _add_diagnostic_envelope(result, evidence_scope="local" if kind == "trace" else "unknown", trace_present=kind == "trace", task_present=kind == "task")
     if _timeline_requested(args):
         result["timeline"] = _build_timeline_from_payload(kind, parsed, result)
-    _print_diagnose_result(result, output_format, include_plan=include_plan)
+    _print_diagnose_result(result, output_format, include_plan=include_plan, include_gate=include_gate)
     return completed.returncode
 
 
@@ -1363,7 +1454,7 @@ def main(argv: list[str] | None = None) -> int:
         print("recipes pair RECIPE_A RECIPE_B prints a local-only deterministic Markdown/JSON overlap card.")
         print("recipes explain RECIPE_A RECIPE_B prints a local-only deterministic review card from the pair report.")
         print("diag delegates to bash scripts/nmbot_diag.sh only when explicitly invoked; user args may select VPS/network mode.")
-        print("diagnose [--trace TRACE_ID|--task TASK_ID|--latest|--recent N|--summary 1h] [--timeline] [--plan] [--json|--human] runs safe diagnostics; --recent/--summary are local JSONL aggregation, and omitted selector means --latest.")
+        print("diagnose [--trace TRACE_ID|--task TASK_ID|--latest|--recent N|--summary 1h] [--timeline] [--plan] [--gate] [--json|--human] runs safe diagnostics; --gate requires an explicit local trace and JSON output.")
         print("tools [--json|--human] reads local config/nmbot_diagnostic_tools.json and marks legacy diagnostic tools without executing them.")
         print("trace/dialogue/planner/runtime/release/contour/architecture expose allowlisted direct-argv diagnostic aliases only; release identity is restricted to read/show and contour recon requires --contour.")
         return 0 if args and args[0] in {"-h", "--help"} else 2

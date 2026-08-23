@@ -1342,6 +1342,75 @@ def test_diagnose_without_plan_lacks_edit_plan_for_backcompat(monkeypatch, capsy
     assert mod.main(["diagnose", "--trace", "trace-v2", "--json"]) == 0
     output = json.loads(capsys.readouterr().out)
     assert "edit_plan" not in output
+    assert "mutation_gate" not in output
+
+
+def test_diagnose_gate_proven_for_matching_local_v2_trace(monkeypatch, capsys, tmp_path: Path) -> None:
+    mod = load_wrapper_module()
+    _write_trace_logs(tmp_path)
+    _write_plan_stage_map(tmp_path)
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    child_payload = {"traces": [{"stage": "v2.search", "runtime_version": "V2", "outcome": "failed", "confidence": "high", "evidence": [{"http_status": 500}]}]}
+
+    def fake_run(argv, cwd, check, capture_output, text):
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(child_payload), stderr="")
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    assert mod.main(["diagnose", "--trace", "trace-v2", "--gate", "--json"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    gate = output["mutation_gate"]
+    assert gate["schema_version"] == "nmbot.mutation_gate.v1"
+    assert gate["verdict"] == "PROVEN"
+    assert gate["mutation_scope"] == "local_source_only"
+    assert gate["allowed_paths"] == ["scripts/nmbot_runtime_adapter.py", "tests/test_nmbot_v2_search_contract_runtime.py"]
+    assert gate["verification_command"] == "python3 -m pytest -q tests/test_nmbot_v2_search_contract_runtime.py"
+    assert gate["production_authorized"] is False
+    assert gate["deploy_authorized"] is False
+
+
+def test_diagnose_gate_conflict_partial_and_no_evidence(monkeypatch, capsys, tmp_path: Path) -> None:
+    mod = load_wrapper_module()
+    _write_trace_logs(tmp_path)
+    _write_plan_stage_map(tmp_path)
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    payloads = [
+        {"traces": [{"stage": "v2.search", "runtime_version": "V0", "confidence": "high", "evidence": []}]},
+        {"traces": [{"stage": "v2.search", "runtime_version": "bad", "confidence": "low", "evidence": []}]},
+        {"traces": []},
+    ]
+
+    def fake_run(argv, cwd, check, capture_output, text):
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payloads.pop(0)), stderr="")
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    verdicts = []
+    for trace_id in ("conflict", "partial", "empty"):
+        assert mod.main(["diagnose", "--trace", trace_id, "--gate", "--json"]) == 0
+        gate = json.loads(capsys.readouterr().out)["mutation_gate"]
+        verdicts.append(gate["verdict"])
+        if gate["verdict"] != "PROVEN":
+            assert gate["allowed_paths"] == []
+            assert gate["mutation_scope"] == "none"
+    assert verdicts == ["CONFLICT", "PARTIAL", "NO_EVIDENCE"]
+
+
+def test_diagnose_gate_rejects_non_explicit_or_non_json_selectors(monkeypatch) -> None:
+    mod = load_wrapper_module()
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("subprocess must not be called")
+
+    monkeypatch.setattr(mod.subprocess, "run", fail_run)
+    invalid = [
+        ["diagnose", "--gate", "--json"],
+        ["diagnose", "--latest", "--gate", "--json"],
+        ["diagnose", "--task", "task-1", "--gate", "--json"],
+        ["diagnose", "--trace", "trace-1", "--gate", "--human"],
+        ["diagnose", "--trace", "../bad", "--gate", "--json"],
+        ["diagnose", "--trace", "trace-1", "--timeline", "--gate", "--json"],
+    ]
+    for argv in invalid:
+        assert mod.main(argv) == 2
 
 
 def test_diagnose_unknown_stage_plan_is_blocked_with_empty_surface(monkeypatch, capsys, tmp_path: Path) -> None:

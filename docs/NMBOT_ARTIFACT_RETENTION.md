@@ -7,6 +7,12 @@ not remove rollback, provenance, regression, or historical evidence. It does
 not prove a live release, production readiness, or an artifact's external
 backup status.
 
+The separate encrypted full-text store planned for the PROD live dialogue
+monitor is not covered by the generic `unknown` log class. Its approved target
+retention is exactly 30 days with automatic purge, subject to explicit owner
+assignment, implementation, tests, and documentation of the purge receipt.
+Until the monitor is implemented, no such store or purge job is asserted.
+
 Before any move or deletion, check the artifact owner, manifest/README, local
 backlinks, and the relevant tests. A missing direct import is not proof that an
 artifact is unused.

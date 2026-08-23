@@ -26,6 +26,10 @@ production behavior. In short: this guide is not proof of live production behavi
   the bridge to the private API; outbound terminal delivery is `BOT_MESSAGE`.
   `INVITE_AGENT` is only for live-operator handoff. Source owner summary lives in
   `AGENTS.md` and operations details live in `docs/NMBOT_OPERATIONS_MAP.md`.
+- The approved but not implemented PROD live dialogue monitor is specified in
+  `docs/NMBOT_LIVE_MONITOR_PLAN.md`. It is a separate read-only observation
+  surface; it does not replace Jivo, own replies, or prove current production
+  behavior.
 
 ## Safe local workflow
 

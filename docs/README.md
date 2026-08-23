@@ -17,6 +17,7 @@ may link or redirect here, but should not become duplicate owner docs.
 
 - `current` [`CURRENT_ARCHITECTURE.md`](CURRENT_ARCHITECTURE.md) — compact current system map and safe local workflow.
 - `current` [`NMBOT_OPERATIONS_MAP.md`](NMBOT_OPERATIONS_MAP.md) — owners, contour boundaries and stop/go lifecycle map.
+- `planning` [`NMBOT_LIVE_MONITOR_PLAN.md`](NMBOT_LIVE_MONITOR_PLAN.md) — approved PROD live dialogue feed, push, privacy and rollout plan; not implemented truth.
 - `current` [`NMBOT_RUNTIME_VERSIONS.md`](NMBOT_RUNTIME_VERSIONS.md) — V0/V1/V2/V3/V4 separation passport.
 - `reference` [`NMBOT_VERSION_BOUNDARY_MAP.md`](NMBOT_VERSION_BOUNDARY_MAP.md) — short ownership and proof boundary map between versions.
 - `current` [`NMBOT_RUNTIME_REGISTRY.md`](NMBOT_RUNTIME_REGISTRY.md) — runtime selector and version ownership registry.

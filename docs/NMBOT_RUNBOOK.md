@@ -15,6 +15,14 @@ Source: confirmed by the release owner on 2026-08-20. This link opens the
 client chat; it is not proof of API health, active runtime version or message
 delivery. Use the VPS read-only diagnostics below for those checks.
 
+## Approved live-monitor plan
+
+The separate read-only PROD dialogue feed and Web Push design is documented in
+[`NMBOT_LIVE_MONITOR_PLAN.md`](NMBOT_LIVE_MONITOR_PLAN.md). It is planning only:
+no monitor service, public HTTPS endpoint, push subscription or retention job
+is currently asserted by this runbook. Do not treat the planned URL or target
+contour as a live availability claim.
+
 ### Current public V6 release
 
 On 2026-08-20 the actual `client-production` contour was migrated to immutable

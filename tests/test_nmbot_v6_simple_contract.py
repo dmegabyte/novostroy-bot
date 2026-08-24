@@ -275,7 +275,7 @@ def test_prompts_define_genuine_ambiguity_and_unique_typo_contract_statically():
     assert "ключи facts, near и missing запрещены" in prompt1
     assert "внутренний список максимум 5" in prompt1
     assert "в порядке от лучшей/наиболее релевантной" in prompt1
-    assert "Prompt 2 получает не более 3 объектов суммарно, сначала facts, затем near" in prompt1
+    assert "Граница публикации перед Prompt 2" not in prompt1
     assert "ambiguity не null" in prompt2
     assert "только о параметре ambiguity.parameter" in prompt2
     assert "д о509" not in prompt1
@@ -287,7 +287,7 @@ def test_h150_prompt2_freezes_one_question_intent_by_priority_statically():
     assert "offer_specialist_now=true, это высший приоритет" in prompt2
     assert "обрабатывай только одно непосредственно предыдущее предложение" in prompt2
     assert "если пригодные facts и near пусты, выбери ровно один следующий слот" in prompt2
-    assert "Заморозь выбранный внутренний intent вопроса" in prompt2
+    assert "Зафиксируй выбранный речевой акт" in prompt2
     assert "Абсолютно запрещены слова «или» и «либо» в final_question" in prompt2
     assert "Какой максимальный бюджет учитывать при повторном поиске?" in prompt2
     assert "Рассмотреть альтернативные варианты в других районах или с другими параметрами?" in prompt2
@@ -296,7 +296,7 @@ def test_h150_prompt2_freezes_one_question_intent_by_priority_statically():
 
 def test_h151_prompt2_orders_ownership_act_choice_and_short_answer_rules_statically():
     prompt2 = (ROOT / "prompts" / "v6_simple_answer_writer.txt").read_text(encoding="utf-8")
-    ownership = prompt2.index("Ты владеешь только смыслом опубликованных response и final_question")
+    ownership = prompt2.index("Ты — консультант по новостройкам")
     act_choice = prompt2.index("СНАЧАЛА ВЫБЕРИ ОДИН РЕЧЕВОЙ АКТ")
     short_answers = prompt2.index("OPEN_SLOT И CLOSED_ACTION: КОРОТКИЕ ОТВЕТЫ")
     grounding = prompt2.index("ИСТОЧНИКИ И GROUNDING")
@@ -333,7 +333,7 @@ def test_h151_prompt2_has_exact_closed_speech_act_set_statically():
     }
     assert {line.removeprefix("- ").removesuffix(";").removesuffix(".")
             for line in closed_set.splitlines() if line.startswith("- ")} == expected
-    assert "Заморозь выбранный внутренний intent вопроса: речевой акт вместе с его единственным parameter, action или subject" in prompt2
+    assert "Зафиксируй выбранный речевой акт вместе с его единственным parameter, action или subject" in prompt2
 
 
 def test_h151_prompt2_open_slot_yes_handling_and_templates_are_static():

@@ -31,6 +31,6 @@ def test_finance_keeps_existing_v6_speech_act_and_specialist_ownership():
     assert "Не создавай новые маршруты или вопросы" in PROMPT
     assert "только при dialogue_policy.offer_specialist_now=true" in PROMPT
     assert "Для ANSWER_ONLY final_question может быть пустым" in PROMPT
-    assert "ровно один существующий вопрос V6" in PROMPT
+    assert "ровно один вопрос, соответствующий выбранному речевому акту" in PROMPT
     assert '"action":"reply"' in PROMPT
-    assert "Никогда не выбирай request_phone" in PROMPT
+    assert "Значение request_phone запрещено" in PROMPT

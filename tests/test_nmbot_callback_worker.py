@@ -10,6 +10,7 @@ from typing import Any
 
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "nmbot_callback_outbox"
 sys.path.insert(0, str(SCRIPT_DIR))
 
 outbox_spec = importlib.util.spec_from_file_location("nmbot_crm_outbox_worker_test", SCRIPT_DIR / "nmbot_crm_outbox.py")
@@ -35,6 +36,16 @@ worker_mod = importlib.util.module_from_spec(worker_spec)
 assert worker_spec and worker_spec.loader
 sys.modules[worker_spec.name] = worker_mod
 worker_spec.loader.exec_module(worker_mod)
+
+
+def test_outbox_compatibility_fixture_matrix_is_explicit() -> None:
+    sheet_only = json.loads((FIXTURE_DIR / "v2-sheet-only.json").read_text(encoding="utf-8"))
+    dual_sink = json.loads((FIXTURE_DIR / "v2-dual-sink.json").read_text(encoding="utf-8"))
+
+    assert sheet_only["schema"] == outbox_mod.SCHEMA_V2
+    assert dual_sink["schema"] == outbox_mod.SCHEMA_V2
+    assert sheet_only["crm_delivery_present"] is False
+    assert dual_sink["crm_delivery_status"] == "pending_summary"
 
 
 def make_record(tmp_path: Path, *, name: str = "Иван", phone: str = "+79991234567") -> tuple[Any, str]:

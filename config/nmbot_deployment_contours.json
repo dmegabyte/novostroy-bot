@@ -8,8 +8,12 @@
       "environment_file": "/home/neiro/novostroy-bot/.env",
       "services": {
         "api": "novostroy-bot-api.service",
-        "bridge": "novostroy-bot-n8n-bridge.service"
+        "bridge": "novostroy-bot-n8n-bridge.service",
+        "callback_worker": "nmbot-callback-sheet-worker.service"
       },
+      "callback_worker_unit": "/home/neiro/.config/systemd/user/nmbot-callback-sheet-worker.service",
+      "worker_release_root": "/home/neiro/novostroy-bot/worker-releases",
+      "worker_current": "/home/neiro/novostroy-bot/worker-current",
       "health_urls": {
         "api": "http://127.0.0.1:8088/health",
         "bridge": "http://127.0.0.1:8093/health"
@@ -23,8 +27,12 @@
       "environment_file": "/home/neiro/novostroy-bot-client-production/.env.client-production",
       "services": {
         "api": "novostroy-bot-client-production-api.service",
-        "bridge": "novostroy-bot-client-production-n8n-bridge.service"
+        "bridge": "novostroy-bot-client-production-n8n-bridge.service",
+        "callback_worker": "nmbot-client-production-callback-sheet-worker.service"
       },
+      "callback_worker_unit": "/home/neiro/.config/systemd/user/nmbot-client-production-callback-sheet-worker.service",
+      "worker_release_root": "/home/neiro/novostroy-bot-client-production/worker-releases",
+      "worker_current": "/home/neiro/novostroy-bot-client-production/worker-current",
       "health_urls": {
         "api": "http://127.0.0.1:8188/health",
         "bridge": "http://127.0.0.1:8193/health"

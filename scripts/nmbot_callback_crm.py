@@ -67,8 +67,13 @@ class CallbackCRMAdapter:
             return CRMResult(status="failed", error_class=f"crm_http_{status}")
         if not 200 <= status <= 299:
             return CRMResult(status="failed", error_class="crm_http_terminal")
+        # The configured CRM accepts a valid callback with an empty 2xx body.
+        # A non-empty response remains strict so an HTML/error payload cannot
+        # be mistaken for a durable lead receipt.
+        if not raw:
+            return CRMResult(status="ok")
         try:
-            response = json.loads(raw.decode("utf-8")) if raw else {}
+            response = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
             return CRMResult(status="failed", error_class="crm_invalid_response")
         if not isinstance(response, dict) or response.get("ok") is not True:

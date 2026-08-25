@@ -1,0 +1,6 @@
+{
+  "schema": "nmbot.callback_sheet_outbox.v2",
+  "fixture": "producer-v2-worker-v2",
+  "crm_delivery_present": false,
+  "sheet_delivery_status": "pending"
+}

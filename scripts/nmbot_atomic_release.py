@@ -64,6 +64,7 @@ CALLBACK_WORKER_UNIT = "/home/neiro/.config/systemd/user/nmbot-callback-sheet-wo
 API_HEALTH_URL = "http://127.0.0.1:8088/health"
 BRIDGE_HEALTH_URL = "http://127.0.0.1:8093/health"
 BRIDGE_SCHEMA_VERSION = "nmbot.bridge_release.v1"
+WORKER_SCHEMA_VERSION = "nmbot.worker_release.v1"
 BRIDGE_SNAPSHOT_SCHEMA_VERSION = "nmbot.bridge_source_snapshot.v1"
 BRIDGE_WORKTREE_PROVENANCE_SCHEMA = "nmbot.bridge_snapshot_worktree_provenance.v1"
 BRIDGE_CURRENT = "bridge-current"
@@ -77,6 +78,20 @@ BRIDGE_ALLOWED_FILES = (
     "scripts/nmbot_egress_policy.py",
 )
 BRIDGE_IMPORT_MODULES = ("scripts.nmbot_n8n_bridge_server",)
+WORKER_ENTRYPOINT = "scripts/nmbot_callback_sheet_worker.py"
+WORKER_IMPORT_MODULES = ("nmbot_callback_sheet_worker",)
+WORKER_REQUIRED_DEPENDENCIES = ("google.oauth2", "googleapiclient.discovery")
+WORKER_OUTBOX_COMPATIBILITY = {"schema": "nmbot.callback_sheet_outbox.v2", "producer": ["v2"], "consumer": ["v2"]}
+WORKER_RUNTIME_FILES = frozenset({
+    "requirements-worker.txt",
+    "scripts/nmbot_callback_sheet_worker.py",
+    "scripts/nmbot_callback_summary.py",
+    "scripts/nmbot_callback_crm.py",
+    "scripts/nmbot_callback_crm_control.py",
+    "scripts/nmbot_callback_crm_delivery_check.py",
+    "scripts/nmbot_crm_outbox.py",
+    "scripts/nmbot_google_sheets.py",
+})
 BRIDGE_SOURCE_SCOPES = ("bridge_canonical", "api_current", "bridge_current")
 IDENTITY_IN_RELEASE = "release_identity/nmbot_release_identity.json"
 IDENTITY_EXTERNAL = "data/nmbot_release_identity.json"
@@ -174,6 +189,7 @@ HEX_RE = re.compile(r"[0-9a-f]{64}")
 SAFE_GENERATED_AT_RE = re.compile(r"[A-Za-z0-9:._+\-TZ]{1,80}")
 ARCHIVE_RE = re.compile(r"nmbot-[A-Za-z0-9][A-Za-z0-9._-]{2,79}\.tar\.gz")
 BRIDGE_ARCHIVE_RE = re.compile(r"nmbot-bridge-[A-Za-z0-9][A-Za-z0-9._-]{2,79}\.tar\.gz")
+WORKER_ARCHIVE_RE = re.compile(r"nmbot-worker-[A-Za-z0-9][A-Za-z0-9._-]{2,79}\.tar\.gz")
 MAX_FILES = 2000
 MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_BYTES = 100 * 1024 * 1024
@@ -346,6 +362,56 @@ class Artifact:
     archive: Path
     manifest: Path
     manifest_data: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class WorkerContourDescriptor:
+    name: str
+    remote_root: str
+    environment_file: str
+    api_service: str
+    bridge_service: str
+    service: str
+    unit: str
+    release_root: str
+    current: str
+
+
+def load_worker_contour_descriptor(contour: str) -> WorkerContourDescriptor:
+    """Load the worker target without allowing worker/CRM deployment to TEST."""
+    if contour != "client-production":
+        raise ReleaseError("worker releases are client-production only")
+    try:
+        raw = json.loads((ROOT / "config/nmbot_deployment_contours.json").read_text(encoding="utf-8"))
+        item = raw["contours"][contour]
+        services = item["services"]
+        descriptor = WorkerContourDescriptor(
+            name=contour,
+            remote_root=item["remote_root"],
+            environment_file=item["environment_file"],
+            api_service=services["api"],
+            bridge_service=services["bridge"],
+            service=services["callback_worker"],
+            unit=item["callback_worker_unit"],
+            release_root=item["worker_release_root"],
+            current=item["worker_current"],
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ReleaseError("worker contour registry is invalid") from exc
+    if descriptor.remote_root != CLIENT_PRODUCTION_REMOTE_ROOT:
+        raise ReleaseError("worker contour root mismatch")
+    expected = {
+        "environment_file": f"{descriptor.remote_root}/.env.client-production",
+        "release_root": f"{descriptor.remote_root}/worker-releases",
+        "current": f"{descriptor.remote_root}/worker-current",
+        "unit": "/home/neiro/.config/systemd/user/nmbot-client-production-callback-sheet-worker.service",
+        "service": "nmbot-client-production-callback-sheet-worker.service",
+        "api_service": "novostroy-bot-client-production-api.service",
+        "bridge_service": "novostroy-bot-client-production-n8n-bridge.service",
+    }
+    if any(getattr(descriptor, key) != value for key, value in expected.items()):
+        raise ReleaseError("worker contour contract mismatch")
+    return descriptor
 
 
 class SshRemote:
@@ -1949,6 +2015,407 @@ def bridge_preflight(*, archive: Path, manifest_path: Path) -> str:
         if proc.returncode != 0:
             raise ReleaseError((proc.stdout + proc.stderr)[-2000:])
     return f"bridge-preflight=ok release_id={manifest['release_id']} files={len(manifest['files'])} py_compile={len(BRIDGE_ALLOWED_FILES)} import_modules={len(BRIDGE_IMPORT_MODULES)}\n"
+
+
+def _release_tool_commit() -> str:
+    proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True, capture_output=True, check=False)
+    commit = proc.stdout.strip()
+    if proc.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ReleaseError("worker build requires a committed release tool")
+    return commit
+
+
+def _worker_source_rows(source_dir: Path) -> list[dict[str, Any]]:
+    return _file_records_with_metadata(_profile_runtime_files(source_dir, WORKER_RUNTIME_FILES, "worker"), source_dir)
+
+
+def _worker_unit_text(descriptor: WorkerContourDescriptor) -> str:
+    return f"""[Unit]
+Description=NMBOT client-production callback worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory={descriptor.current}
+EnvironmentFile={descriptor.environment_file}
+ExecStart=/usr/bin/python3 {descriptor.current}/{WORKER_ENTRYPOINT} --loop --poll-seconds 5
+Restart=always
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def build_worker_from_worktree(*, worktree_dir: Path, release_id: str, out_dir: Path, contour: str) -> Artifact:
+    """Build a worker-only artifact from an immutable prepared source copy."""
+    descriptor = load_worker_contour_descriptor(contour)
+    verified = verify_prepared_worktree(worktree_dir)
+    source = Path(verified["source_dir"])
+    rows = _worker_source_rows(source)
+    rid = _release_id(release_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    archive = out_dir / f"nmbot-worker-{rid}.tar.gz"
+    manifest_path = out_dir / f"nmbot-worker-{rid}.manifest.json"
+    if os.path.lexists(archive) or os.path.lexists(manifest_path):
+        raise ReleaseError("refusing to overwrite existing immutable worker artifact")
+    provenance = verified["provenance"]
+    source_provenance = {
+        "snapshot_id": provenance["snapshot_id"],
+        "snapshot_manifest_sha256": provenance["snapshot_manifest_sha256"],
+        "source_host": provenance["source_host"],
+        "remote_root": provenance["remote_root"],
+        "contour": provenance["contour"],
+        "prepared_source_tree_sha256": verified["source_tree_sha256"],
+        "prepared_source_manifest_sha256": verified["source_manifest_sha256"],
+    }
+    if source_provenance["contour"] != descriptor.name or source_provenance["remote_root"] != descriptor.remote_root:
+        raise ReleaseError("worker prepared source does not belong to target contour")
+    with archive.open("wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz, tarfile.open(fileobj=gz, mode="w", format=tarfile.PAX_FORMAT) as tf:
+        for row in rows:
+            path = source / row["path"]
+            info = tf.gettarinfo(str(path), arcname=row["path"])
+            info.uid = info.gid = 0; info.uname = info.gname = ""; info.mtime = 0; info.mode = row["mode"]
+            with path.open("rb") as fh:
+                tf.addfile(info, fh)
+    manifest = {
+        "schema_version": WORKER_SCHEMA_VERSION,
+        "scope": "worker",
+        "release_id": rid,
+        "created_at_utc": "deterministic-build-clock-not-recorded",
+        "archive_name": archive.name,
+        "archive_sha256": _sha256_file(archive),
+        "files": rows,
+        "entrypoints": [WORKER_ENTRYPOINT],
+        "import_modules": list(WORKER_IMPORT_MODULES),
+        "service": descriptor.service,
+        "forbidden_services": [descriptor.api_service, descriptor.bridge_service],
+        "unit_contract": {"path": descriptor.unit, "working_directory": descriptor.current, "environment_file": descriptor.environment_file, "execstart": f"/usr/bin/python3 {descriptor.current}/{WORKER_ENTRYPOINT} --loop --poll-seconds 5"},
+        "outbox_compatibility": WORKER_OUTBOX_COMPATIBILITY,
+        "release_tool_commit": _release_tool_commit(),
+        "source_provenance": source_provenance,
+    }
+    validate_worker_manifest(manifest, descriptor=descriptor)
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return Artifact(archive=archive, manifest=manifest_path, manifest_data=manifest)
+
+
+def validate_worker_manifest(manifest: dict[str, Any], *, descriptor: WorkerContourDescriptor) -> None:
+    allowed = {"schema_version", "scope", "release_id", "created_at_utc", "archive_name", "archive_sha256", "files", "entrypoints", "import_modules", "service", "forbidden_services", "unit_contract", "outbox_compatibility", "release_tool_commit", "source_provenance"}
+    if not isinstance(manifest, dict) or set(manifest) != allowed:
+        raise ReleaseError("worker manifest keys mismatch")
+    rid = _release_id(manifest["release_id"])
+    if manifest["schema_version"] != WORKER_SCHEMA_VERSION or manifest["scope"] != "worker":
+        raise ReleaseError("unsupported worker manifest schema")
+    if manifest["archive_name"] != f"nmbot-worker-{rid}.tar.gz" or not WORKER_ARCHIVE_RE.fullmatch(manifest["archive_name"]):
+        raise ReleaseError("invalid worker archive name")
+    if not HEX_RE.fullmatch(manifest["archive_sha256"]):
+        raise ReleaseError("invalid worker archive hash")
+    if manifest["service"] != descriptor.service or manifest["forbidden_services"] != [descriptor.api_service, descriptor.bridge_service]:
+        raise ReleaseError("worker manifest service isolation mismatch")
+    if manifest["entrypoints"] != [WORKER_ENTRYPOINT] or manifest["import_modules"] != list(WORKER_IMPORT_MODULES):
+        raise ReleaseError("worker manifest entry/import mismatch")
+    if manifest["unit_contract"] != {"path": descriptor.unit, "working_directory": descriptor.current, "environment_file": descriptor.environment_file, "execstart": f"/usr/bin/python3 {descriptor.current}/{WORKER_ENTRYPOINT} --loop --poll-seconds 5"}:
+        raise ReleaseError("worker manifest unit contract mismatch")
+    if manifest["outbox_compatibility"] != WORKER_OUTBOX_COMPATIBILITY or not re.fullmatch(r"[0-9a-f]{40}", manifest["release_tool_commit"]):
+        raise ReleaseError("worker manifest compatibility/tool provenance mismatch")
+    rows = manifest["files"]
+    if not isinstance(rows, list) or {row.get("path") for row in rows if isinstance(row, dict)} != set(WORKER_RUNTIME_FILES):
+        raise ReleaseError("worker manifest file set must exactly match allowlist")
+    if rows != sorted(rows, key=lambda row: row["path"]):
+        raise ReleaseError("worker manifest files must be sorted")
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"path", "sha256", "size", "mode"} or row["path"] not in WORKER_RUNTIME_FILES or not HEX_RE.fullmatch(str(row["sha256"])):
+            raise ReleaseError("worker manifest file row invalid")
+    provenance = manifest["source_provenance"]
+    required = {"snapshot_id", "snapshot_manifest_sha256", "source_host", "remote_root", "contour", "prepared_source_tree_sha256", "prepared_source_manifest_sha256"}
+    if not isinstance(provenance, dict) or set(provenance) != required or provenance["remote_root"] != descriptor.remote_root or provenance["contour"] != descriptor.name:
+        raise ReleaseError("worker manifest source provenance mismatch")
+    if provenance["source_host"] != AUTHORIZED_DEPLOY_HOST or any(not isinstance(provenance[key], str) or not provenance[key] for key in required):
+        raise ReleaseError("worker manifest source provenance invalid")
+
+
+def load_worker_manifest(path: Path, *, descriptor: WorkerContourDescriptor) -> dict[str, Any]:
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    validate_worker_manifest(manifest, descriptor=descriptor)
+    return manifest
+
+
+def _safe_extract_worker(archive: Path, dest: Path) -> None:
+    with tarfile.open(archive, "r:gz") as tf:
+        members = tf.getmembers()
+        if {member.name for member in members} != set(WORKER_RUNTIME_FILES):
+            raise ReleaseError("worker archive member set mismatch")
+        for member in members:
+            if not member.isfile() or member.issym() or member.islnk() or member.isdev():
+                raise ReleaseError("unsafe worker archive member")
+        dest.mkdir(parents=True, exist_ok=True)
+        tf.extractall(dest, filter="data")
+
+
+def _worker_remote_preflight_command(release_dir: str) -> str:
+    """Preflight exactly the worker closure without reusing API profiles."""
+    payload = json.dumps({
+        "files": sorted(path for path in WORKER_RUNTIME_FILES if path.endswith(".py")),
+        "modules": list(WORKER_IMPORT_MODULES),
+        "dependencies": list(WORKER_REQUIRED_DEPENDENCIES),
+    }, sort_keys=True)
+    code = r'''
+import hashlib, importlib, json, os, pathlib, py_compile, sys, tempfile
+cfg=json.loads(sys.argv[1]); root=pathlib.Path.cwd().resolve()
+def fail(msg): print(json.dumps({"ok":False,"error":msg})); sys.exit(2)
+def snapshot():
+ out={}
+ for p in root.rglob("*"):
+  if p.is_file() and not p.is_symlink(): out[str(p.relative_to(root))]=hashlib.sha256(p.read_bytes()).hexdigest()
+ return out
+before=snapshot()
+with tempfile.TemporaryDirectory(prefix="nmbot-worker-preflight-") as td:
+ for i,rel in enumerate(cfg["files"]):
+  p=root/rel
+  if not p.is_file() or p.is_symlink(): fail("worker compile file missing: "+rel)
+  py_compile.compile(str(p),cfile=str(pathlib.Path(td)/(str(i)+".pyc")),doraise=True)
+sys.path[:]=[str(root),str(root/"scripts")]+[p for p in sys.path if p and pathlib.Path(p).resolve() not in {root,root/"scripts"}]
+for name in cfg["modules"]+cfg["dependencies"]: importlib.import_module(name)
+if snapshot()!=before: fail("worker release changed during preflight")
+print(json.dumps({"ok":True,"files":len(cfg["files"]),"imports":len(cfg["modules"]),"dependencies":len(cfg["dependencies"])}))
+'''
+    return " && ".join([
+        "test -d " + shlex.quote(release_dir),
+        "cd " + shlex.quote(release_dir),
+        "PYTHONPATH=" + shlex.quote(release_dir + os.pathsep + release_dir.rstrip("/") + "/scripts") + " PYTHONDONTWRITEBYTECODE=1 python3 -c " + shlex.quote(code) + " " + shlex.quote(payload),
+    ])
+
+
+def worker_preflight(*, archive: Path, manifest_path: Path, contour: str) -> str:
+    descriptor = load_worker_contour_descriptor(contour)
+    manifest = load_worker_manifest(manifest_path, descriptor=descriptor)
+    if archive.name != manifest["archive_name"] or _sha256_file(archive) != manifest["archive_sha256"]:
+        raise ReleaseError("worker archive hash/name mismatch")
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp) / "worker"
+        _safe_extract_worker(archive, root)
+        actual = _worker_source_rows(root)
+        if actual != manifest["files"]:
+            raise ReleaseError("worker extracted file set/hash mismatch")
+        for index, row in enumerate(actual):
+            if row["path"].endswith(".py"):
+                py_compile.compile(str(root / row["path"]), cfile=str(Path(tmp) / f"worker-{index}.pyc"), doraise=True)
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        env["PYTHONPATH"] = os.pathsep.join([str(root), str(root / "scripts")])
+        code = "import importlib; importlib.import_module('nmbot_callback_sheet_worker'); import google.oauth2, googleapiclient.discovery; print('worker-import=ok')"
+        proc = subprocess.run([sys.executable, "-c", code], cwd=root, env=env, text=True, capture_output=True, check=False)
+        if proc.returncode != 0:
+            raise ReleaseError((proc.stdout + proc.stderr)[-2000:])
+    return f"worker-preflight=ok release_id={manifest['release_id']} files={len(manifest['files'])} import_modules=1\n"
+
+
+def _worker_unit_migrate_command(descriptor: WorkerContourDescriptor) -> str:
+    payload = json.dumps({"unit": descriptor.unit, "text": _worker_unit_text(descriptor)}, sort_keys=True)
+    code = r'''
+import json, os, pathlib, subprocess, sys, tempfile
+cfg=json.loads(sys.argv[1]); unit=pathlib.Path(cfg["unit"]); text=cfg["text"]
+def fail(msg): print(json.dumps({"ok":False,"error":msg})); sys.exit(2)
+if not unit.parent.is_dir() or unit.parent.is_symlink(): fail("worker unit directory missing or unsafe")
+if os.path.lexists(unit):
+    if unit.is_symlink() or not unit.is_file(): fail("worker unit has unsafe type")
+    existing=unit.read_text(encoding="utf-8")
+    if existing == text: print(json.dumps({"ok":True,"changed":False})); sys.exit(0)
+    legacy=("/current/scripts/nmbot_callback_sheet_worker.py" in existing and "worker-current" not in existing)
+    if not legacy: fail("worker unit has a different contract")
+    backup=unit.with_name(unit.name+".legacy")
+    if os.path.lexists(backup): fail("worker legacy backup exists")
+    os.replace(unit, backup)
+fd,tmp=tempfile.mkstemp(prefix="."+unit.name+".worker.", dir=str(unit.parent)); os.close(fd)
+try:
+    pathlib.Path(tmp).write_text(text, encoding="utf-8"); os.chmod(tmp,0o600); os.replace(tmp,unit)
+finally: pathlib.Path(tmp).unlink(missing_ok=True)
+subprocess.run(["systemctl","--user","daemon-reload"],check=True,timeout=20)
+print(json.dumps({"ok":True,"changed":True}))
+'''
+    return "python3 -c " + shlex.quote(code) + " " + shlex.quote(payload)
+
+
+def _worker_unit_ready_command(descriptor: WorkerContourDescriptor) -> str:
+    payload = json.dumps({"unit": descriptor.unit, "text": _worker_unit_text(descriptor)}, sort_keys=True)
+    return "python3 -c " + shlex.quote("import json,pathlib,sys; c=json.loads(sys.argv[1]); p=pathlib.Path(c['unit']); ok=p.is_file() and not p.is_symlink() and p.read_text(encoding='utf-8')==c['text']; print(json.dumps({'ok':ok})); sys.exit(0 if ok else 2)") + " " + shlex.quote(payload)
+
+
+def _worker_state_command(descriptor: WorkerContourDescriptor) -> str:
+    payload = json.dumps({"current": descriptor.current, "release_root": descriptor.release_root, "service": descriptor.service}, sort_keys=True)
+    code = r'''
+import json, os, pathlib, re, subprocess, sys
+c=json.loads(sys.argv[1]); current=pathlib.Path(c["current"]); releases=pathlib.Path(c["release_root"])
+def fail(msg): print(json.dumps({"ok":False,"error":msg})); sys.exit(2)
+previous=""
+if os.path.lexists(current):
+ if not current.is_symlink(): fail("worker-current is not a symlink")
+ target=os.readlink(current)
+ if not target.startswith("worker-releases/"): fail("worker-current target is unsafe")
+ previous=target.rsplit("/",1)[-1]
+ if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{2,79}",previous) or not (releases/previous).is_dir(): fail("worker-current target is invalid")
+state=subprocess.run(["systemctl","--user","is-active",c["service"]],text=True,capture_output=True,timeout=15)
+active=(state.stdout.strip()=="active")
+print(json.dumps({"ok":True,"previous":previous,"active":active}))
+'''
+    return "python3 -c " + shlex.quote(code) + " " + shlex.quote(payload)
+
+
+def _worker_ready_command(descriptor: WorkerContourDescriptor, release_id: str, expected_files: list[dict[str, Any]]) -> str:
+    payload = json.dumps({"current": descriptor.current, "release_root": descriptor.release_root, "service": descriptor.service, "unit": descriptor.unit, "text": _worker_unit_text(descriptor), "release_id": _release_id(release_id), "files": expected_files}, sort_keys=True)
+    code = r'''
+import hashlib, json, os, pathlib, re, subprocess, sys
+c=json.loads(sys.argv[1]); current=pathlib.Path(c["current"]); releases=pathlib.Path(c["release_root"]); unit=pathlib.Path(c["unit"])
+def fail(msg): print(json.dumps({"ok":False,"error":msg})); sys.exit(2)
+if not unit.is_file() or unit.is_symlink() or unit.read_text(encoding="utf-8")!=c["text"]: fail("worker unit contract mismatch")
+if not current.is_symlink() or os.readlink(current)!=("worker-releases/"+c["release_id"]): fail("worker-current identity mismatch")
+root=releases/c["release_id"]
+if not root.is_dir() or root.is_symlink(): fail("worker release directory invalid")
+for row in c["files"]:
+ p=root/row["path"]
+ if not p.is_file() or p.is_symlink() or hashlib.sha256(p.read_bytes()).hexdigest()!=row["sha256"]: fail("worker release hash mismatch")
+state=subprocess.run(["systemctl","--user","is-active",c["service"]],text=True,capture_output=True,timeout=15)
+if state.stdout.strip()!="active": fail("worker is not active")
+print(json.dumps({"ok":True,"release_id":c["release_id"],"active":True}))
+'''
+    return "python3 -c " + shlex.quote(code) + " " + shlex.quote(payload)
+
+
+def _worker_env_guard_command(descriptor: WorkerContourDescriptor) -> str:
+    payload = json.dumps({"root": descriptor.remote_root, "env": descriptor.environment_file}, sort_keys=True)
+    code = r'''
+import json, pathlib, shlex, sys
+cfg=json.loads(sys.argv[1]); root=pathlib.Path(cfg["root"]); env=pathlib.Path(cfg["env"])
+def fail(msg): print(json.dumps({"ok":False,"error":msg})); sys.exit(2)
+if not env.is_file() or env.is_symlink(): fail("worker environment file missing or unsafe")
+values={}
+for line in env.read_text(encoding="utf-8",errors="ignore").splitlines():
+ s=line.strip()
+ if not s or s.startswith("#") or "=" not in s: continue
+ k,v=s.split("=",1); k=k.strip().removeprefix("export ").strip()
+ try: values[k]=shlex.split(v,comments=False,posix=True)[0] if v.strip() else ""
+ except Exception: values[k]=v.strip().strip("'\"")
+required={"NMBOT_CONTOUR_PROFILE","NMBOT_CALLBACK_OUTBOX_DIR","NMBOT_CALLBACK_SHEET_ID","NMBOT_CALLBACK_SHEET_TAB","NMBOT_CALLBACK_LEDGER_DIR","NMBOT_CALLBACK_CRM_ENDPOINT","NMBOT_CALLBACK_CRM_CONTROL_FILE"}
+missing=sorted(key for key in required if not values.get(key,""))
+if missing: fail("worker missing env names: "+",".join(missing))
+if values["NMBOT_CONTOUR_PROFILE"]!="client_production": fail("worker contour profile mismatch")
+if values.get("NMBOT_CALLBACK_SUMMARY_PROVIDER","deterministic").strip().lower() not in ("", "deterministic"): fail("worker summary provider must be deterministic")
+for key in ("NMBOT_CALLBACK_OUTBOX_DIR","NMBOT_CALLBACK_LEDGER_DIR","NMBOT_CALLBACK_CRM_CONTROL_FILE"):
+ p=pathlib.Path(values[key]).resolve()
+ try: inside=p.is_relative_to(root.resolve())
+ except AttributeError: inside=str(p).startswith(str(root.resolve())+"/")
+ if not inside: fail("worker env path outside root: "+key)
+print(json.dumps({"ok":True}))
+'''
+    return "python3 -c " + shlex.quote(code) + " " + shlex.quote(payload)
+
+
+def migrate_worker_unit(*, contour: str, confirm: bool, remote: Remote) -> str:
+    if not confirm:
+        raise ReleaseError("worker-unit-migrate requires --confirm")
+    descriptor = load_worker_contour_descriptor(contour)
+    _remote_ok(remote.run(_worker_unit_migrate_command(descriptor)))
+    _remote_ok(remote.run(_worker_unit_ready_command(descriptor)))
+    return f"worker-unit-migrate=ok contour={descriptor.name}\n"
+
+
+def deploy_worker(*, release_id: str, archive: Path, manifest_path: Path, contour: str, confirm: bool, remote: Remote, source_snapshot_manifest_sha256: str) -> str:
+    """Switch only worker-current and restart only its dedicated service."""
+    if not confirm:
+        raise ReleaseError("worker-deploy requires --confirm")
+    descriptor = load_worker_contour_descriptor(contour)
+    manifest = load_worker_manifest(manifest_path, descriptor=descriptor)
+    if not HEX_RE.fullmatch(source_snapshot_manifest_sha256) or manifest["release_id"] != _release_id(release_id) or manifest["source_provenance"]["snapshot_manifest_sha256"] != source_snapshot_manifest_sha256:
+        raise ReleaseError("worker deploy artifact provenance mismatch")
+    worker_preflight(archive=archive, manifest_path=manifest_path, contour=contour)
+    _remote_ok(remote.run(_worker_unit_ready_command(descriptor)))
+    _remote_ok(remote.run(_worker_env_guard_command(descriptor)))
+    rid = manifest["release_id"]
+    staging = f"{descriptor.remote_root}/.worker-release-staging/{rid}"
+    release_dir = f"{descriptor.release_root}/{rid}"
+    lock = f"{descriptor.remote_root}/.worker-release-lock"
+    switched = False
+    previous = ""
+    previous_active = False
+    lock_acquired = False
+    deployment_error: Exception | None = None
+    cleanup_error: str | None = None
+    try:
+        _remote_ok(remote.run("mkdir " + shlex.quote(lock)))
+        lock_acquired = True
+        _remote_ok(remote.run("mkdir -p " + shlex.quote(descriptor.release_root)))
+        state = _remote_json(remote, _worker_state_command(descriptor))
+        previous = str(state.get("previous") or "")
+        previous_active = bool(state.get("active"))
+        exists = _remote_json(remote, "python3 -c " + shlex.quote("import json,os,pathlib,sys; p=pathlib.Path(json.loads(sys.argv[1])['path']); print(json.dumps({'ok':not os.path.lexists(p)}))") + " " + shlex.quote(json.dumps({"path": release_dir})))
+        if not exists.get("ok"):
+            raise ReleaseError("worker release id already exists; immutable releases cannot be overwritten")
+        _remote_ok(remote.run("mkdir -p " + shlex.quote(staging) + " " + shlex.quote(descriptor.release_root)))
+        _remote_ok(remote.upload(archive, f"{staging}/{archive.name}"))
+        _remote_ok(remote.upload(manifest_path, f"{staging}/{manifest_path.name}"))
+        # Remote extraction verifies exactly the worker manifest before cutover.
+        payload = json.dumps({"archive": f"{staging}/{archive.name}", "dest": release_dir, "files": manifest["files"]}, sort_keys=True)
+        code = r'''
+import hashlib,json,os,pathlib,sys,tarfile
+c=json.loads(sys.argv[1]); dest=pathlib.Path(c["dest"]); archive=pathlib.Path(c["archive"]); expected={x["path"]:x["sha256"] for x in c["files"]}; tmp=pathlib.Path(str(dest)+".tmp")
+def fail(msg): print(json.dumps({"ok":False,"error":msg})); sys.exit(2)
+if os.path.lexists(dest) or os.path.lexists(tmp): fail("worker release destination exists")
+tmp.mkdir(parents=True)
+try:
+ with tarfile.open(archive,"r:gz") as tf:
+  members=tf.getmembers()
+  if {m.name for m in members}!=set(expected): fail("worker archive member set mismatch")
+  if any(not m.isfile() or m.issym() or m.islnk() or m.isdev() for m in members): fail("worker archive member unsafe")
+  tf.extractall(tmp,filter="data")
+ actual={str(p.relative_to(tmp)):hashlib.sha256(p.read_bytes()).hexdigest() for p in tmp.rglob("*") if p.is_file() and not p.is_symlink()}
+ if actual!=expected: fail("worker archive hash mismatch")
+ os.replace(tmp,dest)
+except Exception:
+ if tmp.exists():
+  for p in sorted(tmp.rglob("*"),reverse=True):
+   if p.is_file() or p.is_symlink(): p.unlink(missing_ok=True)
+   elif p.is_dir(): p.rmdir()
+  tmp.rmdir()
+ raise
+print(json.dumps({"ok":True}))
+'''
+        _remote_ok(remote.run("python3 -c " + shlex.quote(code) + " " + shlex.quote(payload)))
+        _remote_ok(remote.run(_worker_remote_preflight_command(release_dir)))
+        tmp = f"{descriptor.remote_root}/.worker-current.{rid}.tmp"
+        _remote_ok(remote.run("ln -sfn " + shlex.quote(f"worker-releases/{rid}") + " " + shlex.quote(tmp) + " && mv -Tf " + shlex.quote(tmp) + " " + shlex.quote(descriptor.current)))
+        switched = True
+        _remote_ok(remote.run("systemctl --user restart " + shlex.quote(descriptor.service)))
+        _remote_ok(remote.run(_worker_ready_command(descriptor, rid, manifest["files"])))
+    except Exception as exc:
+        deployment_error = exc
+        if switched:
+            try:
+                if previous:
+                    tmp = f"{descriptor.remote_root}/.worker-current.rollback.tmp"
+                    _remote_ok(remote.run("ln -sfn " + shlex.quote(f"worker-releases/{previous}") + " " + shlex.quote(tmp) + " && mv -Tf " + shlex.quote(tmp) + " " + shlex.quote(descriptor.current)))
+                    if previous_active:
+                        _remote_ok(remote.run("systemctl --user restart " + shlex.quote(descriptor.service)))
+                    else:
+                        _remote_ok(remote.run("systemctl --user stop " + shlex.quote(descriptor.service)))
+                else:
+                    _remote_ok(remote.run("rm -f " + shlex.quote(descriptor.current) + " && systemctl --user stop " + shlex.quote(descriptor.service)))
+            except Exception as rollback_exc:
+                deployment_error = ReleaseError(f"worker deploy failed: {exc}; rollback failed: {rollback_exc}")
+    finally:
+        if lock_acquired:
+            cleanup = remote.run("rmdir " + shlex.quote(lock))
+            if cleanup.returncode != 0:
+                cleanup_error = (cleanup.stdout + cleanup.stderr)[-2000:] or "worker release lock cleanup failed"
+    if deployment_error:
+        if cleanup_error:
+            raise ReleaseError(f"{deployment_error}; worker release lock cleanup failed: {cleanup_error}") from deployment_error
+        raise deployment_error
+    if cleanup_error:
+        raise ReleaseError(f"worker deploy completed but lock cleanup failed; worker state is preserved: {cleanup_error}")
+    return json.dumps({"worker_deploy":"ok","release_id":rid,"previous_release_id":previous or None,"previous_active":previous_active}, sort_keys=True) + "\n"
 
 
 def _read_file_openat_no_follow(root: Path, rel: str, expected: dict[str, Any], *, test_api_overlay_paths: set[str] | frozenset[str] = frozenset()) -> tuple[bytes, int]:
@@ -4736,6 +5203,29 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     bdep.add_argument("--port", default=AUTHORIZED_DEPLOY_PORT)
     bdep.add_argument("--source-snapshot-manifest-sha256", required=True)
     bdep.add_argument("--confirm", action="store_true")
+    wbuild = sub.add_parser("build-worker-from-worktree")
+    wbuild.add_argument("--worktree-dir", type=Path, required=True)
+    wbuild.add_argument("--release-id", required=True)
+    wbuild.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    wbuild.add_argument("--contour", choices=("client-production",), required=True)
+    wpre = sub.add_parser("worker-preflight")
+    wpre.add_argument("--archive", type=Path, required=True)
+    wpre.add_argument("--manifest", type=Path, required=True)
+    wpre.add_argument("--contour", choices=("client-production",), required=True)
+    wunit = sub.add_parser("worker-unit-migrate")
+    wunit.add_argument("--contour", choices=("client-production",), required=True)
+    wunit.add_argument("--host", required=True)
+    wunit.add_argument("--port", default=AUTHORIZED_DEPLOY_PORT)
+    wunit.add_argument("--confirm", action="store_true")
+    wdep = sub.add_parser("worker-deploy")
+    wdep.add_argument("--release-id", required=True)
+    wdep.add_argument("--archive", type=Path, required=True)
+    wdep.add_argument("--manifest", type=Path, required=True)
+    wdep.add_argument("--contour", choices=("client-production",), required=True)
+    wdep.add_argument("--host", required=True)
+    wdep.add_argument("--port", default=AUTHORIZED_DEPLOY_PORT)
+    wdep.add_argument("--source-snapshot-manifest-sha256", required=True)
+    wdep.add_argument("--confirm", action="store_true")
     cmp_p = sub.add_parser("compare-snapshot")
     cmp_p.add_argument("--snapshot-dir", type=Path, required=True)
     cmp_p.add_argument("--project-root", type=Path, default=ROOT)
@@ -4832,6 +5322,17 @@ def main(argv: list[str] | None = None) -> int:
         elif command == "bridge-deploy":
             remote = SshRemote(host=args.host, port=args.port)
             print(bridge_deploy(release_id=args.release_id, archive=args.archive, manifest_path=args.manifest, confirm=args.confirm, remote=remote, host=args.host, port=args.port, source_snapshot_manifest_sha256=args.source_snapshot_manifest_sha256), end="")
+        elif command == "build-worker-from-worktree":
+            artifact = build_worker_from_worktree(worktree_dir=args.worktree_dir, release_id=args.release_id, out_dir=args.out_dir, contour=args.contour)
+            print(json.dumps({"build": "ok", "scope": "worker", "release_id": artifact.manifest_data["release_id"], "archive": str(artifact.archive), "manifest": str(artifact.manifest)}, ensure_ascii=False, sort_keys=True))
+        elif command == "worker-preflight":
+            print(worker_preflight(archive=args.archive, manifest_path=args.manifest, contour=args.contour), end="")
+        elif command == "worker-unit-migrate":
+            remote = SshRemote(host=args.host, port=args.port)
+            print(migrate_worker_unit(contour=args.contour, confirm=args.confirm, remote=remote), end="")
+        elif command == "worker-deploy":
+            remote = SshRemote(host=args.host, port=args.port)
+            print(deploy_worker(release_id=args.release_id, archive=args.archive, manifest_path=args.manifest, contour=args.contour, confirm=args.confirm, remote=remote, source_snapshot_manifest_sha256=args.source_snapshot_manifest_sha256), end="")
         else:
             raise ReleaseError(f"unknown command: {command}")
     except Exception as exc:

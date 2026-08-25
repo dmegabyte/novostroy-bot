@@ -145,6 +145,8 @@ def test_adapter_allowlist_and_classification_without_network(monkeypatch) -> No
     assert not terminal.retryable and terminal.error_class == "crm_http_401"
     invalid = CallbackCRMAdapter(endpoint="x", transport=lambda *_: (200, b"[]")).send_callback(phone="p", name="n", summary="s")
     assert invalid.error_class == "crm_invalid_response"
+    empty_success = CallbackCRMAdapter(endpoint="x", transport=lambda *_: (200, b"")).send_callback(phone="p", name="n", summary="s")
+    assert empty_success.status == "ok"
     missing = CallbackCRMAdapter(endpoint="", transport=lambda *_: (_ for _ in ()).throw(AssertionError())).send_callback(phone="p", name="n", summary="s")
     assert missing.error_class == "crm_configuration_error"
 

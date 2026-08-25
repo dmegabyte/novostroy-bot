@@ -361,6 +361,29 @@ class BridgeRemote:
         return subprocess.CompletedProcess([], 0, stdout="", stderr="")
 
 
+class WorkerRemote:
+    def __init__(self, *, previous: str = "worker-old", active: bool = True, fail: str | None = None) -> None:
+        self.previous = previous
+        self.active = active
+        self.fail = fail
+        self.commands: list[str] = []
+        self.uploads: list[tuple[Path, str]] = []
+
+    def run(self, command: str, *, input_text: str | None = None):
+        self.commands.append(command)
+        if self.fail and self.fail in command:
+            return subprocess.CompletedProcess([], 1, stdout="", stderr="worker-boom")
+        if "worker-current target is unsafe" in command:
+            return subprocess.CompletedProcess([], 0, stdout=json.dumps({"ok": True, "previous": self.previous, "active": self.active}) + "\n", stderr="")
+        if "worker release id already exists" in command:
+            return subprocess.CompletedProcess([], 0, stdout=json.dumps({"ok": True}) + "\n", stderr="")
+        return subprocess.CompletedProcess([], 0, stdout=json.dumps({"ok": True}) + "\n", stderr="")
+
+    def upload(self, local: Path, remote_path: str):
+        self.uploads.append((local, remote_path))
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+
 def _copy_bridge_sources(dest: Path) -> None:
     for relpath in rel.BRIDGE_ALLOWED_FILES:
         target = dest / relpath
@@ -377,6 +400,54 @@ def _build_bridge_artifact(tmp_path: Path, *, release_id: str = "bridge-rel-001"
     work = rel.prepare_bridge_worktree(snapshot_dir=Path(snap["snapshot_dir"]), out_dir=base / "work")
     artifact = rel.build_bridge_from_worktree(worktree_dir=Path(work["worktree_dir"]), release_id=release_id, out_dir=tmp_path / "out")
     return artifact, snap["manifest_sha256"]
+
+
+def _build_worker_artifact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, release_id: str = "worker-rel-001") -> rel.Artifact:
+    source = tmp_path / "worker-source"
+    for relpath in rel.WORKER_RUNTIME_FILES:
+        target = source / relpath
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((ROOT / relpath).read_bytes())
+        target.chmod(0o755 if relpath.startswith("scripts/") and relpath.endswith(".py") else 0o644)
+    provenance = {
+        "source_dir": str(source),
+        "source_tree_sha256": "a" * 64,
+        "source_manifest_sha256": "b" * 64,
+        "provenance": {
+            "snapshot_id": "worker-snapshot-001",
+            "snapshot_manifest_sha256": "c" * 64,
+            "source_host": rel.AUTHORIZED_DEPLOY_HOST,
+            "remote_root": rel.CLIENT_PRODUCTION_REMOTE_ROOT,
+            "contour": "client-production",
+        },
+    }
+    monkeypatch.setattr(rel, "verify_prepared_worktree", lambda _: provenance)
+    monkeypatch.setattr(rel, "_release_tool_commit", lambda: "d" * 40)
+    return rel.build_worker_from_worktree(worktree_dir=tmp_path / "prepared", release_id=release_id, out_dir=tmp_path / "out", contour="client-production")
+
+
+def test_worker_manifest_is_dedicated_and_api_bridge_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    artifact = _build_worker_artifact(tmp_path, monkeypatch)
+    manifest = rel.load_worker_manifest(artifact.manifest, descriptor=rel.load_worker_contour_descriptor("client-production"))
+    assert manifest["schema_version"] == rel.WORKER_SCHEMA_VERSION
+    assert manifest["scope"] == "worker"
+    assert manifest["entrypoints"] == [rel.WORKER_ENTRYPOINT]
+    assert manifest["forbidden_services"] == ["novostroy-bot-client-production-api.service", "novostroy-bot-client-production-n8n-bridge.service"]
+    assert {row["path"] for row in manifest["files"]} == set(rel.WORKER_RUNTIME_FILES)
+    assert "scripts/nmbot_api_server.py" not in {row["path"] for row in manifest["files"]}
+
+
+def test_worker_deploy_restarts_only_worker_and_rolls_back_original_inactive_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    artifact = _build_worker_artifact(tmp_path, monkeypatch)
+    monkeypatch.setattr(rel, "worker_preflight", lambda **_: "ok\n")
+    remote = WorkerRemote(active=False, fail="worker release hash mismatch")
+    with pytest.raises(rel.ReleaseError):
+        rel.deploy_worker(release_id="worker-rel-001", archive=artifact.archive, manifest_path=artifact.manifest, contour="client-production", confirm=True, remote=remote, source_snapshot_manifest_sha256="c" * 64)
+    commands = "\n".join(remote.commands)
+    assert "novostroy-bot-client-production-api.service" not in commands
+    assert "novostroy-bot-client-production-n8n-bridge.service" not in commands
+    assert "systemctl --user stop nmbot-client-production-callback-sheet-worker.service" in commands
+    assert ".worker-current.rollback.tmp" in commands
 
 
 def _build_bridge_artifact_with_candidate_change(tmp_path: Path, *, release_id: str = "bridge-rel-001") -> tuple[rel.Artifact, str]:

@@ -44,3 +44,7 @@ data/nmbot_v1_*/
 data/v1_*/
 worker/.wrangler/
 *.bak-*
+
+# MemPalace per-project files (issue #185)
+mempalace.yaml
+entities.json

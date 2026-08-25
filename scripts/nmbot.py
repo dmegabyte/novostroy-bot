@@ -9,6 +9,7 @@ VPS/network diagnostics.
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -255,7 +256,12 @@ def _build_edit_plan(result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_mutation_gate(result: dict[str, Any]) -> dict[str, Any]:
+def _surface_revision(stage: str, allowed_paths: list[str]) -> str:
+    payload = "\0".join([stage, *allowed_paths]).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _build_mutation_gate(result: dict[str, Any], requested_paths: list[str] | None = None) -> dict[str, Any]:
     envelope = result.get("diagnostic_envelope") if isinstance(result.get("diagnostic_envelope"), dict) else {}
     edit_plan = result.get("edit_plan") if isinstance(result.get("edit_plan"), dict) else {}
     stage = _safe_stage(result.get("stage"))
@@ -297,11 +303,24 @@ def _build_mutation_gate(result: dict[str, Any]) -> dict[str, Any]:
         verdict = "PARTIAL"
 
     surface = edit_plan.get("suggested_change_surface") if isinstance(edit_plan.get("suggested_change_surface"), list) else []
-    allowed_paths = [path for path in (_existing_safe_repo_ref(item) for item in surface) if path is not None] if verdict == "PROVEN" else []
+    base_paths = [_existing_safe_repo_ref(item) for item in surface]
+    allowed_paths = sorted({path for path in base_paths if path is not None}) if verdict == "PROVEN" else []
     verification_command = edit_plan.get("verification_command") if verdict == "PROVEN" and isinstance(edit_plan.get("verification_command"), str) else None
     if verdict == "PROVEN" and not allowed_paths:
         verdict, allowed_paths, verification_command = "PARTIAL", [], None
         reasons.append("allowed_surface_missing")
+    if verdict == "PROVEN" and requested_paths:
+        stages = _load_owner_stage_map()
+        entry = stages.get(stage) if stages is not None and stage is not None else None
+        approved_surface = entry.get("change_surface") if isinstance(entry, dict) and isinstance(entry.get("change_surface"), list) else []
+        approved_paths = {_existing_safe_repo_ref(item) for item in approved_surface}
+        requested = {_existing_safe_repo_ref(item) for item in requested_paths}
+        if None in requested or not requested.issubset(approved_paths):
+            verdict, allowed_paths, verification_command = "PARTIAL", [], None
+            reasons.append("requested_surface_unproven")
+        else:
+            allowed_paths = sorted(set(allowed_paths).union(requested))
+    surface_revision = _surface_revision(stage, allowed_paths) if verdict == "PROVEN" and stage is not None else None
 
     return {
         "schema_version": MUTATION_GATE_SCHEMA_VERSION,
@@ -310,6 +329,7 @@ def _build_mutation_gate(result: dict[str, Any]) -> dict[str, Any]:
         "reason_codes": [_bounded_error_code(reason) for reason in reasons],
         "diagnostic_stage": stage,
         "allowed_paths": allowed_paths,
+        "surface_revision": surface_revision,
         "verification_command": verification_command,
         "evidence_scope": evidence_scope,
         "expires_in_seconds": 1800,
@@ -388,12 +408,12 @@ def _diagnose_output_format(args: list[str]) -> tuple[str | None, str | None]:
     return "human" if human else "json", None
 
 
-def _print_diagnose_result(result: dict[str, Any], output_format: str, *, include_plan: bool = False, include_gate: bool = False) -> None:
+def _print_diagnose_result(result: dict[str, Any], output_format: str, *, include_plan: bool = False, include_gate: bool = False, requested_paths: list[str] | None = None) -> None:
     result = _with_owner_card(result)
     if include_plan or include_gate:
         result["edit_plan"] = _build_edit_plan(result)
     if include_gate:
-        result["mutation_gate"] = _build_mutation_gate(result)
+        result["mutation_gate"] = _build_mutation_gate(result, requested_paths)
     if output_format == "human":
         fields = [
             ("Статус", result.get("status")),
@@ -872,6 +892,11 @@ def _extract_recent_request(args: list[str]) -> tuple[int | None, str | None, st
             plan_seen = True
             idx += 1
             continue
+        if item == "--allow-path":
+            if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
+                return None, None, None, "missing value for --allow-path"
+            idx += 2
+            continue
         if item == "--recent":
             if plan_seen:
                 return None, None, None, "--recent is incompatible with --plan"
@@ -986,6 +1011,20 @@ def _validate_gate_request(args: list[str]) -> str | None:
     if len(trace_id) > 128 or any(not (ch.isalnum() or ch in "_.:-") for ch in trace_id):
         return "--gate requires a safe explicit trace ID"
     return None
+
+
+def _extract_allow_paths(args: list[str]) -> tuple[list[str], str | None]:
+    requested: list[str] = []
+    idx = 0
+    while idx < len(args):
+        if args[idx] != "--allow-path":
+            idx += 1
+            continue
+        if idx + 1 >= len(args) or _safe_rel_path(args[idx + 1]) is None:
+            return [], "--allow-path requires a safe relative path"
+        requested.append(args[idx + 1].strip())
+        idx += 2
+    return requested, None
 
 
 def _trace_owner_layer(stage: Any) -> str:
@@ -1182,6 +1221,11 @@ def _build_diagnose_argv(args: list[str]) -> tuple[str | None, list[str] | None,
         if item in {"--human", "--json", "--plan", "--timeline", "--gate"}:
             idx += 1
             continue
+        if item == "--allow-path":
+            if idx + 1 >= len(args) or args[idx + 1].startswith("-"):
+                return None, None, "missing value for --allow-path", selected_latest
+            idx += 2
+            continue
         if item == "--latest":
             if selector_kind is not None:
                 return None, None, "exactly one selector is required: --trace, --task, or --latest", selected_latest
@@ -1244,6 +1288,7 @@ def _build_diagnose_argv(args: list[str]) -> tuple[str | None, list[str] | None,
 def _run_diagnose(args: list[str]) -> int:
     include_gate = "--gate" in args
     include_plan = "--plan" in args or include_gate
+    has_allow_paths = "--allow-path" in args
     output_format, output_error = _diagnose_output_format(args)
     if output_error:
         print(f"ERROR: {output_error}", file=sys.stderr)
@@ -1254,6 +1299,13 @@ def _run_diagnose(args: list[str]) -> int:
         if gate_error:
             print(f"ERROR: {gate_error}", file=sys.stderr)
             return 2
+    elif has_allow_paths:
+        print("ERROR: --allow-path requires --gate", file=sys.stderr)
+        return 2
+    requested_paths, allow_paths_error = _extract_allow_paths(args)
+    if allow_paths_error:
+        print(f"ERROR: {allow_paths_error}", file=sys.stderr)
+        return 2
     if "--summary" in args:
         window, summary_date, summary_logs_dir, summary_error = _extract_summary_request(args)
         if summary_error:
@@ -1293,7 +1345,7 @@ def _run_diagnose(args: list[str]) -> int:
                     "last_successful_stage": None,
                     "correlation_coverage": {"trace": False, "task": False},
                 }
-            _print_diagnose_result(result, output_format, include_plan=include_plan, include_gate=include_gate)
+            _print_diagnose_result(result, output_format, include_plan=include_plan, include_gate=include_gate, requested_paths=requested_paths)
             return 0
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
@@ -1315,7 +1367,7 @@ def _run_diagnose(args: list[str]) -> int:
                     "last_successful_stage": None,
                     "correlation_coverage": {"trace": kind == "trace", "task": False},
                 }
-            _print_diagnose_result(no_evidence, output_format, include_plan=include_plan, include_gate=include_gate)
+            _print_diagnose_result(no_evidence, output_format, include_plan=include_plan, include_gate=include_gate, requested_paths=requested_paths)
             return 0
     completed = subprocess.run(child_argv, cwd=ROOT, check=False, capture_output=True, text=True)
     parsed = _parse_json_object(completed.stdout or "")
@@ -1323,13 +1375,13 @@ def _run_diagnose(args: list[str]) -> int:
         parsed = _parse_json_object(completed.stderr or "")
     if parsed is None:
         result = _add_diagnostic_envelope(_diagnostic_failed(kind, "child_json_parse_error"), evidence_scope="unknown", trace_present=kind == "trace", task_present=kind == "task")
-        _print_diagnose_result(result, output_format, include_plan=include_plan, include_gate=include_gate)
+        _print_diagnose_result(result, output_format, include_plan=include_plan, include_gate=include_gate, requested_paths=requested_paths)
         return completed.returncode if completed.returncode != 0 else 3
     result = _normalize_trace(parsed) if kind == "trace" else _normalize_task(parsed)
     result = _add_diagnostic_envelope(result, evidence_scope="local" if kind == "trace" else "unknown", trace_present=kind == "trace", task_present=kind == "task")
     if _timeline_requested(args):
         result["timeline"] = _build_timeline_from_payload(kind, parsed, result)
-    _print_diagnose_result(result, output_format, include_plan=include_plan, include_gate=include_gate)
+    _print_diagnose_result(result, output_format, include_plan=include_plan, include_gate=include_gate, requested_paths=requested_paths)
     return completed.returncode
 
 

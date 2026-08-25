@@ -1285,6 +1285,19 @@ def _write_plan_stage_map(tmp_path: Path) -> None:
     )
 
 
+def _write_surface_stage_map(tmp_path: Path) -> None:
+    _write_plan_stage_map(tmp_path)
+    (tmp_path / "scripts" / "nmbot_surface_helper.py").write_text("", encoding="utf-8")
+    (tmp_path / "tests" / "test_nmbot_surface_helper.py").write_text("", encoding="utf-8")
+    stage_map_path = tmp_path / "config" / "nmbot_stage_map.json"
+    stage_map = json.loads(stage_map_path.read_text(encoding="utf-8"))
+    stage_map["stages"]["v2.search"]["change_surface"] = [
+        "scripts/nmbot_surface_helper.py",
+        "tests/test_nmbot_surface_helper.py",
+    ]
+    stage_map_path.write_text(json.dumps(stage_map), encoding="utf-8")
+
+
 def _write_trace_logs(tmp_path: Path) -> Path:
     logs = tmp_path / "logs"
     logs.mkdir(exist_ok=True)
@@ -1363,9 +1376,57 @@ def test_diagnose_gate_proven_for_matching_local_v2_trace(monkeypatch, capsys, t
     assert gate["verdict"] == "PROVEN"
     assert gate["mutation_scope"] == "local_source_only"
     assert gate["allowed_paths"] == ["scripts/nmbot_runtime_adapter.py", "tests/test_nmbot_v2_search_contract_runtime.py"]
+    assert isinstance(gate["surface_revision"], str) and gate["surface_revision"]
     assert gate["verification_command"] == "python3 -m pytest -q tests/test_nmbot_v2_search_contract_runtime.py"
     assert gate["production_authorized"] is False
     assert gate["deploy_authorized"] is False
+
+
+def test_diagnose_gate_expands_only_exact_stage_change_surface(monkeypatch, capsys, tmp_path: Path) -> None:
+    mod = load_wrapper_module()
+    _write_trace_logs(tmp_path)
+    _write_surface_stage_map(tmp_path)
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    child_payload = {"traces": [{"stage": "v2.search", "runtime_version": "V2", "confidence": "high", "evidence": []}]}
+
+    def fake_run(argv, cwd, check, capture_output, text):
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(child_payload), stderr="")
+
+    monkeypatch.setattr(mod.subprocess, "run", fake_run)
+    args = ["diagnose", "--trace", "trace-v2", "--gate", "--json", "--allow-path", "tests/test_nmbot_surface_helper.py", "--allow-path", "scripts/nmbot_surface_helper.py"]
+    assert mod.main(args) == 0
+    expanded = json.loads(capsys.readouterr().out)["mutation_gate"]
+    assert expanded["verdict"] == "PROVEN"
+    assert expanded["allowed_paths"] == sorted([
+        "scripts/nmbot_runtime_adapter.py", "tests/test_nmbot_v2_search_contract_runtime.py",
+        "scripts/nmbot_surface_helper.py", "tests/test_nmbot_surface_helper.py",
+    ])
+    assert mod.main([*args, "--allow-path", "scripts/nmbot_surface_helper.py"]) == 0
+    assert json.loads(capsys.readouterr().out)["mutation_gate"]["surface_revision"] == expanded["surface_revision"]
+
+
+def test_diagnose_gate_unproven_or_unsafe_requested_surface_fails_closed(monkeypatch, capsys, tmp_path: Path) -> None:
+    mod = load_wrapper_module()
+    _write_trace_logs(tmp_path)
+    _write_surface_stage_map(tmp_path)
+    (tmp_path / "scripts" / "unlisted.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(mod, "ROOT", tmp_path)
+    child_payload = {"traces": [{"stage": "v2.search", "runtime_version": "V2", "confidence": "high", "evidence": []}]}
+    monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout=json.dumps(child_payload), stderr=""))
+    for requested in ("scripts/unlisted.py", "docs/NMBOT_EXTERNAL_CONTRACTS.md"):
+        assert mod.main(["diagnose", "--trace", "trace-v2", "--gate", "--json", "--allow-path", requested]) == 0
+        gate = json.loads(capsys.readouterr().out)["mutation_gate"]
+        assert gate["verdict"] != "PROVEN"
+        assert gate["allowed_paths"] == [] and gate["mutation_scope"] == "none"
+        assert "requested_surface_unproven" in gate["reason_codes"]
+        assert gate["surface_revision"] is None
+    assert mod.main(["diagnose", "--trace", "trace-v2", "--gate", "--json", "--allow-path", "../unsafe.py"]) == 2
+
+
+def test_diagnose_allow_path_requires_gate(monkeypatch) -> None:
+    mod = load_wrapper_module()
+    monkeypatch.setattr(mod.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not dispatch")))
+    assert mod.main(["diagnose", "--trace", "trace-v2", "--json", "--allow-path", "scripts/file.py"]) == 2
 
 
 def test_diagnose_gate_conflict_partial_and_no_evidence(monkeypatch, capsys, tmp_path: Path) -> None:

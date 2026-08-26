@@ -262,8 +262,17 @@ if operation == "switch":
     backup = backup_path()
     backup.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if backup.exists():
-        fail("switch_backup_already_exists")
-    write_atomic(backup, original, 0o600)
+        if not backup.is_file() or backup.is_symlink():
+            fail("switch_backup_unsafe")
+        try:
+            if backup.read_bytes() != original:
+                fail("switch_backup_mismatch")
+        except SystemExit:
+            raise
+        except Exception:
+            fail("switch_backup_unreadable")
+    else:
+        write_atomic(backup, original, 0o600)
     try:
         write_atomic(env_path, replace_upstream(original, EXPECTED["v6_upstream"]), stat.S_IMODE(env_path.stat().st_mode))
         if upstream_from(read_env()) != EXPECTED["v6_upstream"] or not restart_bridge() or not bridge_ready() or not v6_ready() or not same_protected(before, protected_snapshot()):

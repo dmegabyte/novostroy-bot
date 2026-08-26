@@ -73,11 +73,18 @@ def run_ssh(command: str) -> subprocess.CompletedProcess[str]:
 
 
 def recon() -> dict:
-    command = "test -d {root} && test -r {root}/{slug}/index.html && printf '{{\"static_root\":true}}' || printf '{{\"static_root\":false}}'".format(root=shlex.quote(PUBLIC_ROOT), slug=shlex.quote(SLUG))
+    command = (
+        "test -d {root} && "
+        "status=$(curl --fail --silent --show-error --max-time 5 --output /dev/null --write-out '%{{http_code}}' http://127.0.0.1:8765/) && "
+        "case \"$status\" in 2*|3*) printf '{{\"static_root\":true,\"http_ready\":true}}' ;; *) printf '{{\"static_root\":true,\"http_ready\":false}}' ;; esac"
+    ).format(root=shlex.quote(PUBLIC_ROOT))
     result = run_ssh(command)
     if result.returncode != 0:
         raise ReleaseError("static host recon failed")
-    return json.loads(result.stdout)
+    payload = json.loads(result.stdout)
+    if payload != {"static_root": True, "http_ready": True}:
+        raise ReleaseError("static host is not HTTP-ready")
+    return payload
 
 
 def deploy(artifact: Path, *, confirm: bool) -> str:

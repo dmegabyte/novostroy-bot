@@ -86,3 +86,39 @@ The deployer never overwrites an existing release ID or private upload staging d
 failed install it stops the isolated unit if startup had begun and preserves partial evidence
 under the isolated TEST root. Inspect that evidence before any separately approved cleanup or a
 new release attempt.
+
+## Primary Jivo bridge switch to isolated V6 TEST
+
+`scripts/nmbot_primary_v6_jivo_switch.py` owns one narrow migration of the existing **primary**
+bridge from its current local API (`127.0.0.1:8088`) to the isolated V6 TEST API
+(`127.0.0.1:18088`). It does not deploy bridge code, alter V_exp, change the primary API, or touch
+either client-production service. The visible Jivo ingress may share this primary bridge; do not
+claim client isolation without a separately authorized route receipt.
+
+Before switching, provide the exact currently running isolated V6 release ID and run:
+
+```bash
+python3 scripts/nmbot_primary_v6_jivo_switch.py preflight \
+  --expected-v6-release <release-id>
+```
+
+The preflight is read-only. It requires primary API/bridge and both client-production services to
+be healthy, their protected process identities unchanged, V6 TEST health to match the requested
+release, and the current primary bridge upstream to be exactly `127.0.0.1:8088`.
+
+After separate switch approval, use the exact confirmation printed by the command. The owner saves
+a private, restrictive backup of the primary bridge environment, atomically changes only
+`NMBOT_BRIDGE_UPSTREAM`, and restarts only `novostroy-bot-n8n-bridge.service`. A failed technical
+check restores the backup and restarts that bridge back to its former route. A correlated Jivo
+`CLIENT_MESSAGE` -> terminal `BOT_MESSAGE` smoke remains a separate external approval.
+
+Rollback is also explicit and restores the saved primary bridge environment:
+
+```bash
+python3 scripts/nmbot_primary_v6_jivo_switch.py rollback \
+  --expected-v6-release <release-id> --apply \
+  --confirm ROLLBACK-PRIMARY-BRIDGE-<release-id>-TO-CURRENT
+```
+
+Do not manually edit the primary `.env` or restart the bridge outside this owner: that loses the
+verified backup and rollback receipt.

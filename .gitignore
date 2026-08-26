@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+.env.*
+data/
+logs/
+tmp/
+artifacts/
+releases/
+*.tar.gz
+*.manifest.json

@@ -1,0 +1,15 @@
+[Unit]
+Description=NMBot immutable V6 slot %i
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.local/state/nmbot-v6-release/unit-env/%i.env
+ExecStart=/usr/bin/python3 ${NMBOT_SLOT_RUNNER} --descriptor ${NMBOT_SLOT_DESCRIPTOR}
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=default.target

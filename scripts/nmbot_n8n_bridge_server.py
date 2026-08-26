@@ -1,0 +1,997 @@
+#!/usr/bin/env python3
+"""Small public bridge for n8n -> local nmbot Jivo API.
+
+Public side:  http://0.0.0.0:8093/jivo/<provider_token>
+Private side: http://127.0.0.1:8088/jivo/<provider_token>
+Jivo side:   https://bot.jivosite.com/webhooks/<provider_id>/<provider_token>
+
+The bridge requires X-NMBOT-Bridge-Token and never prints token values.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import datetime as dt
+import hashlib
+import hmac
+import json
+import os
+import re
+import sys
+import time
+import uuid
+from pathlib import Path
+from aiohttp import ClientSession, web
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+if str(REPO_ROOT) not in sys.path:
+    sys.path.append(str(REPO_ROOT))
+
+try:
+    from scripts.dialogue_journal import append_event as append_journal_event
+    from scripts.nmbot_egress_policy import SAFE_CLIENT_FALLBACK_TEXT, guard_jivo_event, is_production
+    from scripts.nmbot_release_registry import ReleaseRegistryError, read_route_file, validate_upstream
+except ImportError:  # direct scripts/ execution
+    from dialogue_journal import append_event as append_journal_event
+    from nmbot_egress_policy import SAFE_CLIENT_FALLBACK_TEXT, guard_jivo_event, is_production
+    from nmbot_release_registry import ReleaseRegistryError, read_route_file, validate_upstream
+
+
+LATEST_CHAT_EVENTS: dict[str, str] = {}
+DISPATCHED_CHAT_EVENTS: dict[str, float] = {}
+DISPATCHED_CHAT_EVENTS_TTL_SEC = 10 * 60
+DISPATCHED_CHAT_EVENTS_MAX_ENTRIES = 1024
+APP_TASKS_KEY = "nmbot_bridge_tasks"
+ACTIVE_ROUTE_FILE_ENV = "NMBOT_ACTIVE_ROUTE_FILE"
+CONTOUR_PROFILE_ENV = "NMBOT_CONTOUR_PROFILE"
+
+DEFAULT_STATUS_UPDATE_TEMPLATES = (
+    "Уже работаю над вашим запросом.",
+    "Проверяю нужную информацию.",
+    "Уточняю детали, чтобы ответить точнее.",
+    "Ещё немного — готовлю ответ.",
+)
+
+
+def _env(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
+
+
+def _structured_log_path() -> Path:
+    explicit = _env("NMBOT_BRIDGE_STRUCTURED_LOG")
+    if explicit:
+        return Path(explicit).expanduser()
+    profile = _env(CONTOUR_PROFILE_ENV)
+    safe_profile = profile.lower() if profile in {"TEST", "PROD"} else "test"
+    return Path.home() / ".local" / "state" / "nmbot-v6" / safe_profile / "bridge" / "n8n_bridge_structured.jsonl"
+
+
+def _safe_trace_ref(raw: object) -> str:
+    digest = hashlib.sha256(str(raw).encode("utf-8", errors="replace")).hexdigest()[:12]
+    return f"trace_{digest}"
+
+
+def _append_bridge_error_to_journal(
+    body: bytes,
+    *,
+    code: str,
+    stage: str,
+    fallback: bool,
+    trace_ref: str | None = None,
+) -> None:
+    """Attach a safe bridge failure to the same opaque dialogue event when possible."""
+    if code not in {
+        "bridge_hard_timeout", "bridge_upstream_exception", "bridge_status_delivery_error",
+        "bridge_delivery_error", "bridge_async_exception", "bridge_route_unavailable",
+    } or stage not in {"bridge_upstream", "bridge_delivery"}:
+        return
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except Exception:
+        return
+    if not isinstance(payload, dict):
+        return
+    site_id = str(payload.get("site_id") or "").strip()
+    chat_id = str(payload.get("chat_id") or "").strip()
+    client_id = str(payload.get("client_id") or "").strip()
+    if not site_id or not chat_id or not client_id:
+        return
+    try:
+        append_journal_event(
+            session_key=f"jivo:{site_id}:{chat_id}:{client_id}",
+            role="system",
+            event_type="delivery_error",
+            event_id=str(payload.get("id") or "").strip() or None,
+            meta={"site_id": site_id, "chat_id": chat_id, "client_id": client_id, **({"trace_ref": trace_ref} if trace_ref else {})},
+            error_summary={
+                "status": "failed" if code != "bridge_status_delivery_error" else "degraded",
+                "codes": [code],
+                "stages": [stage],
+                "fallback": fallback,
+            },
+            source="bridge",
+        )
+    except Exception:
+        # Journal diagnostics must not interfere with the independently safe bridge fallback.
+        return
+
+
+async def handle_health(request: web.Request) -> web.Response:
+    try:
+        route = _resolve_bridge_route()
+    except BridgeRouteError as exc:
+        return web.json_response(
+            {
+                "ok": False,
+                "service": "nmbot-n8n-bridge",
+                "route": {"status": "invalid", "error_code": exc.code},
+            },
+            status=503,
+        )
+    safe_route = {
+        "status": "ready",
+        "mode": route["mode"],
+        "profile": route["profile"],
+        "upstream_ref": _safe_url_ref(route["upstream"]),
+    }
+    if route.get("slot"):
+        safe_route["slot"] = route["slot"]
+    if route.get("release_id"):
+        safe_route["release_id"] = route["release_id"]
+    return web.json_response({"ok": True, "service": "nmbot-n8n-bridge", "route": safe_route})
+
+
+class BridgeRouteError(RuntimeError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def _bridge_profile() -> str:
+    """Return the exact behavior profile; a missing value safely means TEST."""
+    raw = _env(CONTOUR_PROFILE_ENV)
+    if not raw:
+        return "TEST"
+    if raw not in {"TEST", "PROD"}:
+        raise BridgeRouteError("profile_invalid")
+    return raw
+
+
+def _resolve_bridge_route() -> dict[str, str | None]:
+    """Resolve one strictly local API origin without exposing route-file details."""
+    profile = _bridge_profile()
+    route_path = _env(ACTIVE_ROUTE_FILE_ENV)
+    if route_path:
+        try:
+            route = read_route_file(Path(route_path), expected_profile=profile)
+        except ReleaseRegistryError as exc:
+            raise BridgeRouteError("route_file_invalid") from exc
+        active = route["active"]
+        return {
+            "mode": "dynamic",
+            "profile": profile,
+            "slot": active["slot"],
+            "release_id": active["release_id"],
+            "upstream": active["upstream"],
+        }
+    try:
+        upstream = validate_upstream(_env("NMBOT_BRIDGE_UPSTREAM", "http://127.0.0.1:8088"))
+    except ReleaseRegistryError as exc:
+        raise BridgeRouteError("static_upstream_invalid") from exc
+    return {"mode": "static", "profile": profile, "slot": None, "release_id": None, "upstream": upstream}
+
+
+def _jivo_fast_fallback(body: bytes, reason: str, *, text: str | None = None) -> web.Response:
+    """Return a valid Jivo BOT_MESSAGE when upstream is too slow/unavailable.
+
+    Jivo Bot API waits only a few seconds for webhook response. Returning a
+    short valid message is better than letting n8n/Jivo timeout the request.
+    """
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except Exception:
+        payload = {}
+
+    if payload.get("event") == "CHAT_CLOSED":
+        return web.json_response({"ok": True, "event": "CHAT_CLOSED"})
+
+    text = text or _env(
+        "NMBOT_BRIDGE_FALLBACK_TEXT",
+        "Запрос ещё обрабатывается, пожалуйста, не отправляйте его повторно. Я вернусь с вариантами в ближайшее время.",
+    )
+    return web.json_response(
+        {
+            "id": str(uuid.uuid4()),
+            "event": "BOT_MESSAGE",
+            "client_id": payload.get("client_id"),
+            "chat_id": payload.get("chat_id"),
+            "message": {
+                "type": "TEXT",
+                "text": text,
+                "timestamp": int(time.time() * 1000),
+            },
+        }
+    )
+
+
+def _bridge_timeout_config() -> tuple[float, float]:
+    """Return validated (status_timeout, hard_timeout) seconds.
+
+    Status timeout is the user-visible "still working" threshold. Hard timeout
+    is the bounded terminal deadline for the same upstream task.
+    """
+    default_status = 90.0
+    default_hard = 600.0
+
+    try:
+        status_timeout = float(_env("NMBOT_BRIDGE_TIMEOUT_SECONDS", str(int(default_status))))
+        if status_timeout <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        status_timeout = default_status
+
+    try:
+        hard_timeout = float(_env("NMBOT_BRIDGE_HARD_TIMEOUT_SECONDS", str(int(default_hard))))
+        if hard_timeout < status_timeout:
+            raise ValueError
+    except (TypeError, ValueError):
+        hard_timeout = default_hard if default_hard >= status_timeout else status_timeout
+
+    return status_timeout, hard_timeout
+
+
+def _bridge_status_updates_config() -> tuple[bool, float, tuple[str, ...]]:
+    enabled = _env("NMBOT_BRIDGE_STATUS_UPDATES_ENABLED").casefold() in {"1", "true", "yes", "on"}
+    try:
+        interval = float(_env("NMBOT_BRIDGE_STATUS_INTERVAL_SECONDS", "3"))
+        if interval <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        interval = 3.0
+
+    configured = tuple(
+        item.strip()
+        for item in _env("NMBOT_BRIDGE_STATUS_TEMPLATES").split("|")
+        if item.strip()
+    )
+    return enabled, interval, configured or DEFAULT_STATUS_UPDATE_TEMPLATES
+
+
+async def _await_upstream_with_status(
+    upstream_coro,
+    *,
+    status_timeout: float,
+    hard_timeout: float,
+    send_status,
+    repeat_interval: float | None = None,
+) -> tuple[object | None, str, bool]:
+    """Wait for upstream without cancelling it at status timeout.
+
+    Returns (result, outcome, status_sent). `send_status` failures are isolated
+    so they do not cancel the upstream task or suppress the final answer.
+    """
+    task = asyncio.create_task(upstream_coro)
+    started = time.monotonic()
+    status_sent = False
+    try:
+        try:
+            result = await asyncio.wait_for(asyncio.shield(task), timeout=status_timeout)
+            return result, "upstream", status_sent
+        except asyncio.TimeoutError:
+            try:
+                sent = await send_status()
+                status_sent = True if sent is None else bool(sent)
+            except Exception:
+                # Caller logs details inside send_status. Transport must keep
+                # waiting for the original upstream task.
+                pass
+
+        while True:
+            remaining = max(0.0, hard_timeout - (time.monotonic() - started))
+            if remaining <= 0:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                return None, "hard_timeout", status_sent
+
+            wait_timeout = remaining if repeat_interval is None else min(repeat_interval, remaining)
+            try:
+                result = await asyncio.wait_for(asyncio.shield(task), timeout=wait_timeout)
+                return result, "upstream_after_status", status_sent
+            except asyncio.TimeoutError:
+                if repeat_interval is None or wait_timeout >= remaining:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    return None, "hard_timeout", status_sent
+                try:
+                    sent = await send_status()
+                    status_sent = status_sent or (True if sent is None else bool(sent))
+                except Exception:
+                    # A status update is nonterminal and must never cancel the answer.
+                    pass
+    except Exception:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        raise
+
+
+async def handle_proxy(request: web.Request) -> web.Response:
+    request_started = time.monotonic()
+    trace_id = str(uuid.uuid4())
+    expected = _env("NMBOT_N8N_BRIDGE_TOKEN")
+    got = request.headers.get("X-NMBOT-Bridge-Token", "").strip()
+    if not expected:
+        _log_structured(trace_id, "error", outcome="bridge_token_not_configured", http_status=503)
+        return web.json_response({"ok": False, "error": "bridge_token_not_configured"}, status=503)
+    if not hmac.compare_digest(got, expected):
+        _log_structured(trace_id, "error", outcome="unauthorized", http_status=401)
+        return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+
+    body = await request.read()
+    trace = _request_trace(body)
+    provider_token = request.match_info.get("provider_token", "").strip()
+    configured_provider_token = _env("JIVO_PROVIDER_TOKEN")
+    if not configured_provider_token:
+        _log_structured(trace_id, "error", **trace, outcome="jivo_token_not_configured", http_status=503)
+        return web.json_response({"ok": False, "error": "jivo_token_not_configured"}, status=503)
+    if not hmac.compare_digest(provider_token, configured_provider_token):
+        _log_structured(trace_id, "error", **trace, provider_token_ref=_safe_ref(provider_token), outcome="provider_token_mismatch", http_status=401)
+        return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+
+    event_key = _event_key(trace)
+    event_id = _event_id(body)
+    if event_key and event_id:
+        LATEST_CHAT_EVENTS[event_key] = event_id
+
+    _log_structured(
+        trace_id,
+        "request_received",
+        **trace,
+        provider_token_ref=_safe_ref(provider_token),
+        http_status=None,
+        outcome="accepted_for_async_processing",
+    )
+    if not _claim_dispatch_event(event_key, event_id):
+        latency_ms = int((time.monotonic() - request_started) * 1000)
+        _log_structured(trace_id, "duplicate_suppressed", **trace, http_status=200, latency_ms=latency_ms, outcome="duplicate_suppressed")
+        print(
+            "bridge_request",
+            json.dumps({**trace, "status": 200, "result": "duplicate_suppressed"}, ensure_ascii=False),
+            flush=True,
+        )
+        return web.json_response({"ok": True, "accepted": True, "duplicate": True})
+    _track_task(request.app, _send_to_jivo_after_bot(provider_token, body, trace, event_key, event_id, trace_id), trace_id, trace)
+    latency_ms = int((time.monotonic() - request_started) * 1000)
+    _log_structured(trace_id, "jivo_response_returned", **trace, http_status=200, latency_ms=latency_ms, outcome="accepted_async")
+    print(
+        "bridge_request",
+        json.dumps({**trace, "status": 200, "result": "accepted_async"}, ensure_ascii=False),
+        flush=True,
+    )
+    return web.json_response({"ok": True, "accepted": True})
+
+
+def _claim_dispatch_event(event_key: str | None, event_id: str | None) -> bool:
+    """Return False for duplicate inbound deliveries already dispatched.
+
+    P1 bridge guard: bounded in-memory lifecycle, no payload text or tokens logged.
+    """
+    if not event_key or not event_id:
+        return True
+    now = time.monotonic()
+    stale = [key for key, ts in DISPATCHED_CHAT_EVENTS.items() if now - ts > DISPATCHED_CHAT_EVENTS_TTL_SEC]
+    for key in stale:
+        DISPATCHED_CHAT_EVENTS.pop(key, None)
+    while len(DISPATCHED_CHAT_EVENTS) >= DISPATCHED_CHAT_EVENTS_MAX_ENTRIES:
+        oldest_key = min(DISPATCHED_CHAT_EVENTS, key=DISPATCHED_CHAT_EVENTS.get)
+        DISPATCHED_CHAT_EVENTS.pop(oldest_key, None)
+    key = f"{event_key}:{event_id}"
+    if key in DISPATCHED_CHAT_EVENTS:
+        return False
+    DISPATCHED_CHAT_EVENTS[key] = now
+    return True
+
+
+async def _send_to_jivo_after_bot(
+    provider_token: str,
+    body: bytes,
+    trace: dict[str, object],
+    event_key: str | None,
+    event_id: str | None,
+    trace_id: str,
+) -> None:
+    """Ask local bot API, then send BOT_MESSAGE/INVITE_AGENT to Jivo API.
+
+    This follows Jivo support guidance: acknowledge the incoming webhook fast,
+    then send the actual bot event as a separate Bot-Provider -> Jivo request.
+    Never logs provider_token, bridge token, API token, or message text.
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "X-NMBOT-Trace-ID": trace_id,
+    }
+    api_token = _env("NMBOT_API_TOKEN")
+    if api_token:
+        headers["X-NMBOT-API-Token"] = api_token
+
+    status_timeout, hard_timeout = _bridge_timeout_config()
+    status_updates_enabled, status_interval, status_templates = _bridge_status_updates_config()
+    if status_updates_enabled:
+        status_timeout = status_interval
+
+    try:
+        route = _resolve_bridge_route()
+    except BridgeRouteError as exc:
+        fallback = _jivo_fast_fallback(body, "route_unavailable")
+        payload = fallback.body or b"{}"
+        _log_structured(
+            trace_id,
+            "error",
+            **trace,
+            error_class=exc.code,
+            outcome="route_unavailable",
+        )
+        _append_bridge_error_to_journal(
+            body,
+            code="bridge_route_unavailable",
+            stage="bridge_upstream",
+            fallback=True,
+            trace_ref=_safe_trace_ref(trace_id),
+        )
+        if _is_stale_event(event_key, event_id):
+            _log_structured(trace_id, "jivo_response_returned", **trace, http_status=None, outcome="route_fallback_stale_skipped")
+            return
+        try:
+            async with ClientSession(timeout=None) as session:
+                jivo_status, jivo_error = await _post_event_to_jivo(
+                    session,
+                    provider_token,
+                    payload,
+                    trace_id,
+                    trace,
+                    delivery_role="final",
+                )
+        except Exception:
+            jivo_status, jivo_error = None, "route_fallback_post_exception"
+        if jivo_error is not None:
+            _append_bridge_error_to_journal(
+                body,
+                code="bridge_delivery_error",
+                stage="bridge_delivery",
+                fallback=True,
+                trace_ref=_safe_trace_ref(trace_id),
+            )
+        print(
+            "bridge_async_send",
+            json.dumps(
+                {
+                    **trace,
+                    "upstream_status": None,
+                    "upstream_result": "route_unavailable",
+                    "jivo_status": jivo_status,
+                    "jivo_error": jivo_error,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+        return
+
+    upstream_url = str(route["upstream"]).rstrip("/") + "/jivo/" + provider_token
+
+    try:
+        async with ClientSession(timeout=None) as session:
+            upstream_started = time.monotonic()
+            _log_structured(
+                trace_id,
+                "upstream_request_start",
+                **trace,
+                upstream_ref=_safe_url_ref(upstream_url),
+                route_mode=route["mode"],
+                route_profile=route["profile"],
+                route_slot=route.get("slot"),
+                release_id=route.get("release_id"),
+                timeout_seconds=status_timeout,
+                hard_timeout_seconds=hard_timeout,
+                outcome="started",
+            )
+
+            async def _call_upstream() -> tuple[int, bytes]:
+                async with session.post(upstream_url, data=body, headers=headers, timeout=hard_timeout) as response:
+                    response_payload = await response.read()
+                    return response.status, _normalize_jivo_response(response_payload)
+
+            status_update_index = 0
+
+            async def _send_status_fallback() -> bool:
+                nonlocal status_update_index
+                status_text = None
+                if status_updates_enabled:
+                    status_text = status_templates[status_update_index % len(status_templates)]
+                    status_update_index += 1
+                fallback = _jivo_fast_fallback(body, "upstream_timeout", text=status_text)
+                status_payload = fallback.body or b"{}"
+                if _is_stale_event(event_key, event_id):
+                    _log_structured(
+                        trace_id,
+                        "jivo_response_returned",
+                        **trace,
+                        http_status=None,
+                        latency_ms=int((time.monotonic() - upstream_started) * 1000),
+                        outcome="fallback_status_stale_skipped",
+                    )
+                    return False
+                try:
+                    status_jivo_status, status_jivo_error = await _post_event_to_jivo(
+                        session,
+                        provider_token,
+                        status_payload,
+                        trace_id,
+                        trace,
+                        delivery_role="status",
+                    )
+                    _log_structured(
+                        trace_id,
+                        "status_update",
+                        **trace,
+                        http_status=status_jivo_status,
+                        latency_ms=int((time.monotonic() - upstream_started) * 1000),
+                        response_event=_payload_event_kind(status_payload),
+                        error_class=status_jivo_error,
+                        outcome="fallback_status_sent" if status_jivo_error is None else "fallback_status_jivo_error",
+                    )
+                    if status_jivo_error is not None:
+                        _append_bridge_error_to_journal(
+                            body,
+                            code="bridge_status_delivery_error",
+                            stage="bridge_delivery",
+                            fallback=False,
+                            trace_ref=_safe_trace_ref(trace_id),
+                        )
+                    return status_jivo_error is None
+                except Exception:
+                    _log_structured(
+                        trace_id,
+                        "status_update",
+                        **trace,
+                        latency_ms=int((time.monotonic() - upstream_started) * 1000),
+                        error_class="status_post_exception",
+                        outcome="fallback_status_post_failed",
+                    )
+                    raise
+
+            try:
+                upstream_result_value, upstream_result, status_sent = await _await_upstream_with_status(
+                    _call_upstream(),
+                    status_timeout=status_timeout,
+                    hard_timeout=hard_timeout,
+                    send_status=_send_status_fallback,
+                    repeat_interval=status_interval if status_updates_enabled else None,
+                )
+                if upstream_result == "hard_timeout":
+                    fallback = _jivo_fast_fallback(body, "upstream_hard_timeout")
+                    payload = fallback.body or b"{}"
+                    upstream_status = None
+                    upstream_result = "fallback_hard_timeout"
+                    _log_structured(
+                        trace_id,
+                        "timeout",
+                        **trace,
+                        latency_ms=int((time.monotonic() - upstream_started) * 1000),
+                        error_class="HardTimeoutError",
+                        outcome="upstream_hard_timeout",
+                    )
+                    _append_bridge_error_to_journal(
+                        body,
+                        code="bridge_hard_timeout",
+                        stage="bridge_upstream",
+                        fallback=not status_sent,
+                        trace_ref=_safe_trace_ref(trace_id),
+                    )
+                else:
+                    upstream_status, payload = upstream_result_value  # type: ignore[misc]
+                    _log_structured(
+                        trace_id,
+                        "upstream_response",
+                        **trace,
+                        http_status=upstream_status,
+                        latency_ms=int((time.monotonic() - upstream_started) * 1000),
+                        response_event=_payload_event_kind(payload),
+                        response_bytes=len(payload or b""),
+                        outcome=upstream_result,
+                    )
+            except Exception:
+                if "status_sent" in locals() and status_sent:
+                    _log_structured(
+                        trace_id,
+                        "error",
+                        **trace,
+                        latency_ms=int((time.monotonic() - upstream_started) * 1000),
+                        error_class="upstream_exception_after_status",
+                        outcome="upstream_exception_after_status",
+                    )
+                    _append_bridge_error_to_journal(
+                        body,
+                        code="bridge_upstream_exception",
+                        stage="bridge_upstream",
+                        fallback=False,
+                        trace_ref=_safe_trace_ref(trace_id),
+                    )
+                    print(
+                        "bridge_async_send",
+                        json.dumps(
+                            {
+                                **trace,
+                                "upstream_status": None,
+                                "upstream_result": "upstream_exception_after_status",
+                                "jivo_status": None,
+                                "jivo_error": "status_already_sent",
+                            },
+                            ensure_ascii=False,
+                        ),
+                        flush=True,
+                    )
+                    return
+                fallback = _jivo_fast_fallback(body, "upstream_unavailable")
+                payload = fallback.body or b"{}"
+                upstream_status = 200
+                upstream_result = "fallback_unavailable"
+                _log_structured(
+                    trace_id,
+                    "error",
+                    **trace,
+                    latency_ms=int((time.monotonic() - upstream_started) * 1000),
+                    error_class="upstream_exception",
+                    outcome=upstream_result,
+                )
+                _append_bridge_error_to_journal(
+                    body,
+                    code="bridge_upstream_exception",
+                    stage="bridge_upstream",
+                    fallback=True,
+                    trace_ref=_safe_trace_ref(trace_id),
+                )
+
+            if _is_stale_event(event_key, event_id):
+                _log_structured(trace_id, "jivo_response_returned", **trace, http_status=None, outcome="stale_event_skipped")
+                print(
+                    "bridge_async_send",
+                    json.dumps(
+                        {
+                            **trace,
+                            "upstream_status": upstream_status,
+                            "upstream_result": upstream_result,
+                            "jivo_status": None,
+                            "jivo_error": "stale_event_skipped",
+                        },
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
+                return
+
+            jivo_status, jivo_error = await _post_event_to_jivo(
+                session,
+                provider_token,
+                payload,
+                trace_id,
+                trace,
+                delivery_role="final",
+            )
+            if jivo_error is not None:
+                _append_bridge_error_to_journal(
+                    body,
+                    code="bridge_delivery_error",
+                    stage="bridge_delivery",
+                    fallback=upstream_result.startswith("fallback"),
+                    trace_ref=_safe_trace_ref(trace_id),
+                )
+            print(
+                "bridge_async_send",
+                json.dumps(
+                    {
+                        **trace,
+                        "upstream_status": upstream_status,
+                        "upstream_result": upstream_result,
+                        "jivo_status": jivo_status,
+                        "jivo_error": jivo_error,
+                    },
+                    ensure_ascii=False,
+                ),
+                flush=True,
+            )
+    except Exception:
+        _log_structured(trace_id, "error", **trace, error_class="async_exception", outcome="async_exception")
+        _append_bridge_error_to_journal(
+            body,
+            code="bridge_async_exception",
+            stage="bridge_upstream",
+            fallback=True,
+            trace_ref=_safe_trace_ref(trace_id),
+        )
+        print(
+            "bridge_async_send",
+            json.dumps({**trace, "upstream_status": None, "upstream_result": "async_exception", "jivo_status": None}, ensure_ascii=False),
+            flush=True,
+        )
+
+
+async def _post_event_to_jivo(
+    session: ClientSession,
+    provider_token: str,
+    payload: bytes,
+    trace_id: str,
+    trace: dict[str, object],
+    *,
+    delivery_role: str = "final",
+) -> tuple[int | None, str | None]:
+    provider_id = _env("JIVO_PROVIDER_ID")
+    if not provider_id:
+        _log_structured(trace_id, "error", **trace, error_class="config", outcome="provider_id_missing")
+        return None, "provider_id_missing"
+    try:
+        event = json.loads(payload.decode("utf-8")) if payload else {}
+    except Exception:
+        _log_structured(trace_id, "error", **trace, error_class="payload_not_json", outcome="payload_not_json")
+        return None, "payload_not_json"
+    if not isinstance(event, dict) or event.get("event") not in {"BOT_MESSAGE", "INVITE_AGENT", "INIT_RATE"}:
+        _log_structured(trace_id, "jivo_response_returned", **trace, http_status=None, response_event=_payload_event_kind(payload), outcome="event_not_sendable")
+        return None, "event_not_sendable"
+    if event.get("event") == "BOT_MESSAGE":
+        try:
+            guarded_event, guard_result = guard_jivo_event(event)
+            event = guarded_event
+            payload = json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            _log_structured(
+                trace_id,
+                "egress_guard",
+                **trace,
+                response_event="BOT_MESSAGE",
+                outcome="blocked" if guard_result and guard_result.blocked else "passed",
+                blocker_code=guard_result.blocker_code if guard_result and guard_result.blocked else None,
+                delivery_role=delivery_role,
+            )
+        except Exception:
+            if is_production():
+                message = event.get("message") if isinstance(event.get("message"), dict) else {}
+                event = {**event, "message": {**message, "type": "TEXT", "text": SAFE_CLIENT_FALLBACK_TEXT}}
+                payload = json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+                _log_structured(trace_id, "egress_guard", **trace, response_event="BOT_MESSAGE", outcome="fail_closed", blocker_code="guard_exception", delivery_role=delivery_role)
+            else:
+                _log_structured(trace_id, "egress_guard", **trace, response_event="BOT_MESSAGE", outcome="guard_exception", blocker_code="guard_exception", delivery_role=delivery_role)
+
+    endpoint_base = _env("JIVO_API_ENDPOINT_BASE", "https://bot.jivosite.com/webhooks")
+    url = endpoint_base.rstrip("/") + "/" + provider_id + "/" + provider_token
+    started = time.monotonic()
+    _log_structured(
+        trace_id,
+        "jivo_request_start",
+        **trace,
+        jivo_endpoint_ref=_safe_url_ref(url),
+        response_event=_payload_event_kind(payload),
+        response_bytes=len(payload or b""),
+        outcome="started",
+    )
+    async with session.post(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        timeout=10,
+    ) as response:
+        response_body = await response.read()
+        error = None
+        if response.status >= 400:
+            error = _safe_jivo_error(response_body)
+        event_kind = str(event.get("event") or "")
+        terminal_delivery = delivery_role == "final" and event_kind in {"BOT_MESSAGE", "INVITE_AGENT"}
+        delivery_status = ("status_sent" if delivery_role == "status" else "sent") if error is None else "jivo_error"
+        _log_structured(
+            trace_id,
+            "jivo_response_returned",
+            **trace,
+            http_status=response.status,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            response_event=event_kind,
+            outcome=delivery_status,
+            delivery_role=delivery_role,
+            delivery_status=delivery_status,
+            terminal=terminal_delivery,
+            error_class=error,
+        )
+        return response.status, error
+
+
+def _safe_jivo_error(body: bytes) -> str:
+    """Return only a fixed safe error class/code from Jivo response."""
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except Exception:
+        return "non_json_error"
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict):
+        code = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(error.get("code") or "").strip())[:80]
+        return f"jivo_error:{code}" if code else "jivo_error"
+    return "error"
+
+
+def _normalize_jivo_response(body: bytes) -> bytes:
+    """Keep Jivo responses strict and add required ids when missing."""
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except Exception:
+        return body
+    if not isinstance(payload, dict):
+        return body
+    if payload.get("event") in {"BOT_MESSAGE", "INVITE_AGENT", "INIT_RATE"} and not payload.get("id"):
+        payload["id"] = str(uuid.uuid4())
+    message = payload.get("message") if isinstance(payload.get("message"), dict) else None
+    if message and "timestamp" in message:
+        try:
+            timestamp = int(message["timestamp"])
+            if timestamp < 10_000_000_000:
+                timestamp *= 1000
+            message["timestamp"] = timestamp
+        except Exception:
+            message["timestamp"] = int(time.time() * 1000)
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _request_trace(body: bytes) -> dict[str, object]:
+    """Trace routing metadata only. Never log tokens or message text."""
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except Exception:
+        payload = {}
+    message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
+    channel = payload.get("channel") if isinstance(payload.get("channel"), dict) else {}
+    text = message.get("text") if isinstance(message.get("text"), str) else ""
+    return {
+        "event_id_ref": _safe_ref(payload.get("id")),
+        "event": payload.get("event"),
+        "site_id_ref": _safe_ref(payload.get("site_id")),
+        "chat_id_ref": _safe_ref(payload.get("chat_id")),
+        "client_id_ref": _safe_ref(payload.get("client_id")),
+        "message_length": len(text),
+        "body_bytes": len(body or b""),
+        "message_type": message.get("type"),
+        "channel_type": channel.get("type"),
+    }
+
+
+def _log_structured(trace_id: str, stage: str, **fields: object) -> None:
+    """Append one safe JSONL diagnostic event. Never include tokens, text, or raw payloads."""
+    record = {
+        "ts": dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+        "trace_id": trace_id,
+        "event": "nmbot_jivo_n8n_bridge",
+        "stage": stage,
+    }
+    record.update({k: v for k, v in fields.items() if v is not None})
+    try:
+        path = _structured_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except Exception:
+        # Diagnostics must never break webhook handling.
+        pass
+
+
+def _safe_ref(value: object) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value)
+    digest = hashlib.sha256(text.encode("utf-8", "ignore")).hexdigest()[:12]
+    return f"sha256:{digest}"
+
+
+def _safe_url_ref(url: str) -> str:
+    # Hash the full URL; expose only scheme/host-ish prefix without path tokens.
+    digest = hashlib.sha256(url.encode("utf-8", "ignore")).hexdigest()[:12]
+    prefix = url.split("/", 3)[:3]
+    return f"{'/'.join(prefix)}#sha256:{digest}"
+
+
+def _payload_event_kind(body: bytes) -> str | None:
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except Exception:
+        return "non_json"
+    if isinstance(payload, dict):
+        value = payload.get("event")
+        return str(value)[:80] if value else None
+    return "non_object"
+
+
+def _event_key(trace: dict[str, object]) -> str | None:
+    """Return a stable dialog key for stale-response protection."""
+    chat_id = trace.get("chat_id_ref")
+    client_id = trace.get("client_id_ref")
+    if not chat_id or not client_id:
+        return None
+    return f"{chat_id}:{client_id}"
+
+
+def _event_id(body: bytes) -> str | None:
+    """Return Jivo event id when present; generated ids are not logged as secrets."""
+    try:
+        payload = json.loads(body.decode("utf-8")) if body else {}
+    except Exception:
+        return None
+    event_id = payload.get("id") if isinstance(payload, dict) else None
+    return str(event_id) if event_id else None
+
+
+def _is_stale_event(event_key: str | None, event_id: str | None) -> bool:
+    """Skip sending an old bot answer if a newer message arrived in same chat."""
+    if not event_key or not event_id:
+        return False
+    return LATEST_CHAT_EVENTS.get(event_key) != event_id
+
+
+def create_app() -> web.Application:
+    app = web.Application()
+    app[APP_TASKS_KEY] = set()
+    app.router.add_get("/health", handle_health)
+    app.router.add_post("/jivo/{provider_token}", handle_proxy)
+    app.on_cleanup.append(_cleanup_tasks)
+    return app
+
+
+def _track_task(app: web.Application, coro, trace_id: str, trace: dict[str, object]) -> asyncio.Task:
+    tasks = app.setdefault(APP_TASKS_KEY, set())
+    task = asyncio.create_task(coro)
+    tasks.add(task)
+
+    def _done(done: asyncio.Task) -> None:
+        tasks.discard(done)
+        try:
+            exc = done.exception()
+        except asyncio.CancelledError:
+            _log_structured(trace_id, "task_done", **trace, outcome="cancelled")
+            return
+        if exc is None:
+            _log_structured(trace_id, "task_done", **trace, outcome="completed")
+        else:
+            _log_structured(trace_id, "task_done", **trace, outcome="failed", error_class=type(exc).__name__)
+
+    task.add_done_callback(_done)
+    return task
+
+
+async def _cleanup_tasks(app: web.Application) -> None:
+    tasks = set(app.get(APP_TASKS_KEY, set()))
+    if not tasks:
+        return
+    done, pending = await asyncio.wait(tasks, timeout=2.0)
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    _log_structured("cleanup", "task_cleanup", completed=len(done), cancelled=len(pending), outcome="completed")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", default=_env("NMBOT_N8N_BRIDGE_HOST", "0.0.0.0"))
+    parser.add_argument("--port", type=int, default=int(_env("NMBOT_N8N_BRIDGE_PORT", "8093")))
+    args = parser.parse_args()
+    web.run_app(create_app(), host=args.host, port=args.port)
+
+
+if __name__ == "__main__":
+    main()

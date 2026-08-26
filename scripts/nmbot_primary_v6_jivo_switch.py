@@ -124,9 +124,9 @@ def run(args, timeout=30):
         fail("remote_command_failed")
 
 def unit_state(name):
-    result = run(["systemctl", "--user", "show", name, "--property=LoadState", "--property=ActiveState", "--property=SubState", "--property=MainPID", "--property=ActiveEnterTimestampMonotonic"])
+    result = run(["systemctl", "--user", "show", name, "--property=LoadState", "--property=ActiveState", "--property=SubState", "--property=MainPID", "--property=ActiveEnterTimestampMonotonic", "--property=Result", "--property=ExecMainCode", "--property=ExecMainStatus"])
     values = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
-    return {"loaded": values.get("LoadState") == "loaded", "active": values.get("ActiveState") == "active", "running": values.get("SubState") == "running", "pid": values.get("MainPID") or "0", "active_since": values.get("ActiveEnterTimestampMonotonic") or "0"}
+    return {"loaded": values.get("LoadState") == "loaded", "active": values.get("ActiveState") == "active", "running": values.get("SubState") == "running", "pid": values.get("MainPID") or "0", "active_since": values.get("ActiveEnterTimestampMonotonic") or "0", "result": values.get("Result") or "unknown", "exec_main_code": values.get("ExecMainCode") or "unknown", "exec_main_status": values.get("ExecMainStatus") or "unknown"}
 
 def health(url):
     try:
@@ -239,12 +239,15 @@ def restore(backup):
 
 if operation in {"preflight", "recon"}:
     current = read_env()
+    upstream = upstream_from(current)
+    route = "current" if upstream == EXPECTED["current_upstream"] else "v6" if upstream == EXPECTED["v6_upstream"] else "other"
     ok = protected_snapshot()["healthy"] and bridge_ready() and v6_ready()
     if operation == "preflight":
-        ok = ok and upstream_from(current) == EXPECTED["current_upstream"] and not status_path.exists()
+        ok = ok and route == "current" and not status_path.exists()
     if not ok:
         fail("preflight_health_failed" if operation == "preflight" else "recon_health_failed")
-    emit({"ok": True, "schema": EXPECTED["schema"], "operation": operation, "v6_release_id": release_id, "primary_bridge_ready": True, "protected_services_healthy": True, "mutation": False})
+    bridge = unit_state(EXPECTED["primary_bridge"])
+    emit({"ok": True, "schema": EXPECTED["schema"], "operation": operation, "v6_release_id": release_id, "primary_bridge_ready": True, "primary_bridge_route": route, "primary_bridge_systemd": {"result": bridge["result"], "exec_main_code": bridge["exec_main_code"], "exec_main_status": bridge["exec_main_status"]}, "switch_status_exists": status_path.exists(), "protected_services_healthy": True, "mutation": False})
 
 if operation == "switch":
     before = protected_snapshot()

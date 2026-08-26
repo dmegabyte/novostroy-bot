@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import tarfile
 import tempfile
 import urllib.request
@@ -51,6 +52,17 @@ def fetch_package() -> tuple[bytes, str, str]:
     return archive, dist["integrity"], dist["tarball"]
 
 
+def clean_git_commit(root: Path) -> str:
+    status = subprocess.run(["git", "-C", str(root), "status", "--porcelain"], text=True, capture_output=True, check=False)
+    if status.returncode != 0 or status.stdout:
+        raise BuildError("static artifact must be built from a clean Git worktree")
+    revision = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], text=True, capture_output=True, check=False)
+    commit = revision.stdout.strip()
+    if revision.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise BuildError("static artifact source commit is unavailable")
+    return commit
+
+
 def asset_from_tarball(archive: bytes) -> tuple[str, bytes]:
     with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as tar:
         names = set(tar.getnames())
@@ -75,7 +87,7 @@ def page() -> str:
 <script src="vendor/deep-chat.js"></script><script>const chat=document.querySelector('deep-chat');chat.connect={handler:(body,signals)=>{const messages=Array.isArray(body.messages)?body.messages:[];const last=messages.at(-1)||{};const text=typeof last.text==='string'?last.text.trim():'';signals.onResponse({text:text?`Эхо: ${text}`:'Напишите сообщение для проверки.'});}};</script></body></html>"""
 
 
-def write_artifact(out_dir: Path, release_id: str, archive: bytes, integrity: str, tarball_url: str) -> Path:
+def write_artifact(out_dir: Path, release_id: str, archive: bytes, integrity: str, tarball_url: str, source_commit: str) -> Path:
     if not SAFE_RELEASE_ID.fullmatch(release_id):
         raise BuildError("unsafe release id")
     destination = out_dir / release_id
@@ -92,7 +104,7 @@ def write_artifact(out_dir: Path, release_id: str, archive: bytes, integrity: st
         for path in sorted(stage.rglob("*")):
             if path.is_file():
                 files.append({"path": str(path.relative_to(stage)), "sha256": sha256_bytes(path.read_bytes()), "size": path.stat().st_size})
-        manifest = {"schema":"nmbot.static_echo.v1", "release_id":release_id, "deep_chat":{"package":PACKAGE,"version":VERSION,"integrity":integrity,"tarball_url":tarball_url,"source_asset":asset_name}, "files":files}
+        manifest = {"schema":"nmbot.static_echo.v1", "release_id":release_id, "source_provenance":{"git_commit":source_commit}, "deep_chat":{"package":PACKAGE,"version":VERSION,"integrity":integrity,"tarball_url":tarball_url,"source_asset":asset_name}, "files":files}
         (stage / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         os.replace(stage, destination)
     return destination
@@ -105,7 +117,7 @@ def main() -> int:
     args = parser.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
     archive, integrity, tarball_url = fetch_package()
-    output = write_artifact(args.out_dir, args.release_id, archive, integrity, tarball_url)
+    output = write_artifact(args.out_dir, args.release_id, archive, integrity, tarball_url, clean_git_commit(Path(__file__).resolve().parents[1]))
     print(json.dumps({"build":"ok", "artifact":str(output), "manifest":str(output / "manifest.json")}, ensure_ascii=False))
     return 0
 

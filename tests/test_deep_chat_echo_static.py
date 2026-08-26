@@ -17,7 +17,7 @@ def package_with_asset() -> bytes:
 
 
 def test_builds_local_echo_page_with_pinned_vendor_asset(tmp_path) -> None:
-    artifact = builder.write_artifact(tmp_path, "deep-chat-echo-test.1", package_with_asset(), "sha512-test", "https://registry.npmjs.org/deep-chat/-/deep-chat-2.5.0.tgz")
+    artifact = builder.write_artifact(tmp_path, "deep-chat-echo-test.1", package_with_asset(), "sha512-test", "https://registry.npmjs.org/deep-chat/-/deep-chat-2.5.0.tgz", "a" * 40)
     page = (artifact / "index.html").read_text(encoding="utf-8")
     manifest = (artifact / "manifest.json").read_text(encoding="utf-8")
     assert "Ирина онлайн" in page
@@ -25,13 +25,14 @@ def test_builds_local_echo_page_with_pinned_vendor_asset(tmp_path) -> None:
     assert "vendor/deep-chat.js" in page
     assert "https://" not in page
     assert '"version": "2.5.0"' in manifest
+    assert '"git_commit": "' + "a" * 40 + '"' in manifest
 
 
 def test_rejects_artifact_reuse_and_missing_browser_asset(tmp_path) -> None:
     archive = package_with_asset()
-    builder.write_artifact(tmp_path, "deep-chat-echo-test.1", archive, "sha512-test", "url")
+    builder.write_artifact(tmp_path, "deep-chat-echo-test.1", archive, "sha512-test", "url", "a" * 40)
     try:
-        builder.write_artifact(tmp_path, "deep-chat-echo-test.1", archive, "sha512-test", "url")
+        builder.write_artifact(tmp_path, "deep-chat-echo-test.1", archive, "sha512-test", "url", "a" * 40)
     except builder.BuildError as exc:
         assert "already exists" in str(exc)
     else:

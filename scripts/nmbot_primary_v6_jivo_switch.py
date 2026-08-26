@@ -175,9 +175,9 @@ def upstream_from(data):
         match = re.fullmatch(r"\s*(?:export\s+)?NMBOT_BRIDGE_UPSTREAM\s*=\s*(.*?)\s*", line)
         if match:
             values.append(match.group(1).strip().strip('"').strip("'"))
-    if len(values) != 1:
+    if len(values) > 1:
         fail("primary_upstream_not_unique")
-    return values[0]
+    return values[0] if values else EXPECTED["current_upstream"]
 
 def replace_upstream(data, target):
     text = data.decode("utf-8")
@@ -189,8 +189,12 @@ def replace_upstream(data, target):
             count += 1
         else:
             output.append(line)
-    if count != 1:
+    if count > 1:
         fail("primary_upstream_not_unique")
+    if count == 0:
+        if text and not text.endswith("\n"):
+            output.append("\n")
+        output.append("NMBOT_BRIDGE_UPSTREAM=" + target + "\n")
     return "".join(output).encode("utf-8")
 
 def write_atomic(path, data, mode):

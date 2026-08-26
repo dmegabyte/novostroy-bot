@@ -38,6 +38,9 @@ def test_remote_program_is_syntax_valid_and_never_restarts_protected_units() -> 
     assert '"--property=ExecMainStatus"' in source
     assert '"primary_bridge_route": route' in source
     assert '"switch_status_exists": status_path.exists()' in source
+    assert "import time" in source
+    assert "for _ in range(20):" in source
+    assert "time.sleep(0.25)" in source
 
 
 def test_payload_and_ssh_command_are_fixed_and_redact_host_from_remote_program() -> None:

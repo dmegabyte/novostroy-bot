@@ -72,6 +72,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 from pathlib import Path
 
@@ -212,7 +213,13 @@ def write_atomic(path, data, mode):
 
 def restart_bridge():
     result = run(["systemctl", "--user", "restart", EXPECTED["primary_bridge"]])
-    return result.returncode == 0
+    if result.returncode != 0:
+        return False
+    for _ in range(20):
+        if bridge_ready():
+            return True
+        time.sleep(0.25)
+    return False
 
 def backup_path():
     return root / "backups" / (release_id + ".env")

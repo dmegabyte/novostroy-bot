@@ -17,10 +17,13 @@ SCHEMA = "nmbot.dialogue_journal.v1"
 RUNTIME_VERSION = "V6"
 SAFE_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 SAFE_RELEASE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+SAFE_ATTEMPT_RE = re.compile(r"^[A-Za-z0-9._:-]{1,200}$")
 PHONE_RE = re.compile(r"(?:\+?\d[\s().-]*){10,15}")
 EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I)
 ROLES = frozenset({"user", "bot", "system"})
 REF_FIELDS = frozenset({"site_id", "chat_id", "client_id"})
+TRACE_STAGES = frozenset({"prompt1", "mcp", "prompt2", "state", "bot_message", "url_card"})
+TRACE_STATUSES = frozenset({"not_called", "accepted", "failed", "observed_exact", "unknown", "prepared", "degraded"})
 
 
 class DialogueJournalError(ValueError):
@@ -100,6 +103,73 @@ def _safe_error_summary(value: Any) -> dict[str, Any] | None:
     }
 
 
+def _optional_code(value: Any, *, allowed: frozenset[str] | None = None) -> str:
+    try:
+        code = _safe_code(value, field="runtime diagnostic")
+    except DialogueJournalError:
+        return ""
+    if allowed is not None and code not in allowed:
+        return ""
+    return code
+
+
+def _safe_runtime_diagnostic(value: Any) -> dict[str, Any] | None:
+    """Project code-owned trace fields only; arbitrary/raw keys are discarded."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping):
+        raise DialogueJournalError("runtime_diagnostic is invalid")
+
+    diagnostic: dict[str, Any] = {}
+    for key in (
+        "status",
+        "failure_stage",
+        "error_code",
+        "material_status",
+        "material_source",
+        "tool_observation",
+        "outbox_enqueue",
+    ):
+        code = _optional_code(value.get(key))
+        if code:
+            diagnostic[key] = code
+    if value.get("error_field") not in (None, ""):
+        diagnostic["error_field_ref"] = "field_" + _digest(value.get("error_field"))[:20]
+    for key in ("awaiting_phone", "state_commit", "handoff_to_operator"):
+        if type(value.get(key)) is bool:
+            diagnostic[key] = value[key]
+    if type(value.get("model_calls")) is int and 0 <= value["model_calls"] <= 3:
+        diagnostic["model_calls"] = value["model_calls"]
+
+    trace_value = value.get("v6_trace")
+    if isinstance(trace_value, Mapping) and trace_value.get("schema_version") == 1:
+        trace: dict[str, Any] = {"schema_version": 1, "stages": []}
+        raw_stages = trace_value.get("stages")
+        if isinstance(raw_stages, list):
+            for item in raw_stages[:8]:
+                if not isinstance(item, Mapping):
+                    continue
+                stage = _optional_code(item.get("stage"), allowed=TRACE_STAGES)
+                status = _optional_code(item.get("status"), allowed=TRACE_STATUSES)
+                if not stage or not status:
+                    continue
+                safe_stage: dict[str, Any] = {"stage": stage, "status": status}
+                attempt_ref = str(item.get("attempt_ref") or "")
+                if SAFE_ATTEMPT_RE.fullmatch(attempt_ref) and not PHONE_RE.search(attempt_ref):
+                    safe_stage["attempt_ref"] = attempt_ref
+                if type(item.get("call_count")) is int and 0 <= item["call_count"] <= 3:
+                    safe_stage["call_count"] = item["call_count"]
+                trace["stages"].append(safe_stage)
+        url_card = trace_value.get("url_card")
+        if isinstance(url_card, Mapping):
+            status = _optional_code(url_card.get("status"))
+            route = _optional_code(url_card.get("route"))
+            if status or route:
+                trace["url_card"] = {key: item for key, item in (("status", status), ("route", route)) if item}
+        diagnostic["trace"] = trace
+    return diagnostic
+
+
 def append_event(
     session_key: str,
     role: str,
@@ -111,6 +181,7 @@ def append_event(
     runtime_version: str = RUNTIME_VERSION,
     event_type: str | None = None,
     error_summary: Mapping[str, Any] | None = None,
+    runtime_diagnostic: Mapping[str, Any] | None = None,
     source: str | None = None,
     release_id: str | None = None,
     path: Path | str | None = None,
@@ -153,6 +224,9 @@ def append_event(
     safe_error = _safe_error_summary(error_summary)
     if safe_error is not None:
         row["error_summary"] = safe_error
+    safe_diagnostic = _safe_runtime_diagnostic(runtime_diagnostic)
+    if safe_diagnostic is not None:
+        row["runtime_diagnostic"] = safe_diagnostic
 
     target = _journal_path(path)
     if target.exists() and (target.is_dir() or target.is_symlink()):

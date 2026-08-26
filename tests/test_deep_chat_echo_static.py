@@ -22,7 +22,8 @@ def test_builds_local_echo_page_with_pinned_vendor_asset(tmp_path) -> None:
     manifest = (artifact / "manifest.json").read_text(encoding="utf-8")
     assert "Ирина онлайн" in page
     assert "Эхо:" in page
-    assert "vendor/deep-chat.js" in page
+    assert 'type="module"' in page
+    assert "import './vendor/deep-chat.js'" in page
     assert "https://" not in page
     assert '"version": "2.5.0"' in manifest
     assert '"git_commit": "' + "a" * 40 + '"' in manifest

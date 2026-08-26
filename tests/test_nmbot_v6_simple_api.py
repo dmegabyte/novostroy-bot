@@ -7,6 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 import pytest
 
+from nmbot_v6.simple_state import SimpleState
 from scripts.nmbot_api_server import JsonStateStore, create_app
 from scripts import nmbot_v6_api as api_module
 
@@ -73,12 +74,33 @@ def test_runtime_version_rejects_any_non_v6_selector():
     asyncio.run(run())
 
 
-def test_api_reset_uses_v6_namespace():
+def test_start_and_reset_persist_valid_v6_state(monkeypatch, tmp_path):
+    monkeypatch.setenv("NMBOT_DIALOGUE_JOURNAL", str(tmp_path / "dialogue.jsonl"))
+
     async def run():
-        async with TestClient(TestServer(create_app())) as client:
+        app = create_app()
+        async with TestClient(TestServer(app)) as client:
             response = await client.post("/api/reset", json={"user_id": "v6-test"})
             assert response.status == 200
             assert (await response.json())["runtime_version"] == "V6"
+            api_start = await client.post("/api/chat", json={"user_id": "api-start", "message": "/start"})
+            assert api_start.status == 200
+            jivo_start = await client.post(
+                "/jivo/provider",
+                json={
+                    "event": "CLIENT_MESSAGE",
+                    "id": "event-start",
+                    "site_id": "site",
+                    "chat_id": "chat",
+                    "client_id": "client",
+                    "message": {"text": "/start"},
+                },
+            )
+            assert jivo_start.status == 200
+
+            for user_id in ("v6-test", "api-start", "jivo:site:chat:client"):
+                envelope = await app["state_store"].get(user_id)
+                assert SimpleState.from_mapping(envelope["nmbot_v6"]) == SimpleState()
 
     asyncio.run(run())
 
@@ -167,6 +189,7 @@ def test_reset_waits_for_inflight_turn_and_remains_final(monkeypatch):
             await turn
             response = await reset
             assert response.status == 200
-            assert await app["state_store"].get("same-user") == {"nmbot_v6": {}}
+            envelope = await app["state_store"].get("same-user")
+            assert SimpleState.from_mapping(envelope["nmbot_v6"]) == SimpleState()
 
     asyncio.run(run())

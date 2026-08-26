@@ -176,7 +176,14 @@ def _jivo_authorized(request: web.Request) -> bool:
     return True
 
 
-def _journal_jivo_event(payload: Mapping[str, Any], *, role: str, text: str = "", answer_kind: str | None = None) -> None:
+def _journal_jivo_event(
+    payload: Mapping[str, Any],
+    *,
+    role: str,
+    text: str = "",
+    answer_kind: str | None = None,
+    runtime_diagnostic: Mapping[str, Any] | None = None,
+) -> None:
     try:
         append_event(
             session_key=f"jivo:{payload.get('site_id')}:{payload.get('chat_id')}:{payload.get('client_id')}",
@@ -189,6 +196,7 @@ def _journal_jivo_event(payload: Mapping[str, Any], *, role: str, text: str = ""
                 "client_id": payload.get("client_id"),
             },
             answer_kind=answer_kind,
+            runtime_diagnostic=runtime_diagnostic,
             runtime_version="V6",
         )
     except Exception:
@@ -292,10 +300,20 @@ async def handle_jivo(request: web.Request) -> web.Response:
         _journal_jivo_event(payload, role="bot", text=greeting, answer_kind="start_reset")
         return _json(_jivo_bot_message(payload, greeting))
     result = await run_chat(request.app, user_id=f"jivo:{payload.get('site_id')}:{payload.get('chat_id')}:{payload.get('client_id')}", message=text, channel="jivo", meta={"event_id": payload.get("id"), "agents_online": payload.get("agents_online")})
+    runtime_diagnostic = dict(result.get("meta")) if isinstance(result.get("meta"), Mapping) else {}
+    for key in ("awaiting_phone", "handoff_to_operator"):
+        if type(result.get(key)) is bool:
+            runtime_diagnostic[key] = result[key]
     if result.get("handoff_to_operator"):
-        _journal_jivo_event(payload, role="bot", answer_kind="invite_agent")
+        _journal_jivo_event(payload, role="bot", answer_kind="invite_agent", runtime_diagnostic=runtime_diagnostic or None)
         return _json(_jivo_invite(payload))
-    _journal_jivo_event(payload, role="bot", text=str(result.get("answer") or ""), answer_kind=str(result.get("intent") or "v6"))
+    _journal_jivo_event(
+        payload,
+        role="bot",
+        text=str(result.get("answer") or ""),
+        answer_kind=str(result.get("intent") or "v6"),
+        runtime_diagnostic=runtime_diagnostic or None,
+    )
     return _json(_jivo_bot_message(payload, result.get("answer", "")))
 
 

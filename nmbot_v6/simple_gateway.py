@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -47,7 +48,6 @@ class DirectTransport:
         self.client, self.timeout = client, timeout
 
     async def complete(self, payload: Mapping[str, Any]) -> SimpleGatewayResult:
-        import os
         output, meta = await self.client._run_gateway_request_once(dict(payload), {"Authorization": f"Bearer {os.getenv('OVERMIND_TOKEN') or os.getenv('GATEWAY_POLL_TOKEN') or ''}"}, self.timeout)
         if isinstance(meta, Mapping) and meta.get("_upstream_error") is True:
             raise RuntimeError("upstream_error")
@@ -85,6 +85,7 @@ class SimpleGateway:
             "service": "openrouter", "model": PROMPT1_MODEL if p1 else PROMPT2_MODEL,
             "system_prompt": prompt,
             "parameters": {"temperature": 0 if p1 else 0.2, "max_tokens": 1800},
+            "external_api_key": os.getenv("OPENROUTER_API_KEY", ""),
         }
         if p1:
             payload["mcp_servers"] = [MCP_SERVER]

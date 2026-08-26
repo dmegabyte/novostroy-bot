@@ -103,6 +103,20 @@ def test_direct_transport_ignores_malformed_optional_transport_trace(raw_trace):
     assert asyncio.run(DirectTransport(Client()).complete({})).tool_trace is None
 
 
+def test_simple_gateway_passes_openrouter_key_to_direct_gateway(monkeypatch):
+    class Transport:
+        async def complete(self, payload):
+            self.payload = payload
+            return result({"action": "continue", "facts": [], "near": [], "missing": [], "params": {}})
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    transport = Transport()
+
+    asyncio.run(SimpleGateway(transport, "prompt1").run({"message": "test"}))
+
+    assert transport.payload["external_api_key"] == "test-openrouter-key"
+
+
 @pytest.mark.parametrize("generic_metadata", [
     {"diagnostics": {"mcp_calls": 1}},
     {"mcp_server": "novostroym", "mcp_tool": "get_flat_info", "call_count": 1},

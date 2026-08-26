@@ -7,10 +7,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
+import hashlib
 import json
 import os
 import sys
+import tempfile
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -63,31 +67,74 @@ class JsonStateStore:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
+        self._lock_path = self.path.with_suffix(self.path.suffix + ".lock")
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._session_lock_dir = self.path.parent / f".{self.path.name}.sessions"
+        self._session_lock_dir.mkdir(mode=0o700, exist_ok=True)
+
+    def _read_unlocked(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {}
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def _with_file_lock(self) -> int:
+        fd = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
+
+    def _acquire_session_file_lock(self, key: str) -> int:
+        token = hashlib.sha256(str(key).encode("utf-8")).hexdigest()
+        path = self._session_lock_dir / f"{token}.lock"
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd
+
+    @asynccontextmanager
+    async def session_lock(self, key: str):
+        token = hashlib.sha256(str(key).encode("utf-8")).hexdigest()
+        local_lock = self._session_locks.setdefault(token, asyncio.Lock())
+        async with local_lock:
+            fd = await asyncio.to_thread(self._acquire_session_file_lock, key)
+            try:
+                yield
+            finally:
+                await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_UN)
+                os.close(fd)
 
     async def get(self, key: str) -> dict[str, Any]:
         async with self._lock:
-            if not self.path.exists():
-                return {}
+            fd = self._with_file_lock()
             try:
-                raw = json.loads(self.path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                return {}
+                raw = self._read_unlocked()
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
             value = raw.get(key, {}) if isinstance(raw, dict) else {}
             return dict(value) if isinstance(value, dict) else {}
 
     async def save(self, key: str, value: Mapping[str, Any]) -> None:
         async with self._lock:
-            raw: dict[str, Any] = {}
-            if self.path.exists():
+            fd = self._with_file_lock()
+            try:
+                raw = self._read_unlocked()
+                raw[key] = dict(value)
+                descriptor, temporary = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent))
                 try:
-                    loaded = json.loads(self.path.read_text(encoding="utf-8"))
-                    raw = dict(loaded) if isinstance(loaded, dict) else {}
-                except (OSError, ValueError):
-                    raw = {}
-            raw[key] = dict(value)
-            tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-            tmp.write_text(json.dumps(raw, ensure_ascii=False, sort_keys=True), encoding="utf-8")
-            tmp.replace(self.path)
+                    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                        json.dump(raw, handle, ensure_ascii=False, sort_keys=True)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                    os.replace(temporary, self.path)
+                finally:
+                    if os.path.exists(temporary):
+                        os.unlink(temporary)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
 
 
 class RuntimeVersionStore:
@@ -111,15 +158,19 @@ def _json(value: Any, *, status: int = 200) -> web.Response:
 
 def _authorized(request: web.Request) -> bool:
     expected = os.getenv("NMBOT_API_TOKEN", "").strip()
+    if request.app.get("contour_profile") == "PROD" and not expected:
+        return False
     return not expected or request.headers.get("Authorization", "") == f"Bearer {expected}"
 
 
 def _jivo_authorized(request: web.Request) -> bool:
     provider = os.getenv("JIVO_PROVIDER_TOKEN", "").strip()
     requested_provider = str(request.match_info.get("provider_token") or "").strip()
+    bridge = os.getenv("NMBOT_N8N_BRIDGE_TOKEN", "").strip()
+    if request.app.get("contour_profile") == "PROD" and (not provider or not bridge):
+        return False
     if provider and requested_provider != provider:
         return False
-    bridge = os.getenv("NMBOT_N8N_BRIDGE_TOKEN", "").strip()
     if bridge and request.headers.get("X-NMBOT-Bridge-Token", "") != bridge:
         return False
     return True
@@ -166,7 +217,8 @@ def _jivo_invite(payload: Mapping[str, Any]) -> dict[str, Any]:
 
 
 async def run_chat(app: web.Application, *, user_id: str, message: str, channel: str, meta: dict[str, Any] | None = None) -> dict[str, Any]:
-    return await run_v6_simple_turn(app, user_id=user_id, message=message, channel=channel, meta=meta)
+    async with app["state_store"].session_lock(user_id):
+        return await run_v6_simple_turn(app, user_id=user_id, message=message, channel=channel, meta=meta)
 
 
 async def handle_health(request: web.Request) -> web.Response:
@@ -203,7 +255,8 @@ async def handle_chat(request: web.Request) -> web.Response:
     user_id = _user_id(payload)
     message = str(payload.get("message") or "")
     if _start(message):
-        await request.app["state_store"].save(user_id, {"nmbot_v6": {}})
+        async with request.app["state_store"].session_lock(user_id):
+            await request.app["state_store"].save(user_id, {"nmbot_v6": {}})
         return _json({"ok": True, "answer": request.app["v6_greeting"], "meta": {"runtime": "v6", "answer_kind": "start_reset", "profile": request.app["contour_profile"]}})
     result = await run_chat(request.app, user_id=user_id, message=message, channel=str(payload.get("channel") or "api"), meta=payload.get("meta") if isinstance(payload.get("meta"), dict) else {})
     return _json(result, status=200 if result.get("ok") else 502)
@@ -214,7 +267,8 @@ async def handle_reset(request: web.Request) -> web.Response:
         return _json({"ok": False, "error": "unauthorized"}, status=401)
     payload = await request.json()
     user_id = _user_id(payload)
-    await request.app["state_store"].save(user_id, {"nmbot_v6": {}})
+    async with request.app["state_store"].session_lock(user_id):
+        await request.app["state_store"].save(user_id, {"nmbot_v6": {}})
     return _json({"ok": True, "runtime_version": "V6"})
 
 
@@ -232,7 +286,8 @@ async def handle_jivo(request: web.Request) -> web.Response:
     _journal_jivo_event(payload, role="user", text=text)
     if _start(text):
         user_id = f"jivo:{payload.get('site_id')}:{payload.get('chat_id')}:{payload.get('client_id')}"
-        await request.app["state_store"].save(user_id, {"nmbot_v6": {}})
+        async with request.app["state_store"].session_lock(user_id):
+            await request.app["state_store"].save(user_id, {"nmbot_v6": {}})
         greeting = request.app["v6_greeting"]
         _journal_jivo_event(payload, role="bot", text=greeting, answer_kind="start_reset")
         return _json(_jivo_bot_message(payload, greeting))

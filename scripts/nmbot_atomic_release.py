@@ -10,6 +10,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import tarfile
 import tempfile
 from dataclasses import dataclass
@@ -21,9 +22,8 @@ SCHEMA = "nmbot.atomic_release.v1"
 IDENTITY_SCHEMA = "nmbot.release_identity.v1"
 RELEASE_IDENTITY_PATH = "release_identity/nmbot_release_identity.json"
 V6_ONLY_PROFILE = "v6-only"
-BRIDGE_PROFILE = "v6-bridge"
-CALLBACK_WORKER_PROFILE = "v6-callback-worker"
 SAFE_RELEASE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+GIT_SHA_RE = re.compile(r"^[0-9a-f]{40,64}$")
 
 V6_API_FILES = (
     "requirements.txt",
@@ -46,27 +46,6 @@ V6_API_FILES = (
     "scripts/nmbot_v6_api.py",
     "scripts/nmbot_v6_simple_adapter.py",
 )
-BRIDGE_FILES = (
-    "requirements.txt",
-    "scripts/__init__.py",
-    "scripts/dialogue_journal.py",
-    "scripts/nmbot_egress_policy.py",
-    "scripts/nmbot_n8n_bridge_server.py",
-    "scripts/nmbot_release_registry.py",
-)
-CALLBACK_WORKER_FILES = (
-    "requirements-worker.txt",
-    "scripts/__init__.py",
-    "scripts/nmbot_callback_crm.py",
-    "scripts/nmbot_callback_crm_control.py",
-    "scripts/nmbot_callback_crm_delivery_check.py",
-    "scripts/nmbot_callback_sheet_worker.py",
-    "scripts/nmbot_callback_summary.py",
-    "scripts/nmbot_crm_outbox.py",
-    "scripts/nmbot_google_sheets.py",
-)
-
-
 @dataclass(frozen=True)
 class BuildResult:
     manifest: Path
@@ -95,13 +74,53 @@ def _safe_relative(value: str) -> str:
 def _profile_contract(profile: str) -> tuple[str, tuple[str, ...], list[str]]:
     contracts = {
         V6_ONLY_PROFILE: ("api", V6_API_FILES, ["scripts.nmbot_api_server"]),
-        BRIDGE_PROFILE: ("bridge", BRIDGE_FILES, ["scripts.nmbot_n8n_bridge_server"]),
-        CALLBACK_WORKER_PROFILE: ("callback-worker", CALLBACK_WORKER_FILES, ["scripts.nmbot_callback_sheet_worker"]),
     }
     try:
         return contracts[profile]
     except KeyError as exc:
         raise AtomicReleaseError("unknown V6 artifact profile") from exc
+
+
+def _git_source_provenance(root: Path) -> dict[str, str]:
+    def run(*args: str) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(root), *args],
+                text=True,
+                capture_output=True,
+                timeout=20,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise AtomicReleaseError("Git source provenance check failed") from exc
+        if result.returncode != 0:
+            raise AtomicReleaseError("Git source provenance check failed")
+        return result.stdout.strip()
+
+    git_sha = run("rev-parse", "--verify", "HEAD").lower()
+    tree_sha = run("rev-parse", "--verify", "HEAD^{tree}").lower()
+    if not GIT_SHA_RE.fullmatch(git_sha) or not GIT_SHA_RE.fullmatch(tree_sha):
+        raise AtomicReleaseError("Git source identity is invalid")
+    if run("status", "--porcelain=v1", "--untracked-files=all"):
+        raise AtomicReleaseError("source tree must be clean before artifact build")
+    unsigned = {"git_sha": git_sha, "git_tree_sha": tree_sha, "tree_state": "clean"}
+    receipt = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return {**unsigned, "clean_receipt_sha256": receipt}
+
+
+def _git_blob(root: Path, git_sha: str, relative: str) -> bytes:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), "show", f"{git_sha}:{relative}"],
+            capture_output=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AtomicReleaseError("Git source blob verification failed") from exc
+    if result.returncode != 0:
+        raise AtomicReleaseError(f"allowlisted file is not present in source Git tree: {relative}")
+    return result.stdout
 
 
 def _source_payload(root: Path, relative: str) -> bytes:
@@ -173,10 +192,18 @@ def build(*, release_id: str, out_dir: Path, root: Path, profile: str = V6_ONLY_
     source_root = source_input.resolve()
     destination = destination_input.resolve()
     scope, allowed_files, import_modules = _profile_contract(profile)
+    source_provenance = _git_source_provenance(source_root)
     if len(set(allowed_files)) != len(allowed_files):
         raise AtomicReleaseError("artifact allowlist contains duplicates")
 
-    payloads = {relative: _source_payload(source_root, relative) for relative in allowed_files}
+    payloads: dict[str, bytes] = {}
+    for relative in allowed_files:
+        payload = _source_payload(source_root, relative)
+        if payload != _git_blob(source_root, source_provenance["git_sha"], relative):
+            raise AtomicReleaseError(f"allowlisted file differs from source Git tree: {relative}")
+        payloads[relative] = payload
+    if _git_source_provenance(source_root) != source_provenance:
+        raise AtomicReleaseError("Git source changed while artifact was being built")
     source_rows = [
         {"path": relative, "sha256": hashlib.sha256(payloads[relative]).hexdigest()}
         for relative in sorted(payloads)
@@ -196,6 +223,7 @@ def build(*, release_id: str, out_dir: Path, root: Path, profile: str = V6_ONLY_
         "archive_name": archive_name,
         "archive_sha256": hashlib.sha256(archive_payload).hexdigest(),
         "import_modules": import_modules,
+        "source_provenance": source_provenance,
         "files": rows,
     }
     manifest_payload = (json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
@@ -218,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--release-id", required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
-    parser.add_argument("--profile", choices=(V6_ONLY_PROFILE, BRIDGE_PROFILE, CALLBACK_WORKER_PROFILE), default=V6_ONLY_PROFILE)
+    parser.add_argument("--profile", choices=(V6_ONLY_PROFILE,), default=V6_ONLY_PROFILE)
     args = parser.parse_args(argv)
     try:
         result = build(release_id=args.release_id, out_dir=args.out_dir, root=args.root, profile=args.profile)

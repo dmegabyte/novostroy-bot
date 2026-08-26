@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -20,11 +21,49 @@ except ImportError:  # direct scripts/ execution
 
 SLOT_SCHEMA = "nmbot.slot_descriptor.v1"
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-DESCRIPTOR_KEYS = frozenset({"schema", "profile", "slot", "release_id", "release_root", "env_file", "data_root", "port"})
+DESCRIPTOR_KEYS = frozenset({"schema", "profile", "slot", "release_id", "release_root", "manifest_path", "manifest_sha256", "env_file", "data_root", "port"})
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class SlotRunnerError(ValueError):
     pass
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_release_tree(release_root: Path, *, release_id: str, manifest_path: Path, manifest_sha256: str) -> None:
+    if not manifest_path.is_file() or manifest_path.is_symlink() or not SHA256_RE.fullmatch(manifest_sha256):
+        raise SlotRunnerError("release manifest identity is invalid")
+    if _sha256_file(manifest_path) != manifest_sha256:
+        raise SlotRunnerError("release manifest hash mismatch")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SlotRunnerError("release manifest is missing or malformed") from exc
+    rows = manifest.get("files") if isinstance(manifest, dict) else None
+    if not isinstance(manifest, dict) or manifest.get("schema_version") != "nmbot.atomic_release.v1" or manifest.get("release_id") != release_id or not isinstance(rows, list):
+        raise SlotRunnerError("release manifest does not match slot release")
+    expected: dict[str, str] = {}
+    for row in rows:
+        relative = str(row.get("path") or "") if isinstance(row, dict) and set(row) == {"path", "sha256"} else ""
+        sha = str(row.get("sha256") or "") if isinstance(row, dict) else ""
+        relative_path = Path(relative)
+        if not relative or relative_path.is_absolute() or ".." in relative_path.parts or relative in expected or not SHA256_RE.fullmatch(sha):
+            raise SlotRunnerError("release manifest file row is invalid")
+        expected[relative] = sha
+    actual = {path.relative_to(release_root).as_posix() for path in release_root.rglob("*") if path.is_file() or path.is_symlink()}
+    if actual != set(expected):
+        raise SlotRunnerError("release file set differs from manifest")
+    for relative, sha in expected.items():
+        path = release_root / relative
+        if not path.is_file() or path.is_symlink() or _sha256_file(path) != sha:
+            raise SlotRunnerError("release file hash mismatch")
 
 
 def _absolute_path(value: Any, *, field: str, must_exist: bool) -> Path:
@@ -51,6 +90,8 @@ def load_descriptor(path: Path) -> dict[str, Any]:
     slot = normalize_slot(raw.get("slot"))
     release_id = validate_release_id(raw.get("release_id"))
     release_root = _absolute_path(raw.get("release_root"), field="release_root", must_exist=True)
+    manifest_path = _absolute_path(raw.get("manifest_path"), field="manifest_path", must_exist=True)
+    manifest_sha256 = str(raw.get("manifest_sha256") or "")
     env_file = _absolute_path(raw.get("env_file"), field="env_file", must_exist=True)
     if not env_file.is_file():
         raise SlotRunnerError("env_file must be a regular file")
@@ -61,6 +102,7 @@ def load_descriptor(path: Path) -> dict[str, Any]:
         raise SlotRunnerError("port is invalid") from exc
     if isinstance(raw.get("port"), bool) or not 1024 <= port <= 65535:
         raise SlotRunnerError("port is invalid")
+    _verify_release_tree(release_root, release_id=release_id, manifest_path=manifest_path, manifest_sha256=manifest_sha256)
     entrypoint = release_root / "scripts" / "nmbot_api_server.py"
     identity_path = release_root / "release_identity" / "nmbot_release_identity.json"
     if not entrypoint.is_file() or entrypoint.is_symlink():
@@ -77,6 +119,8 @@ def load_descriptor(path: Path) -> dict[str, Any]:
         "slot": slot,
         "release_id": release_id,
         "release_root": str(release_root),
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": manifest_sha256,
         "env_file": str(env_file),
         "data_root": str(data_root),
         "port": port,

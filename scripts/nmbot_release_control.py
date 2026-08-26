@@ -78,6 +78,9 @@ class InspectedArtifact:
     archive_sha256: str
     manifest_sha256: str
     prompt_sha256: str
+    source_git_sha: str
+    source_git_tree_sha: str
+    source_clean_receipt_sha256: str
     files: tuple[tuple[str, str], ...]
 
 
@@ -142,6 +145,17 @@ def inspect_artifact(manifest_path: Path, archive_path: Path) -> InspectedArtifa
         raise ReleaseControlError("artifact archive sha256 mismatch")
     if manifest.get("import_modules") != V6_IMPORT_MODULES:
         raise ReleaseControlError("artifact is not the V6-only API profile")
+    provenance = manifest.get("source_provenance")
+    if not isinstance(provenance, dict) or set(provenance) != {"git_sha", "git_tree_sha", "tree_state", "clean_receipt_sha256"}:
+        raise ReleaseControlError("artifact source provenance is missing or malformed")
+    source_git_sha = validate_git_sha(provenance.get("git_sha"))
+    source_git_tree_sha = validate_git_sha(provenance.get("git_tree_sha"))
+    if not source_git_sha or not source_git_tree_sha or provenance.get("tree_state") != "clean":
+        raise ReleaseControlError("artifact source provenance is not a clean Git tree")
+    unsigned_provenance = {"git_sha": source_git_sha, "git_tree_sha": source_git_tree_sha, "tree_state": "clean"}
+    expected_clean_receipt = hashlib.sha256(json.dumps(unsigned_provenance, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    if provenance.get("clean_receipt_sha256") != expected_clean_receipt:
+        raise ReleaseControlError("artifact clean-tree receipt is invalid")
     rows = manifest.get("files")
     if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_FILES:
         raise ReleaseControlError("artifact file list is invalid")
@@ -172,6 +186,9 @@ def inspect_artifact(manifest_path: Path, archive_path: Path) -> InspectedArtifa
         archive_sha256=actual_archive_sha,
         manifest_sha256=_sha256_file(manifest_path),
         prompt_sha256=prompt_sha,
+        source_git_sha=source_git_sha,
+        source_git_tree_sha=source_git_tree_sha,
+        source_clean_receipt_sha256=expected_clean_receipt,
         files=tuple(files),
     )
 
@@ -215,7 +232,15 @@ def _extract_verified(artifact: InspectedArtifact, destination: Path) -> None:
 
 
 def _verify_installed(release_root: Path, files: tuple[tuple[str, str], ...]) -> None:
-    for relative, digest in files:
+    expected = {relative: digest for relative, digest in files}
+    actual = {
+        path.relative_to(release_root).as_posix()
+        for path in release_root.rglob("*")
+        if path.is_file() or path.is_symlink()
+    }
+    if actual != set(expected):
+        raise ReleaseControlError("installed immutable release file set differs from artifact")
+    for relative, digest in expected.items():
         path = release_root / relative
         if not path.is_file() or path.is_symlink() or _sha256_file(path) != digest:
             raise ReleaseControlError("installed immutable release differs from artifact")
@@ -424,10 +449,7 @@ class ReleaseController:
         manifest = json.loads(self._stored_manifest(release_id).read_text(encoding="utf-8"))
         return self.artifacts_dir / validate_release_id(release_id) / str(manifest["archive_name"])
 
-    def install_artifact(self, *, manifest: Path, archive: Path, source_git_sha: str) -> dict[str, Any]:
-        git_sha = validate_git_sha(source_git_sha)
-        if not git_sha:
-            raise ReleaseControlError("source_git_sha is required")
+    def install_artifact(self, *, manifest: Path, archive: Path) -> dict[str, Any]:
         inspected = inspect_artifact(manifest, archive)
         with self._locked():
             artifact_dir = self.artifacts_dir / inspected.release_id
@@ -474,7 +496,7 @@ class ReleaseController:
                     release_id=inspected.release_id,
                     artifact_sha256=inspected.archive_sha256,
                     manifest_sha256=inspected.manifest_sha256,
-                    source_git_sha=git_sha,
+                    source_git_sha=inspected.source_git_sha,
                     prompt_sha256=inspected.prompt_sha256,
                 )
                 return {
@@ -482,6 +504,8 @@ class ReleaseController:
                     "artifact_dir": str(artifact_dir),
                     "release_root": str(release_dir),
                     "startup_receipt": startup_receipt,
+                    "source_git_tree_sha": inspected.source_git_tree_sha,
+                    "source_clean_receipt_sha256": inspected.source_clean_receipt_sha256,
                 }
             except Exception:
                 if created_release:
@@ -498,7 +522,6 @@ class ReleaseController:
         return destination.install_artifact(
             manifest=self._stored_manifest(release_id),
             archive=self._stored_archive(release_id),
-            source_git_sha=source["source_git_sha"],
         )
 
     def promote_to(self, destination: "ReleaseController", release_id: str) -> dict[str, Any]:
@@ -564,6 +587,10 @@ class ReleaseController:
         release_root = self.releases_dir / rid
         if not release_root.is_dir() or release_root.is_symlink():
             raise ReleaseControlError("immutable release is not installed")
+        inspected = inspect_artifact(self._stored_manifest(rid), self._stored_archive(rid))
+        if inspected.archive_sha256 != release.get("artifact_sha256") or inspected.manifest_sha256 != release.get("manifest_sha256"):
+            raise ReleaseControlError("registered release provenance differs from stored artifact")
+        _verify_installed(release_root, inspected.files)
         instance = self._instance(normalized_profile, selected_slot)
         descriptor_path = self._descriptor_path(normalized_profile, selected_slot)
         data_root = self.profiles_dir / normalized_profile.lower() / "data"
@@ -573,6 +600,8 @@ class ReleaseController:
             "slot": selected_slot,
             "release_id": rid,
             "release_root": str(release_root),
+            "manifest_path": str(self._stored_manifest(rid)),
+            "manifest_sha256": inspected.manifest_sha256,
             "env_file": str(environment_path),
             "data_root": str(data_root),
             "port": numeric_port,
@@ -676,7 +705,7 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("status")
     commands.add_parser("journal")
     register = commands.add_parser("register")
-    register.add_argument("--manifest", type=Path, required=True); register.add_argument("--archive", type=Path, required=True); register.add_argument("--source-git-sha", required=True); register.add_argument("--apply", action="store_true"); register.add_argument("--confirm", required=True)
+    register.add_argument("--manifest", type=Path, required=True); register.add_argument("--archive", type=Path, required=True); register.add_argument("--apply", action="store_true"); register.add_argument("--confirm", required=True)
     quality = commands.add_parser("quality")
     quality.add_argument("release_id"); quality.add_argument("--verdict", choices=("approved", "rejected"), required=True); quality.add_argument("--receipt-ref", required=True); quality.add_argument("--apply", action="store_true"); quality.add_argument("--confirm", required=True)
     check = commands.add_parser("check")
@@ -702,7 +731,7 @@ def main() -> None:
         elif args.command == "status": result = controller.status()
         elif args.command == "journal": result = controller.registry.journal_events()
         elif args.command == "register":
-            inspected = inspect_artifact(args.manifest, args.archive); _require_apply(args, inspected.release_id); result = controller.install_artifact(manifest=args.manifest, archive=args.archive, source_git_sha=args.source_git_sha)
+            inspected = inspect_artifact(args.manifest, args.archive); _require_apply(args, inspected.release_id); result = controller.install_artifact(manifest=args.manifest, archive=args.archive)
         elif args.command == "quality":
             _require_apply(args, args.release_id); result = controller.registry.set_quality(args.release_id, verdict=args.verdict, receipt_ref=args.receipt_ref)
         elif args.command == "check":

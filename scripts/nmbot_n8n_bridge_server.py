@@ -178,6 +178,8 @@ def _resolve_bridge_route() -> dict[str, str | None]:
             "release_id": active["release_id"],
             "upstream": active["upstream"],
         }
+    if _env("NMBOT_ALLOW_STATIC_BRIDGE_UPSTREAM") != "1":
+        raise BridgeRouteError("active_route_required")
     try:
         upstream = validate_upstream(_env("NMBOT_BRIDGE_UPSTREAM", "http://127.0.0.1:8088"))
     except ReleaseRegistryError as exc:

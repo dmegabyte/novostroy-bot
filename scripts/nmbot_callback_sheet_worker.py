@@ -14,16 +14,24 @@ try:
     from scripts.nmbot_callback_summary import DeterministicSummaryProvider, SummaryProvider, build_sanitized_summary_input, deterministic_summary_fallback
     from scripts.nmbot_crm_outbox import LocalCallbackOutbox
     from scripts.nmbot_callback_crm import CallbackCRMAdapter
+    from scripts.nmbot_callback_crm_control import read_control
     from scripts.nmbot_google_sheets import CallbackSheetAdapter, ConfigurationError, GoogleSheetsCallbackAdapter, GoogleSheetsConfig
 except ImportError:  # direct scripts/ execution
     from nmbot_callback_summary import DeterministicSummaryProvider, SummaryProvider, build_sanitized_summary_input, deterministic_summary_fallback
     from nmbot_crm_outbox import LocalCallbackOutbox
     from nmbot_callback_crm import CallbackCRMAdapter
+    from nmbot_callback_crm_control import read_control
     from nmbot_google_sheets import CallbackSheetAdapter, ConfigurationError, GoogleSheetsCallbackAdapter, GoogleSheetsConfig
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _crm_delivery_enabled(contour: str) -> bool:
+    normalized = str(contour or "").strip().upper()
+    control_path = str(os.getenv("NMBOT_CALLBACK_CRM_CONTROL_FILE") or "").strip()
+    return normalized == "PROD" and read_control(control_path, contour=normalized)
 
 
 class CallbackSheetWorker:
@@ -136,6 +144,13 @@ class CallbackSheetWorker:
         if lease.status != "leased" or not lease.record:
             return {"processed": 0, "status": lease.status, "lead_ref": lead_ref}
         record = lease.record
+        provenance = record.get("provenance") if isinstance(record.get("provenance"), dict) else {}
+        contour = str(provenance.get("contour") or "").strip().upper()
+        if not _crm_delivery_enabled(contour):
+            delivery = record.setdefault("crm_delivery", {})
+            delivery.update({"status": "disabled", "lease_owner": "", "lease_until": "", "last_error_class": "crm_disabled_at_delivery"})
+            self.outbox.update_record(record)
+            return {"processed": 1, "status": "crm_disabled", "lead_ref": lead_ref}
         delivery = record.setdefault("crm_delivery", {})
         attempts = int(delivery.get("attempts") or 0)
         summary = record.setdefault("summary", {})

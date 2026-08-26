@@ -7,7 +7,8 @@ python3 scripts/nmbot_atomic_release.py \
   --release-id <exact-id> --out-dir <new-directory> --profile v6-only
 ```
 
-Build only from a clean committed SHA. The resulting archive/manifest is immutable.
+The builder rejects a dirty worktree and records exact Git commit/tree identity plus a
+clean-tree receipt inside the immutable manifest.
 
 ## Safe activation sequence
 
@@ -19,6 +20,11 @@ Build only from a clean committed SHA. The resulting archive/manifest is immutab
 
 `sync` and `promote` copy exact bytes only. Neither activates PROD. Activation, rollback,
 external smoke, commit, push and deploy are separate approvals.
+
+This controller releases only the V6 API. Bridge and callback worker are separate
+infrastructure components: this source tree deliberately provides no deploy command for them.
+Do not deploy either component until its own immutable install and rollback procedure has been
+implemented, reviewed and explicitly authorized.
 
 ## Read-only local diagnostics
 

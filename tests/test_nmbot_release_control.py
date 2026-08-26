@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from pathlib import Path
 
@@ -11,6 +13,15 @@ from scripts.nmbot_release_control import ReleaseControlError, ReleaseController
 
 ROOT = Path(__file__).resolve().parents[1]
 GIT_SHA = "1" * 40
+TREE_SHA = "2" * 40
+
+
+@pytest.fixture(autouse=True)
+def fixed_source_provenance(monkeypatch):
+    unsigned = {"git_sha": GIT_SHA, "git_tree_sha": TREE_SHA, "tree_state": "clean"}
+    receipt = hashlib.sha256(json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    monkeypatch.setattr(atomic, "_git_source_provenance", lambda _root: {**unsigned, "clean_receipt_sha256": receipt})
+    monkeypatch.setattr(atomic, "_git_blob", lambda root, _sha, relative: (Path(root) / relative).read_bytes())
 
 
 class FakeServiceManager:
@@ -56,7 +67,6 @@ def _install(controller: ReleaseController, artifact) -> dict:
     return controller.install_artifact(
         manifest=artifact.manifest,
         archive=artifact.archive,
-        source_git_sha=GIT_SHA,
     )
 
 
@@ -70,6 +80,8 @@ def test_install_is_immutable_idempotent_and_detects_release_tampering(tmp_path:
     assert installed["release_id"] == "v6-r41"
     assert repeated["artifact_sha256"] == installed["artifact_sha256"]
     assert installed["startup_receipt"].startswith("startup:")
+    assert installed["source_git_sha"] == GIT_SHA
+    assert installed["source_git_tree_sha"] == TREE_SHA
     assert repeated["startup_receipt"] == installed["startup_receipt"]
     identity = Path(installed["release_root"]) / "release_identity" / "nmbot_release_identity.json"
     assert identity.is_file()
@@ -161,6 +173,21 @@ def test_prepare_failure_marks_slot_failed_and_stops_inactive_process(tmp_path: 
     assert controller.registry.slot_state(profile="TEST", slot="A")["status"] == "failed"
     assert services.restarted == ["test-a"]
     assert services.stopped == ["test-a"]
+
+
+def test_prepare_rejects_tampered_release_before_start(tmp_path: Path, artifacts) -> None:
+    first, _ = artifacts
+    services = FakeServiceManager()
+    controller = ReleaseController(tmp_path / "control", service_manager=services, health_probe=FakeHealth())
+    installed = _install(controller, first)
+    entrypoint = Path(installed["release_root"]) / "scripts" / "nmbot_api_server.py"
+    entrypoint.write_text("# changed\n", encoding="utf-8")
+    env_file = tmp_path / "contour.env"
+    env_file.write_text("", encoding="utf-8")
+
+    with pytest.raises(ReleaseControlError, match="differs from artifact"):
+        controller.prepare_slot(profile="TEST", release_id="v6-r41", port=18088, env_file=env_file, slot="A")
+    assert services.restarted == []
 
 
 def test_failed_post_switch_check_restores_original_route(tmp_path: Path, artifacts, monkeypatch) -> None:

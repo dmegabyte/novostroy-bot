@@ -7,6 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "nmbot_n8n_bridge_server.py"
 spec = importlib.util.spec_from_file_location("nmbot_n8n_bridge_server", SCRIPT)
@@ -404,6 +405,7 @@ def test_hard_timeout_final_fallback_is_sent_even_after_status(monkeypatch) -> N
         monkeypatch.setenv("NMBOT_API_TOKEN", "api")
         monkeypatch.setenv("NMBOT_BRIDGE_TIMEOUT_SECONDS", "0.01")
         monkeypatch.setenv("NMBOT_BRIDGE_HARD_TIMEOUT_SECONDS", "0.02")
+        monkeypatch.setenv("NMBOT_ALLOW_STATIC_BRIDGE_UPSTREAM", "1")
         monkeypatch.setattr(mod, "ClientSession", lambda timeout=None: Session())
         monkeypatch.setattr(mod, "_log_structured", lambda _trace_id, stage, **fields: logs.append((stage, fields)))
         body = b'{"event":"CLIENT_MESSAGE","id":"e1","site_id":"s","chat_id":"c","client_id":"u","message":{"text":"hi"}}'
@@ -443,6 +445,7 @@ def _write_route(path: Path, *, profile: str = "TEST", slot: str = "A", release_
 def test_bridge_static_route_is_loopback_only_migration_mode(monkeypatch) -> None:
     monkeypatch.delenv("NMBOT_ACTIVE_ROUTE_FILE", raising=False)
     monkeypatch.delenv("NMBOT_CONTOUR_PROFILE", raising=False)
+    monkeypatch.setenv("NMBOT_ALLOW_STATIC_BRIDGE_UPSTREAM", "1")
     monkeypatch.setenv("NMBOT_BRIDGE_UPSTREAM", "http://127.0.0.1:18088")
 
     assert mod._resolve_bridge_route() == {
@@ -460,6 +463,14 @@ def test_bridge_static_route_is_loopback_only_migration_mode(monkeypatch) -> Non
         assert exc.code == "static_upstream_invalid"
     else:
         raise AssertionError("remote bridge upstream must fail closed")
+
+
+def test_bridge_requires_active_route_without_explicit_migration_mode(monkeypatch) -> None:
+    monkeypatch.delenv("NMBOT_ACTIVE_ROUTE_FILE", raising=False)
+    monkeypatch.delenv("NMBOT_ALLOW_STATIC_BRIDGE_UPSTREAM", raising=False)
+
+    with pytest.raises(mod.BridgeRouteError, match="active_route_required"):
+        mod._resolve_bridge_route()
 
 
 def test_bridge_dynamic_route_requires_exact_profile(tmp_path: Path, monkeypatch) -> None:

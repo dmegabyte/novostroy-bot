@@ -50,3 +50,39 @@ values, restarts services, changes routes, calls a model/provider or sends a Jiv
 selected contour root. `v6_contract=verified` additionally requires matching V6 profile and
 release identity evidence. `traffic_role` deliberately remains `unverified`: current client
 routing or terminal delivery requires a separately authorized correlated Jivo trace.
+
+## Isolated API-only TEST
+
+When no independently identified TEST contour exists, do not reuse `primary` or
+`client-production`. `scripts/nmbot_test_api_deploy.py` owns one fixed, loopback-only V6 TEST at
+`/home/neiro/.local/state/nmbot-v6-clean-test`, transient unit
+`nmbot-v6-clean-test.service`, and port `18088`.
+
+The owner has no bridge, connected Jivo ingress, n8n or CRM delivery. The API still contains its
+ordinary loopback Jivo handler, but no bridge or webhook routes traffic to it. The deployer
+projects only the allowlisted gateway settings from the existing primary environment without
+printing their values. Before and after start/stop it requires all four existing API/bridge
+services and loopback health endpoints to stay healthy, with unchanged process identities. It
+never restarts or stops those services.
+
+Safe order:
+
+1. Build the exact immutable API artifact from a clean Git commit.
+2. Run `python3 scripts/nmbot_test_api_deploy.py preflight` (read-only).
+3. Review the artifact SHA, target contract and rollback command.
+4. Obtain a separate deploy approval, then run `deploy` with `--apply` and exact confirmation
+   `DEPLOY-<release-id>-TO-ISOLATED-TEST`.
+5. Health verification is automatic and does not call a model/provider. A chat/model probe is a
+   separate paid/external approval.
+6. The first rollback is an isolated stop, not a route change: after separate approval run
+   `stop --release-id <release-id> --apply --confirm STOP-<release-id>-ISOLATED-TEST`.
+
+This first TEST has no previous TEST release. Therefore adding a persistent A/B control plane
+would not improve its initial rollback: stopping the isolated service removes its only effect
+while both existing live contours continue unchanged. Add A/B only before a later TEST upgrade
+that needs a stable TEST endpoint.
+
+The deployer never overwrites an existing release ID or private upload staging directory. On a
+failed install it stops the isolated unit if startup had begun and preserves partial evidence
+under the isolated TEST root. Inspect that evidence before any separately approved cleanup or a
+new release attempt.

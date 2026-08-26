@@ -26,23 +26,25 @@ SCHEMA = "nmbot.release_identity.v1"
 UNKNOWN_RELEASE_ID = "UNKNOWN"
 SAFE_RELEASE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 DEFAULT_TRACKED_FILES = tuple(sorted((
-    "followup_intent_classifier.py",
-    "prompts/v2_response_composer.txt",
-    "prompts/v2_response_formatter.txt",
-    "prompts/v2_response_writer.txt",
-    "prompts/v2_manager_rewriter.txt",
-    "prompts/v2_search_mcp.txt",
-    "search_profiles.py",
+    "requirements.txt",
+    "nmbot_v6/__init__.py",
+    "nmbot_v6/phone.py",
+    "nmbot_v6/simple_contract.py",
+    "nmbot_v6/simple_gateway.py",
+    "nmbot_v6/simple_runtime.py",
+    "nmbot_v6/simple_state.py",
+    "nmbot_v6/url_card.py",
+    "prompts/v6_simple_answer_writer.txt",
+    "prompts/v6_simple_search_agent.txt",
+    "scripts/__init__.py",
     "scripts/dialogue_journal.py",
     "scripts/nmbot_api_server.py",
+    "scripts/nmbot_callback_crm_control.py",
     "scripts/nmbot_crm_outbox.py",
-    "scripts/nmbot_dialogue_report.py",
     "scripts/nmbot_gateway_client.py",
-    "scripts/nmbot_planner_context.py",
-    "scripts/nmbot_release.py",
     "scripts/nmbot_release_identity.py",
-    "scripts/nmbot_runtime_adapter.py",
-    *(str(path.relative_to(ROOT)) for path in (ROOT / "nmbot_v2").glob("*.py")),
+    "scripts/nmbot_v6_api.py",
+    "scripts/nmbot_v6_simple_adapter.py",
 )))
 
 

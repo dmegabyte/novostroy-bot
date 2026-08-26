@@ -1,0 +1,15 @@
+[Unit]
+Description=NMBot V6 deterministic callback worker profile %i
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.local/state/nmbot-v6-release/unit-env/callback-%i.env
+ExecStart=/usr/bin/python3 ${NMBOT_CALLBACK_WORKER_RUNNER} --loop --poll-seconds ${NMBOT_CALLBACK_POLL_SECONDS}
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=default.target

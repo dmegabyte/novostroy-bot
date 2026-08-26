@@ -7,6 +7,7 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "nmbot_n8n_bridge_server.py"
 spec = importlib.util.spec_from_file_location("nmbot_n8n_bridge_server", SCRIPT)
@@ -404,6 +405,7 @@ def test_hard_timeout_final_fallback_is_sent_even_after_status(monkeypatch) -> N
         monkeypatch.setenv("NMBOT_API_TOKEN", "api")
         monkeypatch.setenv("NMBOT_BRIDGE_TIMEOUT_SECONDS", "0.01")
         monkeypatch.setenv("NMBOT_BRIDGE_HARD_TIMEOUT_SECONDS", "0.02")
+        monkeypatch.setenv("NMBOT_ALLOW_STATIC_BRIDGE_UPSTREAM", "1")
         monkeypatch.setattr(mod, "ClientSession", lambda timeout=None: Session())
         monkeypatch.setattr(mod, "_log_structured", lambda _trace_id, stage, **fields: logs.append((stage, fields)))
         body = b'{"event":"CLIENT_MESSAGE","id":"e1","site_id":"s","chat_id":"c","client_id":"u","message":{"text":"hi"}}'
@@ -416,5 +418,153 @@ def test_hard_timeout_final_fallback_is_sent_even_after_status(monkeypatch) -> N
         assert final_posts[-1]["event"] == "BOT_MESSAGE"
         terminal = [fields for stage, fields in logs if stage == "jivo_response_returned" and fields.get("delivery_role") == "final"]
         assert terminal and terminal[-1]["terminal"] is True
+
+    asyncio.run(scenario())
+
+
+def _write_route(path: Path, *, profile: str = "TEST", slot: str = "A", release_id: str = "v6-r42", port: int = 18088) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "nmbot.active_route.v1",
+                "profile": profile,
+                "revision": 1,
+                "active": {
+                    "slot": slot,
+                    "release_id": release_id,
+                    "upstream": f"http://127.0.0.1:{port}",
+                },
+                "previous": None,
+                "switched_at": "2026-08-25T12:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_bridge_static_route_is_loopback_only_migration_mode(monkeypatch) -> None:
+    monkeypatch.delenv("NMBOT_ACTIVE_ROUTE_FILE", raising=False)
+    monkeypatch.delenv("NMBOT_CONTOUR_PROFILE", raising=False)
+    monkeypatch.setenv("NMBOT_ALLOW_STATIC_BRIDGE_UPSTREAM", "1")
+    monkeypatch.setenv("NMBOT_BRIDGE_UPSTREAM", "http://127.0.0.1:18088")
+
+    assert mod._resolve_bridge_route() == {
+        "mode": "static",
+        "profile": "TEST",
+        "slot": None,
+        "release_id": None,
+        "upstream": "http://127.0.0.1:18088",
+    }
+
+    monkeypatch.setenv("NMBOT_BRIDGE_UPSTREAM", "https://example.test:18088")
+    try:
+        mod._resolve_bridge_route()
+    except mod.BridgeRouteError as exc:
+        assert exc.code == "static_upstream_invalid"
+    else:
+        raise AssertionError("remote bridge upstream must fail closed")
+
+
+def test_bridge_requires_active_route_without_explicit_migration_mode(monkeypatch) -> None:
+    monkeypatch.delenv("NMBOT_ACTIVE_ROUTE_FILE", raising=False)
+    monkeypatch.delenv("NMBOT_ALLOW_STATIC_BRIDGE_UPSTREAM", raising=False)
+
+    with pytest.raises(mod.BridgeRouteError, match="active_route_required"):
+        mod._resolve_bridge_route()
+
+
+def test_bridge_dynamic_route_requires_exact_profile(tmp_path: Path, monkeypatch) -> None:
+    route_path = tmp_path / "active-route.json"
+    _write_route(route_path, profile="TEST", slot="B", release_id="v6-r43", port=18089)
+    monkeypatch.setenv("NMBOT_ACTIVE_ROUTE_FILE", str(route_path))
+    monkeypatch.setenv("NMBOT_CONTOUR_PROFILE", "TEST")
+
+    assert mod._resolve_bridge_route() == {
+        "mode": "dynamic",
+        "profile": "TEST",
+        "slot": "B",
+        "release_id": "v6-r43",
+        "upstream": "http://127.0.0.1:18089",
+    }
+
+    monkeypatch.setenv("NMBOT_CONTOUR_PROFILE", "PROD")
+    try:
+        mod._resolve_bridge_route()
+    except mod.BridgeRouteError as exc:
+        assert exc.code == "route_file_invalid"
+    else:
+        raise AssertionError("a TEST route must never be consumed by PROD")
+
+
+def test_bridge_health_reports_safe_dynamic_route_identity(tmp_path: Path, monkeypatch) -> None:
+    async def scenario() -> None:
+        route_path = tmp_path / "active-route.json"
+        _write_route(route_path, profile="PROD", slot="A", release_id="v6-r44", port=18090)
+        monkeypatch.setenv("NMBOT_ACTIVE_ROUTE_FILE", str(route_path))
+        monkeypatch.setenv("NMBOT_CONTOUR_PROFILE", "PROD")
+
+        response = await mod.handle_health(None)
+        payload = json.loads(response.text)
+
+        assert response.status == 200
+        assert payload["route"]["mode"] == "dynamic"
+        assert payload["route"]["profile"] == "PROD"
+        assert payload["route"]["slot"] == "A"
+        assert payload["route"]["release_id"] == "v6-r44"
+        assert payload["route"]["upstream_ref"].startswith("http://127.0.0.1:18090#sha256:")
+        assert str(route_path) not in response.text
+
+    asyncio.run(scenario())
+
+
+def test_malformed_dynamic_route_sends_terminal_jivo_fallback(tmp_path: Path, monkeypatch) -> None:
+    async def scenario() -> None:
+        posts: list[dict] = []
+        journal_rows: list[dict] = []
+
+        class Response:
+            status = 200
+
+            async def read(self) -> bytes:
+                return b"{}"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            def post(self, url, *, data, **_kwargs):
+                posts.append({"url": url, "payload": json.loads(data.decode("utf-8"))})
+                return Response()
+
+        route_path = tmp_path / "active-route.json"
+        route_path.write_text('{"schema":"broken"}', encoding="utf-8")
+        monkeypatch.setenv("NMBOT_ACTIVE_ROUTE_FILE", str(route_path))
+        monkeypatch.setenv("NMBOT_CONTOUR_PROFILE", "TEST")
+        monkeypatch.setenv("JIVO_PROVIDER_ID", "provider")
+        monkeypatch.setattr(mod, "ClientSession", lambda timeout=None: Session())
+        monkeypatch.setattr(mod, "_log_structured", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(mod, "append_journal_event", lambda **kwargs: journal_rows.append(kwargs))
+
+        body = b'{"event":"CLIENT_MESSAGE","id":"e-route","site_id":"s","chat_id":"c","client_id":"u","message":{"text":"private"}}'
+        trace = mod._request_trace(body)
+        event_key = mod._event_key(trace)
+        mod.LATEST_CHAT_EVENTS[event_key] = "e-route"
+
+        await mod._send_to_jivo_after_bot("provider-token", body, trace, event_key, "e-route", "trace-route")
+
+        assert len(posts) == 1
+        assert posts[0]["url"].startswith("https://bot.jivosite.com/")
+        assert posts[0]["payload"]["event"] == "BOT_MESSAGE"
+        assert any(row["error_summary"]["codes"] == ["bridge_route_unavailable"] for row in journal_rows)
+        assert all("private" not in json.dumps(row, ensure_ascii=False) for row in journal_rows)
 
     asyncio.run(scenario())

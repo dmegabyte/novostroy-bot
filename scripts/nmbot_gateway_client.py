@@ -36,7 +36,7 @@ SAFE_UPSTREAM_ERROR_TEXT = (
     "По запросу не удалось найти информацию. Точный ответ уточнит оператор. В текущих данных это не подтверждено. Передать оператору запрос?"
 )
 
-LOGS_DIR: Final[Path] = REPO_ROOT / "logs"
+LOGS_DIR: Final[Path] = Path(os.getenv("NMBOT_LOGS_DIR", str(REPO_ROOT / "logs"))).expanduser()
 GATEWAY_FORENSIC_LOG_DIR: Final[Path] = LOGS_DIR / "forensic"
 LOGGER = logging.getLogger(__name__)
 
@@ -478,10 +478,10 @@ def _log_model_payload_metrics(stage: str, request_data: dict[str, Any], *, retr
 
 
 class OvermindClient:
-    """Channel-neutral Overmind gateway client for API/Jivo V2 runtime.
+    """Channel-neutral Overmind gateway client for the V6 API.
 
     This intentionally contains only session management and low-level task
-    transport semantics shared with the historical Telegram client.
+    transport semantics used by the active runtime.
     """
 
     def __init__(self) -> None:

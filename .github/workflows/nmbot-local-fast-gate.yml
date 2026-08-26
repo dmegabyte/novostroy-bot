@@ -20,13 +20,16 @@ jobs:
         with:
           python-version: "3.12.3"
 
-      - name: Install locked dependencies
+      - name: Install test dependencies
         env:
           PIP_DISABLE_PIP_VERSION_CHECK: "1"
         run: |
           set -euo pipefail
-          python -m pip install --require-hashes --only-binary :all: -r requirements-deploy.lock
+          python -m pip install --requirement requirements.txt pytest
           python -m pip check
 
-      - name: Run local docs/contracts/quality gate
-        run: python scripts/nmbot_check.py docs contracts quality
+      - name: Compile source
+        run: python -m compileall -q nmbot_v6 scripts tests
+
+      - name: Run test suite
+        run: PYTHONPATH=. pytest -q

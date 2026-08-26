@@ -31,6 +31,7 @@ SCHEMA_V2 = "nmbot.callback_sheet_outbox.v2"
 DRAFT_SCHEMA = "nmbot.callback_contact_draft.v1"
 MSK_TZ = ZoneInfo("Europe/Moscow")
 TERMINAL_DELIVERY_STATUSES = {"sheet_delivered", "failed", "append_uncertain"}
+CRM_TERMINAL_DELIVERY_STATUSES = {"crm_delivered", "failed", "uncertain", "disabled"}
 SENSITIVE_KEY_RE = re.compile(r"phone|телефон|contact|client_id|chat_id|site_id|sender|token|secret|raw|payload", re.I)
 PHONE_LIKE_RE = re.compile(r"(?:\+?\d[\s()\-.]*){10,15}")
 
@@ -87,6 +88,48 @@ def _safe_text(value: Any, *, limit: int = 500) -> str:
     if PHONE_LIKE_RE.search(text):
         return ""
     return text[:limit]
+
+
+def normalize_contour(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    return text if text in {"PROD", "TEST"} else "UNKNOWN"
+
+
+def normalize_runtime_version(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    return text if re.fullmatch(r"V\d+", text) else "UNKNOWN"
+
+
+def build_callback_provenance(*, runtime_version: Any = None, release_id: Any = None, experiment_id: Any = None, contour: Any = None) -> dict[str, str]:
+    safe_release = str(release_id or "").strip()
+    if safe_release == "UNKNOWN" or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}", safe_release):
+        safe_release = ""
+    safe_experiment = str(experiment_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", safe_experiment):
+        safe_experiment = ""
+    return {
+        "contour": normalize_contour(contour if contour is not None else os.getenv("NMBOT_CONTOUR_PROFILE")),
+        "runtime_version": normalize_runtime_version(runtime_version),
+        "release_id": safe_release,
+        "experiment_id": safe_experiment,
+    }
+
+
+def _crm_enabled_for_contour(contour: str) -> bool:
+    # TEST is a hard safety boundary: no control file or runtime flag may enable CRM.
+    if contour != "PROD":
+        return False
+    path = str(os.getenv("NMBOT_CALLBACK_CRM_CONTROL_FILE") or "").strip()
+    if not path:
+        return False
+    try:
+        try:
+            from scripts.nmbot_callback_crm_control import read_control
+        except ImportError:  # direct scripts/ execution
+            from nmbot_callback_crm_control import read_control
+        return read_control(path, contour=contour)
+    except (ImportError, OSError):
+        return False
 
 
 def _safe_nested_value(value: Any, *, depth: int = 0) -> Any:
@@ -252,6 +295,7 @@ class LocalCallbackOutbox:
         context: dict[str, Any],
         summary_input: dict[str, Any] | None = None,
         created_at: datetime | None = None,
+        provenance: dict[str, Any] | None = None,
     ) -> CallbackOutboxResult:
         key = self.deterministic_key(
             session_key=session_key,
@@ -276,6 +320,8 @@ class LocalCallbackOutbox:
             ):
                 if canonical_key in summary_input and canonical_key not in safe_summary_input:
                     safe_summary_input[canonical_key] = empty_value
+        captured_provenance = build_callback_provenance(**(provenance or {}))
+        crm_enabled = _crm_enabled_for_contour(captured_provenance["contour"])
         record = {
             "schema": SCHEMA_V2,
             "created_at": int(now.timestamp()),  # v1 compatibility
@@ -291,12 +337,23 @@ class LocalCallbackOutbox:
             "context": context,
             "summary_input": safe_summary_input,
             "summary": {"status": "pending", "text": "", "attempts": 0},
+            "provenance": captured_provenance,
             "delivery": {"status": "pending_summary"},  # v1-ish compatibility
             "sheet_delivery": {
                 "status": "pending_summary",
                 "attempts": 0,
                 "next_attempt_at": _iso_utc(now),
                 "sheet_row_ref": "",
+                "lease_owner": "",
+                "lease_until": "",
+                "last_error_class": "",
+            },
+            "crm_delivery": {
+                "status": "pending_summary" if crm_enabled else "disabled",
+                "initial_status": "pending" if crm_enabled else "disabled",
+                "attempts": 0,
+                "next_attempt_at": _iso_utc(now),
+                "receipt": "",
                 "lease_owner": "",
                 "lease_until": "",
                 "last_error_class": "",
@@ -328,15 +385,17 @@ class LocalCallbackOutbox:
         except FileNotFoundError:
             return
 
-    def iter_due_records(self, *, now: datetime | None = None, owner: str = "") -> list[dict[str, Any]]:
+    def iter_due_records(self, *, now: datetime | None = None, owner: str = "", sink: str = "sheet") -> list[dict[str, Any]]:
         current = now or _utc_now()
         records: list[dict[str, Any]] = []
         for path in sorted(self.root.glob("*.json")):
             record = self._read_json_path(path)
             if not record or record.get("schema") != SCHEMA_V2:
                 continue
-            delivery = record.get("sheet_delivery") if isinstance(record.get("sheet_delivery"), dict) else {}
-            if str(delivery.get("status") or "") in TERMINAL_DELIVERY_STATUSES:
+            field = "crm_delivery" if sink == "crm" else "sheet_delivery"
+            delivery = record.get(field) if isinstance(record.get(field), dict) else {}
+            terminal = CRM_TERMINAL_DELIVERY_STATUSES if sink == "crm" else TERMINAL_DELIVERY_STATUSES
+            if not delivery or str(delivery.get("status") or "") in terminal:
                 continue
             next_at = _parse_time(delivery.get("next_attempt_at")) or datetime.fromtimestamp(0, timezone.utc)
             lease_until = _parse_time(delivery.get("lease_until"))
@@ -347,14 +406,16 @@ class LocalCallbackOutbox:
                 records.append(record)
         return records
 
-    def lease_record(self, *, lead_ref: str, owner: str, ttl_seconds: int = 60, now: datetime | None = None) -> LeaseResult:
+    def lease_record(self, *, lead_ref: str, owner: str, ttl_seconds: int = 60, now: datetime | None = None, sink: str = "sheet") -> LeaseResult:
         current = now or _utc_now()
         for path in sorted(self.root.glob("*.json")):
             record = self._read_json_path(path)
             if not record or record.get("lead_ref") != lead_ref:
                 continue
-            delivery = record.setdefault("sheet_delivery", {})
-            if str(delivery.get("status") or "") in TERMINAL_DELIVERY_STATUSES:
+            field = "crm_delivery" if sink == "crm" else "sheet_delivery"
+            delivery = record.get(field) if isinstance(record.get(field), dict) else None
+            terminal = CRM_TERMINAL_DELIVERY_STATUSES if sink == "crm" else TERMINAL_DELIVERY_STATUSES
+            if not delivery or str(delivery.get("status") or "") in terminal:
                 return LeaseResult(status="terminal", record=record)
             lease_until = _parse_time(delivery.get("lease_until"))
             if lease_until and lease_until > current and delivery.get("lease_owner") not in ("", owner):
@@ -372,9 +433,9 @@ class LocalCallbackOutbox:
         clean = {k: v for k, v in record.items() if k != "_path"}
         self._atomic_write_json(path, clean)
 
-    def schedule_retry(self, record: dict[str, Any], *, error_class: str, delay_seconds: int, now: datetime | None = None) -> None:
+    def schedule_retry(self, record: dict[str, Any], *, error_class: str, delay_seconds: int, now: datetime | None = None, sink: str = "sheet") -> None:
         current = now or _utc_now()
-        delivery = record.setdefault("sheet_delivery", {})
+        delivery = record.setdefault("crm_delivery" if sink == "crm" else "sheet_delivery", {})
         attempts = int(delivery.get("attempts") or 0) + 1
         delivery.update({
             "status": "retrying",
@@ -386,9 +447,19 @@ class LocalCallbackOutbox:
         })
         self.update_record(record)
 
-    def mark_failed(self, record: dict[str, Any], *, error_class: str) -> None:
-        delivery = record.setdefault("sheet_delivery", {})
+    def mark_failed(self, record: dict[str, Any], *, error_class: str, sink: str = "sheet") -> None:
+        delivery = record.setdefault("crm_delivery" if sink == "crm" else "sheet_delivery", {})
         delivery.update({"status": "failed", "lease_owner": "", "lease_until": "", "last_error_class": str(error_class or "error")[:80]})
+        self.update_record(record)
+
+    def mark_crm_uncertain(self, record: dict[str, Any], *, error_class: str) -> None:
+        delivery = record.setdefault("crm_delivery", {})
+        delivery.update({"status": "uncertain", "lease_owner": "", "lease_until": "", "last_error_class": str(error_class or "crm_transport_uncertain")[:80]})
+        self.update_record(record)
+
+    def mark_crm_delivered(self, record: dict[str, Any], *, receipt: str = "", delivered_at: datetime | None = None) -> None:
+        delivery = record.setdefault("crm_delivery", {})
+        delivery.update({"status": "crm_delivered", "receipt": str(receipt or "")[:120], "delivered_at_utc": _iso_utc(delivered_at or _utc_now()), "lease_owner": "", "lease_until": "", "last_error_class": ""})
         self.update_record(record)
 
     def mark_append_uncertain(self, record: dict[str, Any], *, row_ref: str) -> None:

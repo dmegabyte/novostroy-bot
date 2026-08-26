@@ -41,6 +41,9 @@ def test_remote_program_is_syntax_valid_and_never_restarts_protected_units() -> 
     assert "import time" in source
     assert "for _ in range(20):" in source
     assert "time.sleep(0.25)" in source
+    assert 'if backup.read_bytes() != original:' in source
+    assert 'fail("switch_backup_mismatch")' in source
+    assert 'fail("switch_backup_unsafe")' in source
 
 
 def test_payload_and_ssh_command_are_fixed_and_redact_host_from_remote_program() -> None:

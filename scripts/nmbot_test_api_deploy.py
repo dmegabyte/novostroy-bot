@@ -57,6 +57,7 @@ COPIED_ENV_KEYS = frozenset(
         "OVERMIND_URL",
         "OVERMIND_TOKEN",
         "GATEWAY_POLL_TOKEN",
+        "OPENROUTER_API_KEY",
         "NMBOT_OPENROUTER_EXCLUDE_REASONING",
         "NMBOT_MAIN_SEARCH_FALLBACK_ENABLED",
         "NMBOT_MAIN_SEARCH_FALLBACK_MODELS",
@@ -142,6 +143,7 @@ COPIED_KEYS = {
     "OVERMIND_URL",
     "OVERMIND_TOKEN",
     "GATEWAY_POLL_TOKEN",
+    "OPENROUTER_API_KEY",
     "NMBOT_OPENROUTER_EXCLUDE_REASONING",
     "NMBOT_MAIN_SEARCH_FALLBACK_ENABLED",
     "NMBOT_MAIN_SEARCH_FALLBACK_MODELS",
@@ -384,6 +386,8 @@ def projected_environment(release_id, release_dir):
             selected[key] = value
     if not (selected.get("OVERMIND_TOKEN", "").strip() or selected.get("GATEWAY_POLL_TOKEN", "").strip()):
         fail("gateway_token_missing")
+    if not selected.get("OPENROUTER_API_KEY", "").strip():
+        fail("openrouter_key_missing")
     data_root = root / "data" / release_id
     fixed = {
         "NMBOT_CONTOUR_PROFILE": "TEST",

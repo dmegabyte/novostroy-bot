@@ -38,6 +38,8 @@ def test_remote_owner_never_restarts_or_stops_protected_services() -> None:
     assert "JIVO_PROVIDER_TOKEN" not in deployer.COPIED_ENV_KEYS
     assert "NMBOT_N8N_BRIDGE_TOKEN" not in deployer.COPIED_ENV_KEYS
     assert "NMBOT_CALLBACK_CRM_ENDPOINT" not in deployer.COPIED_ENV_KEYS
+    assert "OPENROUTER_API_KEY" in deployer.COPIED_ENV_KEYS
+    assert "openrouter_key_missing" in source
 
 
 def test_preflight_payload_is_read_only_and_fixed() -> None:

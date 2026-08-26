@@ -30,6 +30,10 @@ def test_remote_program_is_syntax_valid_and_never_restarts_protected_units() -> 
         assert f'"stop", "{unit}"' not in source
     assert "switch_backup_hash_mismatch" in source
     assert "rollback_upstream_verify_failed" in source
+    assert 'if len(values) > 1:' in source
+    assert 'return values[0] if values else EXPECTED["current_upstream"]' in source
+    assert 'if count == 0:' in source
+    assert 'output.append("NMBOT_BRIDGE_UPSTREAM=" + target + "\\n")' in source
 
 
 def test_payload_and_ssh_command_are_fixed_and_redact_host_from_remote_program() -> None:

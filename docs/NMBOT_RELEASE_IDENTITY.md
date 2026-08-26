@@ -1,62 +1,12 @@
-# NMBOT release identity
+# Release identity
 
-`runtime_version` and `release_id` answer different questions:
+`runtime=V6` is the behavior contract. `release_id` identifies one immutable build of that
+runtime. The artifact manifest hashes every included file and carries an in-release identity
+file. The controller verifies archive, manifest, extracted file hashes and isolated startup
+before registration.
 
-- `runtime_version` (`V0`, `V2`, `V3`) identifies the engine selected for this
-  particular dialogue turn;
-- `release_id` identifies the immutable source bundle that produced the turn.
+TEST and PROD registry state is independent. Each profile records active and previous A/B
+targets. Sync or promotion copies exact bytes and metadata but never activates PROD.
 
-`prompt_set_id` is narrower: it identifies the exact prompt texts configured or
-actually invoked at a dialogue or quality boundary. Its contract is in
-`docs/NMBOT_PROMPT_PROVENANCE.md`. A release can contain several prompt files,
-while one turn may invoke only a subset.
-
-New Jivo journal rows record both fields. `nmbot_dialogue_report.py` shows them
-on every timeline row, so a client answer can be connected to its runtime and
-to the release manifest used for a rollback decision.
-
-## Manifest and identifiers
-
-`data/nmbot_release_identity.json` has schema
-`nmbot.release_identity.v1`, a safe `release_id`, creation timestamp and SHA256
-hashes of the tracked source files. The checked-in `local-unreleased` identity
-is only a local source baseline; it is not evidence of a deployed release.
-
-Read the current local identity without writing anything:
-
-```bash
-python3 scripts/nmbot_release_identity.py show
-```
-
-Creating an identity writes a local file and is intentionally explicit:
-
-```bash
-python3 scripts/nmbot_release_identity.py create \
-  --release-id 2026-07-22.v2-financing-copy.1 --write
-```
-
-Use a new immutable identifier for every deploy. Do not reuse an identifier for
-changed hashes.
-
-## Deploy and rollback boundary
-
-The mutating deploy route now requires an identifier:
-
-```bash
-python3 scripts/nmbot_release.py deploy \
-  --release-id 2026-07-22.v2-financing-copy.1
-```
-
-It writes the manifest before copying files and includes it in the remote backup
-and deploy set. This command uses SSH, SCP and service restart; it requires an
-explicit release stop/go and is not run by local checks.
-
-Before a rollback, collect fresh read-only VPS/Jivo evidence, locate the affected
-`release_id` in `nmbot_dialogue_report.py`, compare the manifest hashes with the
-corresponding release backup, then obtain rollback approval. `release_id` makes
-the source bundle traceable; it does not prove a healthy deploy, Jivo delivery,
-or response quality.
-
-Sources: `scripts/nmbot_release_identity.py`; `scripts/dialogue_journal.py`;
-`scripts/nmbot_dialogue_report.py`; `scripts/nmbot_release.py`;
-`nmbot_v2/prompt_provenance.py`.
+The append-only release journal is SHA-256 chained and stores only bounded receipt/status
+metadata. Existing release IDs are never overwritten or automatically deleted.

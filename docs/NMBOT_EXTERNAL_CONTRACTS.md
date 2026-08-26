@@ -1,25 +1,23 @@
-# NMBOT external contracts — 2026-07-22
+# External contracts
 
-This matrix lists boundaries that simplification must not break, including the callback outbox. Unknown fields stay unknown until a fixture, source line or fresh live log proves them. No secrets or token values belong in this file.
+## Jivo
 
-| Contract | Producer | Consumer | Schema / evidence | Fixture or targeted check | Alert / log | Rollback / compatibility | Owner |
-|---|---|---|---|---|---|---|---|
-| Jivo Bot API webhook | Jivo → bridge/API; API builds responses | Jivo client UI, n8n bridge, API service | Existing route `msknmbot`; isolated route `msknmbot-prod/jivo_prod_9jr6O6BreVALjGKnX9Xagl`; both use `CLIENT_MESSAGE`/`BOT_MESSAGE` contract | `tests/test_nmbot_api_jivo_p1.py`; safe route probe execution `1353238`; real Jivo smoke pending operator setup | `logs/bot_error_events-YYYY-MM-DD.jsonl`, bridge structured log | Restore previous API/bridge files; keep provider token secret; live smoke only after release approval | Jivo contract owner TBD |
-| Jivo bridge token/header | Bridge receives public webhook and forwards to local API | API service and Jivo route | Header `X-NMBOT-Bridge-Token` required by bridge source; value secret and not logged | Static/targeted bridge tests when touched; no local network in `nmbot check` | `logs/n8n_bridge_structured.jsonl` | Revert bridge config/file; restart only in release route | bridge owner TBD |
-| Jivo bridge waiting statuses | Bridge optionally sends nonterminal `BOT_MESSAGE` status updates while upstream is running | Jivo client UI, bridge structured log | Disabled by default; `NMBOT_BRIDGE_STATUS_UPDATES_ENABLED=1`, interval default 3 seconds, templates separated by `\|`; final outcome remains exactly one terminal response | Bridge timeout, trace analyzer and env-helper tests; production needs Jivo-side delivery evidence | `status_update` plus status-role delivery events, then final-role delivery; stale-event and hard-timeout guards | Disable flag and restart bridge; restore bridge/.env backup; never treat `accepted_async` alone as UI proof | bridge owner TBD |
-| Overmind/MCP/evidence | Runtime/gateway client and MCP-backed search | V0/V2 response builders, quality gates | Typed search/evidence contracts in V2 modules; exact external API schema requires targeted fixtures/live evidence | V2 runtime/search contract tests under `nmbot check v2`; contract probes only when boundary changes | Gateway/error events such as timeout, empty response, parse failure | Revert search contract; keep previous prompt/runtime backup | search contract owner TBD |
-| Callback outbox | API callback capture writes private durable outbox | Callback Sheets worker and operator reconciliation | `SCHEMA_V2 = nmbot.callback_sheet_outbox.v2`; draft schema `nmbot.callback_contact_draft.v1` | `tests/test_nmbot_callback_flow.py`; `tests/test_nmbot_callback_worker.py`; `nmbot check contracts` | Worker status and outbox delivery fields; do not expose private contact values | Retry/reconcile from outbox; never blindly append duplicates | callback owner TBD |
-| Google Sheets worker | `scripts/nmbot_callback_sheet_worker.py` | Google Sheets callback ledger | Env-derived config; `--diagnose` validates shape without network; append contract uses created_at, phone, name, summary, lead_ref | Worker tests; local diagnose only when explicitly needed | Worker failed/retrying statuses; external Sheet evidence requires live check | Stop worker or retry; append idempotency via lead_ref/lookup | Sheets owner TBD |
-| Dialogue journal | API/runtime journal writer | Diagnostics, reports, runtime attribution | Append-only `logs/dialogue_journal.jsonl`; safe tokens only, including terminal `error_summary` (`ok|degraded|failed`) | Static preflight and targeted report/journal tests when changed | Dialogue/report tooling | Never rewrite canonical journal; sidecar backfills only; no raw exceptions/payloads/prompts | evidence owner TBD |
-| Error journal | Gateway/API error logging | Alarm runbook and first-failure triage | `logs/bot_error_events-YYYY-MM-DD.jsonl`; error class vocabulary in source/docs | `scripts/nmbot_diag.sh --logs` for live alarm; local check cannot prove production health | Fresh VPS error journal is first alarm evidence | Fix producer/contract after first failure; no docs-only green | operations owner TBD |
-| Runtime flags/config | API/runtime adapter and environment/config files | Runtime selector, planner, bridge, callback worker | `runtime_version_override`, runtime version file, callback env names, bridge env names; actual production values unknown | Runtime adapter tests and manifest validation; no secret reads | Runtime marker and dialogue journal after release | Revert env/config only through release owner | config owner TBD |
+Inbound `CLIENT_MESSAGE` goes to bridge then V6 API. Normal outbound is `BOT_MESSAGE`;
+explicit operator handoff is `INVITE_AGENT`. Provider and bridge tokens are checked before
+work starts. Client-visible PROD text passes the V6 egress guard.
 
-## V2 public-response semantics
+## Gateway
 
-For the V2 adapter, public `intent` is the response answer kind (`selected_object`, `financing`, and similar), not a synonym for the executable route. The route remains in `turn_decision.action`; its dialogue position remains in `turn_decision.stage`. Contract tests for a current-options route must assert the action, preserved current options and no new search, then assert the response answer kind separately.
+The V6 simple gateway uses exactly two prompts and the configured private gateway client.
+Provider calls are never part of local release verification unless separately authorized.
 
-Callback outbox context intentionally omits raw Jivo `meta` identifiers. Consumers must not require an empty compatibility `context.meta` object; privacy-safe presence information belongs to the dedicated outbox context fields.
+## Callback and CRM
 
-When a search returns fewer cards than the requested shortlist, V2 may make a local deterministic supplemental request with prior names excluded. Candidate retrieval can omit raw `location` from its transport contract while retaining the no-client-relaxation audit and original user state. Family-card enrichment is a separate exact-card request with empty broad-search hard fields; contract fixtures must distinguish it from supplemental search.
+Phone capture writes a private durable outbox. TEST can never enable CRM. PROD CRM still
+requires an explicit private control file. The callback worker is deterministic-only;
+Sheet and CRM delivery states remain independent.
 
-Source references: `scripts/nmbot_api_server.py:45-60,72-75,2243,2283-2316,2333-2408,3163-3179,3183-3201`; `scripts/nmbot_n8n_bridge_server.py:1-9,35,42-72`; `scripts/nmbot_crm_outbox.py:2-31`; `scripts/nmbot_callback_sheet_worker.py:43-117,120-161`; `scripts/dialogue_journal.py:23`; `docs/NMBOT_PROJECT_SIMPLIFICATION_PLAN.md:96-109,444-459`.
+## Privacy
+
+Dialogue journals contain hashes, lengths and bounded codes, not raw dialogue/contact
+data. Release journals contain identities, checks and transitions, never customer data.

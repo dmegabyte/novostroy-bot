@@ -1,0 +1,14 @@
+{
+  "schema": "nmbot.source_provenance.v1",
+  "source_commit": "0673c56d4b2e3eb79b26e85c344984085f45bc28",
+  "source_branch": "refactor/v6-only-api-20260825",
+  "target_branch": "rebuild/v6-clean-root-20260825",
+  "method": "explicit_whitelist_plus_owner_rewrites",
+  "runtime": "V6",
+  "foreign_runtime_files_copied": false,
+  "notes": [
+    "Only the active simple V6 runtime subset and audited shared boundaries were selected.",
+    "Journal, egress policy, artifact builder and diagnostics were rewritten as V6 owners.",
+    "This file records local source provenance and is not live deployment evidence."
+  ]
+}

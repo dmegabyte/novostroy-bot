@@ -31,8 +31,14 @@ if str(SCRIPT_DIR) not in sys.path:
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
-from dialogue_journal import append_event as append_journal_event
-from nmbot_egress_policy import SAFE_CLIENT_FALLBACK_TEXT, guard_jivo_event, is_client_production
+try:
+    from scripts.dialogue_journal import append_event as append_journal_event
+    from scripts.nmbot_egress_policy import SAFE_CLIENT_FALLBACK_TEXT, guard_jivo_event, is_production
+    from scripts.nmbot_release_registry import ReleaseRegistryError, read_route_file, validate_upstream
+except ImportError:  # direct scripts/ execution
+    from dialogue_journal import append_event as append_journal_event
+    from nmbot_egress_policy import SAFE_CLIENT_FALLBACK_TEXT, guard_jivo_event, is_production
+    from nmbot_release_registry import ReleaseRegistryError, read_route_file, validate_upstream
 
 
 LATEST_CHAT_EVENTS: dict[str, str] = {}
@@ -40,6 +46,8 @@ DISPATCHED_CHAT_EVENTS: dict[str, float] = {}
 DISPATCHED_CHAT_EVENTS_TTL_SEC = 10 * 60
 DISPATCHED_CHAT_EVENTS_MAX_ENTRIES = 1024
 APP_TASKS_KEY = "nmbot_bridge_tasks"
+ACTIVE_ROUTE_FILE_ENV = "NMBOT_ACTIVE_ROUTE_FILE"
+CONTOUR_PROFILE_ENV = "NMBOT_CONTOUR_PROFILE"
 
 DEFAULT_STATUS_UPDATE_TEMPLATES = (
     "Уже работаю над вашим запросом.",
@@ -53,7 +61,13 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
-STRUCTURED_LOG_PATH = Path(_env("NMBOT_BRIDGE_STRUCTURED_LOG", "/home/neiro/novostroy-bot/logs/n8n_bridge_structured.jsonl"))
+def _structured_log_path() -> Path:
+    explicit = _env("NMBOT_BRIDGE_STRUCTURED_LOG")
+    if explicit:
+        return Path(explicit).expanduser()
+    profile = _env(CONTOUR_PROFILE_ENV)
+    safe_profile = profile.lower() if profile in {"TEST", "PROD"} else "test"
+    return Path.home() / ".local" / "state" / "nmbot-v6" / safe_profile / "bridge" / "n8n_bridge_structured.jsonl"
 
 
 def _safe_trace_ref(raw: object) -> str:
@@ -72,7 +86,7 @@ def _append_bridge_error_to_journal(
     """Attach a safe bridge failure to the same opaque dialogue event when possible."""
     if code not in {
         "bridge_hard_timeout", "bridge_upstream_exception", "bridge_status_delivery_error",
-        "bridge_delivery_error", "bridge_async_exception",
+        "bridge_delivery_error", "bridge_async_exception", "bridge_route_unavailable",
     } or stage not in {"bridge_upstream", "bridge_delivery"}:
         return
     try:
@@ -107,7 +121,68 @@ def _append_bridge_error_to_journal(
 
 
 async def handle_health(request: web.Request) -> web.Response:
-    return web.json_response({"ok": True, "service": "nmbot-n8n-bridge"})
+    try:
+        route = _resolve_bridge_route()
+    except BridgeRouteError as exc:
+        return web.json_response(
+            {
+                "ok": False,
+                "service": "nmbot-n8n-bridge",
+                "route": {"status": "invalid", "error_code": exc.code},
+            },
+            status=503,
+        )
+    safe_route = {
+        "status": "ready",
+        "mode": route["mode"],
+        "profile": route["profile"],
+        "upstream_ref": _safe_url_ref(route["upstream"]),
+    }
+    if route.get("slot"):
+        safe_route["slot"] = route["slot"]
+    if route.get("release_id"):
+        safe_route["release_id"] = route["release_id"]
+    return web.json_response({"ok": True, "service": "nmbot-n8n-bridge", "route": safe_route})
+
+
+class BridgeRouteError(RuntimeError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def _bridge_profile() -> str:
+    """Return the exact behavior profile; a missing value safely means TEST."""
+    raw = _env(CONTOUR_PROFILE_ENV)
+    if not raw:
+        return "TEST"
+    if raw not in {"TEST", "PROD"}:
+        raise BridgeRouteError("profile_invalid")
+    return raw
+
+
+def _resolve_bridge_route() -> dict[str, str | None]:
+    """Resolve one strictly local API origin without exposing route-file details."""
+    profile = _bridge_profile()
+    route_path = _env(ACTIVE_ROUTE_FILE_ENV)
+    if route_path:
+        try:
+            route = read_route_file(Path(route_path), expected_profile=profile)
+        except ReleaseRegistryError as exc:
+            raise BridgeRouteError("route_file_invalid") from exc
+        active = route["active"]
+        return {
+            "mode": "dynamic",
+            "profile": profile,
+            "slot": active["slot"],
+            "release_id": active["release_id"],
+            "upstream": active["upstream"],
+        }
+    try:
+        upstream = validate_upstream(_env("NMBOT_BRIDGE_UPSTREAM", "http://127.0.0.1:8088"))
+    except ReleaseRegistryError as exc:
+        raise BridgeRouteError("static_upstream_invalid") from exc
+    return {"mode": "static", "profile": profile, "slot": None, "release_id": None, "upstream": upstream}
 
 
 def _jivo_fast_fallback(body: bytes, reason: str, *, text: str | None = None) -> web.Response:
@@ -344,8 +419,6 @@ async def _send_to_jivo_after_bot(
     then send the actual bot event as a separate Bot-Provider -> Jivo request.
     Never logs provider_token, bridge token, API token, or message text.
     """
-    upstream_base = _env("NMBOT_BRIDGE_UPSTREAM", "http://127.0.0.1:8088")
-    upstream_url = upstream_base.rstrip("/") + "/jivo/" + provider_token
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -361,6 +434,66 @@ async def _send_to_jivo_after_bot(
         status_timeout = status_interval
 
     try:
+        route = _resolve_bridge_route()
+    except BridgeRouteError as exc:
+        fallback = _jivo_fast_fallback(body, "route_unavailable")
+        payload = fallback.body or b"{}"
+        _log_structured(
+            trace_id,
+            "error",
+            **trace,
+            error_class=exc.code,
+            outcome="route_unavailable",
+        )
+        _append_bridge_error_to_journal(
+            body,
+            code="bridge_route_unavailable",
+            stage="bridge_upstream",
+            fallback=True,
+            trace_ref=_safe_trace_ref(trace_id),
+        )
+        if _is_stale_event(event_key, event_id):
+            _log_structured(trace_id, "jivo_response_returned", **trace, http_status=None, outcome="route_fallback_stale_skipped")
+            return
+        try:
+            async with ClientSession(timeout=None) as session:
+                jivo_status, jivo_error = await _post_event_to_jivo(
+                    session,
+                    provider_token,
+                    payload,
+                    trace_id,
+                    trace,
+                    delivery_role="final",
+                )
+        except Exception:
+            jivo_status, jivo_error = None, "route_fallback_post_exception"
+        if jivo_error is not None:
+            _append_bridge_error_to_journal(
+                body,
+                code="bridge_delivery_error",
+                stage="bridge_delivery",
+                fallback=True,
+                trace_ref=_safe_trace_ref(trace_id),
+            )
+        print(
+            "bridge_async_send",
+            json.dumps(
+                {
+                    **trace,
+                    "upstream_status": None,
+                    "upstream_result": "route_unavailable",
+                    "jivo_status": jivo_status,
+                    "jivo_error": jivo_error,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+        return
+
+    upstream_url = str(route["upstream"]).rstrip("/") + "/jivo/" + provider_token
+
+    try:
         async with ClientSession(timeout=None) as session:
             upstream_started = time.monotonic()
             _log_structured(
@@ -368,6 +501,10 @@ async def _send_to_jivo_after_bot(
                 "upstream_request_start",
                 **trace,
                 upstream_ref=_safe_url_ref(upstream_url),
+                route_mode=route["mode"],
+                route_profile=route["profile"],
+                route_slot=route.get("slot"),
+                release_id=route.get("release_id"),
                 timeout_seconds=status_timeout,
                 hard_timeout_seconds=hard_timeout,
                 outcome="started",
@@ -629,7 +766,7 @@ async def _post_event_to_jivo(
                 delivery_role=delivery_role,
             )
         except Exception:
-            if is_client_production():
+            if is_production():
                 message = event.get("message") if isinstance(event.get("message"), dict) else {}
                 event = {**event, "message": {**message, "type": "TEXT", "text": SAFE_CLIENT_FALLBACK_TEXT}}
                 payload = json.dumps(event, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -745,8 +882,9 @@ def _log_structured(trace_id: str, stage: str, **fields: object) -> None:
     }
     record.update({k: v for k, v in fields.items() if v is not None})
     try:
-        STRUCTURED_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with STRUCTURED_LOG_PATH.open("a", encoding="utf-8") as fh:
+        path = _structured_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
     except Exception:
         # Diagnostics must never break webhook handling.
@@ -852,8 +990,7 @@ def main() -> None:
     parser.add_argument("--host", default=_env("NMBOT_N8N_BRIDGE_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(_env("NMBOT_N8N_BRIDGE_PORT", "8093")))
     args = parser.parse_args()
-    host, port = ("0.0.0.0", 8193) if is_client_production() else (args.host, args.port)
-    web.run_app(create_app(), host=host, port=port)
+    web.run_app(create_app(), host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

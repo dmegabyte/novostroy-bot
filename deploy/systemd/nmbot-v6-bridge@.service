@@ -1,0 +1,15 @@
+[Unit]
+Description=NMBot V6 bridge profile %i
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.local/state/nmbot-v6-release/unit-env/bridge-%i.env
+ExecStart=/usr/bin/python3 ${NMBOT_BRIDGE_RUNNER} --host ${NMBOT_N8N_BRIDGE_HOST} --port ${NMBOT_N8N_BRIDGE_PORT}
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=default.target

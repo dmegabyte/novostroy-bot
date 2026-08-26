@@ -29,14 +29,15 @@ try:
     from scripts.nmbot_crm_outbox import LocalCallbackOutbox
     from scripts.dialogue_journal import append_event
     from scripts.nmbot_release_identity import current_release_id
-    from scripts.nmbot_v6_simple_adapter import run_v6_simple_turn
+    from scripts.nmbot_v6_simple_adapter import run_v6_simple_turn, simple_envelope
 except ImportError:  # direct scripts/ execution
     from nmbot_gateway_client import OvermindClient
     from nmbot_crm_outbox import LocalCallbackOutbox
     from dialogue_journal import append_event
     from nmbot_release_identity import current_release_id
-    from nmbot_v6_simple_adapter import run_v6_simple_turn
+    from nmbot_v6_simple_adapter import run_v6_simple_turn, simple_envelope
 from nmbot_v6.simple_gateway import DirectTransport, SimpleGateway
+from nmbot_v6.simple_state import SimpleState
 
 DEFAULT_STATE_FILE = ROOT / "data" / "nmbot_api_state.json"
 DEFAULT_RUNTIME_FILE = ROOT / "data" / "nmbot_runtime_version.json"
@@ -60,6 +61,10 @@ def contour_profile(value: Any = None) -> str:
 def greeting_for_profile(profile: str) -> str:
     normalized = contour_profile(profile)
     return f"[TEST] {V6_GREETING}" if normalized == "TEST" else V6_GREETING
+
+
+def _fresh_state_envelope() -> dict[str, Any]:
+    return simple_envelope({}, SimpleState())
 
 
 class JsonStateStore:
@@ -264,7 +269,7 @@ async def handle_chat(request: web.Request) -> web.Response:
     message = str(payload.get("message") or "")
     if _start(message):
         async with request.app["state_store"].session_lock(user_id):
-            await request.app["state_store"].save(user_id, {"nmbot_v6": {}})
+            await request.app["state_store"].save(user_id, _fresh_state_envelope())
         return _json({"ok": True, "answer": request.app["v6_greeting"], "meta": {"runtime": "v6", "answer_kind": "start_reset", "profile": request.app["contour_profile"]}})
     result = await run_chat(request.app, user_id=user_id, message=message, channel=str(payload.get("channel") or "api"), meta=payload.get("meta") if isinstance(payload.get("meta"), dict) else {})
     return _json(result, status=200 if result.get("ok") else 502)
@@ -276,7 +281,7 @@ async def handle_reset(request: web.Request) -> web.Response:
     payload = await request.json()
     user_id = _user_id(payload)
     async with request.app["state_store"].session_lock(user_id):
-        await request.app["state_store"].save(user_id, {"nmbot_v6": {}})
+        await request.app["state_store"].save(user_id, _fresh_state_envelope())
     return _json({"ok": True, "runtime_version": "V6"})
 
 
@@ -295,7 +300,7 @@ async def handle_jivo(request: web.Request) -> web.Response:
     if _start(text):
         user_id = f"jivo:{payload.get('site_id')}:{payload.get('chat_id')}:{payload.get('client_id')}"
         async with request.app["state_store"].session_lock(user_id):
-            await request.app["state_store"].save(user_id, {"nmbot_v6": {}})
+            await request.app["state_store"].save(user_id, _fresh_state_envelope())
         greeting = request.app["v6_greeting"]
         _journal_jivo_event(payload, role="bot", text=greeting, answer_kind="start_reset")
         return _json(_jivo_bot_message(payload, greeting))

@@ -30,3 +30,23 @@ implemented, reviewed and explicitly authorized.
 
 `scripts/nmbot_diag.py` reads local identity, health snapshots and route files only. It does
 not call HTTP, VPS, Jivo or a model.
+
+## Read-only live contour recon
+
+Select one exact deployed contour before any live conclusion:
+
+```bash
+python3 scripts/nmbot_live_recon.py --contour primary
+python3 scripts/nmbot_live_recon.py --contour client-production
+```
+
+Each command performs one bounded read-only SSH receipt. It checks the API and bridge user
+services, their loopback health endpoints, the current release identity and the V6
+runtime/profile/release agreement when those fields are available. It never reads dotenv
+values, restarts services, changes routes, calls a model/provider or sends a Jivo message.
+
+`service_health=healthy` proves only that both services and health endpoints were available at
+`observed_at_utc`. `source_root=verified` proves that both systemd processes resolve inside the
+selected contour root. `v6_contract=verified` additionally requires matching V6 profile and
+release identity evidence. `traffic_role` deliberately remains `unverified`: current client
+routing or terminal delivery requires a separately authorized correlated Jivo trace.

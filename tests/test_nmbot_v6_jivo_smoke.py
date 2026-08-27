@@ -43,10 +43,10 @@ def test_isolated_target_is_release_bound_and_has_no_free_path() -> None:
     assert smoke._bridge_base("http://127.0.0.1:8093/") == smoke.BRIDGE_BASE
     with pytest.raises(smoke.SmokeError, match="bridge_base_not_allowed"):
         smoke._bridge_base("https://example.invalid")
-    assert smoke._bridge_log_path({}) == smoke.BRIDGE_LOG_DEFAULT
-    assert smoke._bridge_log_path({"NMBOT_BRIDGE_STRUCTURED_LOG": str(smoke.BRIDGE_LOG_PATH)}) == smoke.BRIDGE_LOG_PATH
+    assert smoke._bridge_log_paths({}) == (smoke.BRIDGE_LOG_PATH, smoke.BRIDGE_LOG_DEFAULT)
+    assert smoke._bridge_log_paths({"NMBOT_BRIDGE_STRUCTURED_LOG": str(smoke.BRIDGE_LOG_PATH)}) == (smoke.BRIDGE_LOG_PATH, smoke.BRIDGE_LOG_DEFAULT)
     with pytest.raises(smoke.SmokeError, match="bridge_log_path_not_allowed"):
-        smoke._bridge_log_path({"NMBOT_BRIDGE_STRUCTURED_LOG": "/tmp/free-path.jsonl"})
+        smoke._bridge_log_paths({"NMBOT_BRIDGE_STRUCTURED_LOG": "/tmp/free-path.jsonl"})
 
 
 def test_journal_reader_is_offset_bounded_and_rejects_symlink(tmp_path: Path) -> None:

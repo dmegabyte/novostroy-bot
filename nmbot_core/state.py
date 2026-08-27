@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -10,6 +11,7 @@ from .contract import CoreContractError
 SCHEMA_VERSION = 2
 _PENDING_OFFERS = frozenset({"none", "specialist_contact"})
 _TRUNCATION_MARKER = "\n[...текст сокращён...]\n"
+_PHONEISH = re.compile(r"(?<!\d)(?:\+?\d[\s().-]*){10,18}(?!\d)")
 
 
 def _truncate(text: str, maximum: int = 2_000) -> str:
@@ -26,7 +28,7 @@ def bound_history(items: list[Mapping[str, str]]) -> tuple[dict[str, str], ...]:
         if not isinstance(item, Mapping) or set(item) != {"role", "text"} or item.get("role") not in {"user", "assistant"}:
             raise CoreContractError("invalid_history_item")
         text = item.get("text")
-        if not isinstance(text, str) or not text:
+        if not isinstance(text, str) or not text or _PHONEISH.search(text):
             raise CoreContractError("invalid_history_text")
         clean.append({"role": str(item["role"]), "text": _truncate(text)})
     if len(clean) % 2 or any(clean[index]["role"] != "user" or clean[index + 1]["role"] != "assistant" for index in range(0, len(clean), 2)):
@@ -82,3 +84,34 @@ class CoreState:
             "client_turn_count": self.client_turn_count,
             "pending_offer": self.pending_offer,
         }
+
+    def accepted(
+        self,
+        user: str,
+        assistant: str,
+        *,
+        awaiting_phone: bool,
+        pending_offer: str = "none",
+        advance_client_turn: bool = True,
+        specialist_offer_published: bool = False,
+    ) -> "CoreState":
+        history = bound_history([*self.history, {"role": "user", "text": user}, {"role": "assistant", "text": assistant}])
+        next_turn_count = self.client_turn_count + (1 if advance_client_turn else 0)
+        if specialist_offer_published:
+            next_turn_count = max(next_turn_count, 3)
+        return CoreState(
+            revision=self.revision + 1,
+            history=history,
+            awaiting_phone=awaiting_phone,
+            client_turn_count=next_turn_count,
+            pending_offer=pending_offer,
+        )
+
+    def phone_accepted(self) -> "CoreState":
+        return CoreState(
+            revision=self.revision + 1,
+            history=self.history,
+            awaiting_phone=False,
+            client_turn_count=self.client_turn_count + 1,
+            pending_offer="none",
+        )

@@ -12,7 +12,7 @@ from .contract import (
     TerminalResponse,
     TurnInput,
 )
-from .phone import PhoneParseResult, PrivatePhone
+from .phone import PhoneParseResult, PrivatePhone, parse_phone
 from .state import CoreState, SCHEMA_VERSION
 
 __all__ = [
@@ -27,4 +27,5 @@ __all__ = [
     "SCHEMA_VERSION",
     "TerminalResponse",
     "TurnInput",
+    "parse_phone",
 ]

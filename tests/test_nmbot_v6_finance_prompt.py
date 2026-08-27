@@ -34,3 +34,17 @@ def test_finance_keeps_existing_v6_speech_act_and_specialist_ownership():
     assert "ровно один вопрос, соответствующий выбранному речевому акту" in PROMPT
     assert '"action":"reply"' in PROMPT
     assert "Значение request_phone запрещено" in PROMPT
+
+
+def test_finance_only_prompt1_uses_consultation_route_without_mcp():
+    prompt = (
+        Path(__file__).resolve().parents[1] / "prompts" / "v6_simple_search_agent.txt"
+    ).read_text(encoding="utf-8")
+
+    assert "без выбранного объекта и без иных поисковых ограничений" in prompt
+    assert "финансовой консультацией, не требующей новых property facts" in prompt
+    assert "инструмент не вызывай" in prompt
+    assert '`action=continue` с `params.finance_preference="mortgage_details"`' in prompt
+    assert "Не создавай `params.min_fee`" in prompt
+    assert "`mortgage_calc.min_fee` или `mortgage.min_fee`" in prompt
+    assert "вызови `novostroym/get_flat_info` ровно один раз" not in prompt

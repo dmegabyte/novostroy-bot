@@ -18,10 +18,15 @@ from .contract import (
     parse_prompt2,
 )
 from .phone import PhoneParseResult, PrivatePhone, parse_phone
+from .gateway import DirectTransport, GatewayResult, PromptGateway, ToolTrace
+from .runtime import CoreRuntime, RuntimeResult
 from .state import CoreState, SCHEMA_VERSION
 
 __all__ = [
     "CoreContractError",
+    "CoreRuntime",
+    "DirectTransport",
+    "GatewayResult",
     "Ambiguity",
     "CoreState",
     "PhoneParseResult",
@@ -30,9 +35,12 @@ __all__ = [
     "Prompt1Document",
     "Prompt2Action",
     "Prompt2Document",
+    "PromptGateway",
+    "RuntimeResult",
     "SCHEMA_VERSION",
     "TerminalResponse",
     "TurnInput",
+    "ToolTrace",
     "build_prompt1_input",
     "build_prompt2_input",
     "parse_prompt1",

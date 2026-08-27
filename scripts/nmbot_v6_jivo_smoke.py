@@ -95,12 +95,13 @@ def _bridge_base(value: str) -> str:
     return BRIDGE_BASE
 
 
-def _bridge_log_path(values: dict[str, str]) -> Path:
+def _bridge_log_paths(values: dict[str, str]) -> tuple[Path, ...]:
     configured = str(values.get("NMBOT_BRIDGE_STRUCTURED_LOG") or "").strip()
-    path = Path(configured).expanduser() if configured else BRIDGE_LOG_DEFAULT
-    if path not in {BRIDGE_LOG_PATH, BRIDGE_LOG_DEFAULT}:
+    configured_path = Path(configured).expanduser() if configured else None
+    if configured_path is not None and configured_path not in {BRIDGE_LOG_PATH, BRIDGE_LOG_DEFAULT}:
         raise SmokeError("bridge_log_path_not_allowed")
-    return path
+    candidates = (configured_path, BRIDGE_LOG_PATH, BRIDGE_LOG_DEFAULT)
+    return tuple(dict.fromkeys(path for path in candidates if path is not None))
 
 
 def _health(contract: TargetContract, timeout: float) -> dict[str, Any]:
@@ -355,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
         bridge_base = _bridge_base(args.base_url)
         target_health = _health(contract, args.timeout)
         values = _env()
-        bridge_log_path = _bridge_log_path(values)
+        bridge_log_paths = _bridge_log_paths(values)
         provider_token = values.get("JIVO_PROVIDER_TOKEN", "").strip()
         bridge_token = values.get("NMBOT_N8N_BRIDGE_TOKEN", "").strip()
         if not provider_token or not bridge_token:
@@ -376,7 +377,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             time.sleep(max(0.0, args.start_settle_seconds))
             journal_offset = _file_offset(contract.journal, root=contract.journal_root)
-            bridge_offset = _file_offset(bridge_log_path, root=bridge_log_path.parent)
+            bridge_offsets = {path: _file_offset(path, root=path.parent) for path in bridge_log_paths}
             query = _send(base_url=bridge_base, provider_token=provider_token, bridge_token=bridge_token, text=args.query, base_payload=base_payload, timeout=args.timeout)
             events: list[dict[str, Any]] = []
             bridge_events: list[dict[str, Any]] = []
@@ -388,7 +389,16 @@ def main(argv: list[str] | None = None) -> int:
                 deadline = time.monotonic() + max(0.0, args.journal_wait_seconds)
                 while time.monotonic() < deadline:
                     events = _read_chat_events(base_payload["chat_id"], journal=contract.journal, offset=journal_offset, root=contract.journal_root)
-                    bridge_events = _read_bridge_events(event_id_ref=str(query.get("event_id_ref") or ""), chat_id=base_payload["chat_id"], offset=bridge_offset, path=bridge_log_path)
+                    bridge_events = [
+                        event
+                        for path in bridge_log_paths
+                        for event in _read_bridge_events(
+                            event_id_ref=str(query.get("event_id_ref") or ""),
+                            chat_id=base_payload["chat_id"],
+                            offset=bridge_offsets[path],
+                            path=path,
+                        )
+                    ]
                     journal_ready = any(_is_query_bot_event(event) for event in events)
                     bridge_ready, _, bridge_receipt = evaluate_bridge_trace(events=bridge_events, expected_upstream_ref=expected_upstream_ref)
                     if journal_ready and bridge_ready:

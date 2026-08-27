@@ -43,6 +43,7 @@ V6_API_FILES = (
     "scripts/nmbot_crm_outbox.py",
     "scripts/nmbot_gateway_client.py",
     "scripts/nmbot_release_identity.py",
+    "scripts/nmbot_v6_jivo_smoke.py",
     "scripts/nmbot_v6_api.py",
     "scripts/nmbot_v6_simple_adapter.py",
 )

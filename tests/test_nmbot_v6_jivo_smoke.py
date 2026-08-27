@@ -52,12 +52,12 @@ def test_isolated_target_is_release_bound_and_has_no_free_path() -> None:
 def test_journal_reader_is_offset_bounded_and_rejects_symlink(tmp_path: Path) -> None:
     chat_id = "test-chat"
     journal = tmp_path / "dialogue.jsonl"
-    journal.write_text(json.dumps({"chat_id_ref": "old", "role": "bot"}) + "\n", encoding="utf-8")
+    journal.write_text(json.dumps({"chat_ref": "old", "role": "bot"}) + "\n", encoding="utf-8")
     offset = journal.stat().st_size
     with journal.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"chat_id_ref": smoke._chat_ref(chat_id), "role": "bot"}) + "\n")
+        handle.write(json.dumps({"chat_ref": smoke._chat_ref(chat_id), "role": "bot"}) + "\n")
     assert smoke._read_chat_events(chat_id, journal=journal, offset=offset, root=tmp_path) == [
-        {"chat_id_ref": smoke._chat_ref(chat_id), "role": "bot"}
+        {"chat_ref": smoke._chat_ref(chat_id), "role": "bot"}
     ]
     assert smoke._chat_ref(chat_id).startswith("chat_") and len(smoke._chat_ref(chat_id)) == 25
     link = tmp_path / "link.jsonl"
@@ -130,3 +130,21 @@ def test_bridge_trace_accepts_legacy_terminal_receipt() -> None:
     ]
     accepted, failures, _ = smoke.evaluate_bridge_trace(events=events, expected_upstream_ref=upstream)
     assert accepted and failures == []
+
+
+def test_bridge_reader_accepts_live_client_message_record_without_schema_label(tmp_path: Path) -> None:
+    chat_id = "test-chat"
+    event_id_ref = smoke._bridge_ref("event-1")
+    log = tmp_path / "bridge.jsonl"
+    log.write_text(json.dumps({
+        "event": "CLIENT_MESSAGE",
+        "event_id_ref": event_id_ref,
+        "chat_id_ref": smoke._bridge_ref(chat_id),
+        "stage": "upstream_request_start",
+    }) + "\n", encoding="utf-8")
+    assert smoke._read_bridge_events(
+        event_id_ref=event_id_ref,
+        chat_id=chat_id,
+        offset=0,
+        path=log,
+    )[0]["stage"] == "upstream_request_start"

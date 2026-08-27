@@ -16,11 +16,13 @@ from .contract import (
     build_prompt2_input,
     parse_prompt1,
     parse_prompt2,
+    project_url_card_for_prompt2,
 )
 from .phone import PhoneParseResult, PrivatePhone, parse_phone
 from .gateway import DirectTransport, GatewayResult, PromptGateway, ToolTrace
 from .runtime import CoreRuntime, RuntimeResult
 from .state import CoreState, SCHEMA_VERSION
+from .url_card import UrlCardError, extract_novostroy_url, fetch_card, parse_html_card, validate_source_url
 
 __all__ = [
     "CoreContractError",
@@ -41,9 +43,15 @@ __all__ = [
     "TerminalResponse",
     "TurnInput",
     "ToolTrace",
+    "UrlCardError",
     "build_prompt1_input",
     "build_prompt2_input",
     "parse_prompt1",
     "parse_prompt2",
     "parse_phone",
+    "project_url_card_for_prompt2",
+    "extract_novostroy_url",
+    "fetch_card",
+    "parse_html_card",
+    "validate_source_url",
 ]

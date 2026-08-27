@@ -64,6 +64,14 @@ PARAM_FIELDS = frozenset({
     "finance_preference", "sort_hint", "floor", "has_renovation", "name", "mortgage_type", "delivered",
     "only_with_flats", "location_name", "novos_id", "has_finishing",
 })
+URL_CARD_FIELDS = frozenset({
+    "object_type", "complex_name", "developer", "area_m2", "floor", "floors_total",
+    "price_rub", "previous_price_rub", "price_history", "price_per_m2_rub",
+    "mortgage_from_rub_per_month", "completion", "construction_stage", "finishing",
+    "location", "address", "building", "section", "metro", "railway_station",
+    "highway", "listing_number", "payment_terms", "installment_terms", "special_offers",
+})
+URL_CARD_DERIVED_FIELDS = frozenset({"price_difference_rub", "price_difference_is_not_a_promotion"})
 _AMBIGUITY_PARAMETERS = frozenset({"max_price", "min_price", "rooms", "location", "name", "mortgage_type"})
 _AMBIGUITY_REASONS = frozenset({"multiple_interpretations", "unparseable_critical_value", "ambiguous_object_identity"})
 _MISSING_FIELDS = FACT_FIELDS | {"field", "reason_code", "reason", "details", "property_name"}
@@ -305,6 +313,41 @@ def parse_prompt2(raw: str | Mapping[str, Any], *, allow_request_phone: bool = T
     if len(response) + len(final_question) + (2 if final_question else 0) > 2000:
         raise CoreContractError("output_too_large")
     return Prompt2Document(Prompt2Action(action), response, final_question)
+
+
+def project_url_card_for_prompt2(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep the bounded, source-grounded URL-card projection for Prompt 2."""
+
+    if not isinstance(raw, Mapping) or not isinstance(raw.get("card"), Mapping):
+        raise CoreContractError("invalid_url_card_shape")
+    card = {
+        key: _json_value(raw["card"][key])
+        for key in URL_CARD_FIELDS
+        if key in raw["card"]
+    }
+    if not card:
+        raise CoreContractError("invalid_url_card_shape")
+    missing_raw = raw.get("missing", [])
+    if not isinstance(missing_raw, list) or len(missing_raw) > 12:
+        raise CoreContractError("invalid_url_card_missing")
+    missing = []
+    for item in missing_raw:
+        if not isinstance(item, str) or not item.strip() or len(item) > 300 or _PHONEISH.search(item):
+            raise CoreContractError("invalid_url_card_missing")
+        missing.append(item)
+    derived_raw = raw.get("derived")
+    if not isinstance(derived_raw, Mapping) or derived_raw.get("price_difference_is_not_a_promotion") is not True:
+        raise CoreContractError("invalid_url_card_derived")
+    derived = {key: _json_value(derived_raw[key]) for key in URL_CARD_DERIVED_FIELDS if key in derived_raw}
+    if derived.get("price_difference_is_not_a_promotion") is not True:
+        raise CoreContractError("invalid_url_card_derived")
+    result: dict[str, Any] = {"card": card, "missing": missing, "derived": derived}
+    if raw.get("page_updated") is not None:
+        value = raw["page_updated"]
+        if not isinstance(value, str) or not value.strip() or len(value) > 100 or _PHONEISH.search(value):
+            raise CoreContractError("invalid_url_card_page_updated")
+        result["page_updated"] = value
+    return result
 
 
 def build_prompt1_input(current_message: str, dialogue_history: list[dict[str, str]], *, pending_offer: str) -> dict[str, Any]:

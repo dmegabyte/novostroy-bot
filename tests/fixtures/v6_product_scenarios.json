@@ -1,0 +1,32 @@
+{
+  "schema_version": "nmbot.v6_product_scenarios.v1",
+  "kind": "synthetic",
+  "privacy": "messages are authored test inputs, not retained customer dialogue",
+  "scenarios": [
+    {
+      "id": "new_search",
+      "messages": ["Ищу двухкомнатную квартиру в Люблино, бюджет до 18 миллионов рублей."],
+      "acceptance": {"search_required": true, "terminal": "bot_message", "max_options": 3, "next_step_count": 1}
+    },
+    {
+      "id": "refine_search",
+      "messages": ["Ищу двухкомнатную квартиру в Люблино, бюджет до 18 миллионов рублей.", "Покажи только варианты с отделкой."],
+      "acceptance": {"search_required": true, "terminal": "bot_message", "max_options": 3, "next_step_count": 1}
+    },
+    {
+      "id": "selected_property",
+      "messages": ["Расскажи про условия покупки в ЖК Северный тест."],
+      "acceptance": {"search_required": true, "terminal": "bot_message", "identity_substitution_forbidden": true}
+    },
+    {
+      "id": "finance_consultation",
+      "messages": ["Рассматриваю покупку квартиры в ипотеку, хочу понять доступный бюджет.", "Первоначальный взнос планирую около 30 процентов, важно снизить ежемесячный платёж.", "Да"],
+      "acceptance": {"search_required": false, "terminal": "phone_question_after_consent", "finance_preference": "mortgage_details", "params_min_fee_forbidden": true, "phone_before_consent_forbidden": true}
+    },
+    {
+      "id": "direct_specialist",
+      "messages": ["Хочу поговорить со специалистом."],
+      "acceptance": {"search_required": false, "terminal": "phone_question", "phone_before_explicit_request_forbidden": true}
+    }
+  ]
+}

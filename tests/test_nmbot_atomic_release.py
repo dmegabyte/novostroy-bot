@@ -58,6 +58,7 @@ def test_v6_api_build_is_deterministic_exact_and_controller_compatible(tmp_path:
     }
     assert runtime_roots == {"nmbot_v6"}
     assert "scripts/nmbot_release_control.py" not in expected
+    assert "scripts/nmbot_v6_jivo_smoke.py" in expected
 
 
 def test_existing_release_id_is_idempotent_but_never_overwritten(tmp_path: Path) -> None:

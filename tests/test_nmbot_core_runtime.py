@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from nmbot_core import CoreRuntime, CoreState, GatewayResult, Prompt1Action, ToolTrace
+from nmbot_core.runtime import URL_CARD_FAILURE_TEXT
 
 
 class PhoneBackend:
@@ -65,3 +66,23 @@ def test_third_turn_has_single_specialist_cta_and_clarification_does_not_advance
     clarify = {"action": "clarify", "params": {}, "ambiguity": {"parameter": "rooms", "reason_code": "multiple_interpretations"}}
     result = run(Port(clarify), Port(reply("Уточните", "Сколько комнат?")), state=CoreState(client_turn_count=2))
     assert result.state.client_turn_count == 2 and result.text == "Уточните\n\nСколько комнат?"
+
+
+def test_url_card_bypasses_prompt1_and_sends_safe_projection_to_prompt2():
+    p1_port, p2_port = Port(p1()), Port(reply("Карточка получена."))
+    card = {"source_url": "https://www.novostroy-m.ru/a", "card": {"complex_name": "ЖК А", "price_rub": 5_000_000}, "missing": ["completion"], "derived": {"price_difference_is_not_a_promotion": True}}
+    runtime = CoreRuntime(p1_port, p2_port, phone_backend=PhoneBackend(), url_card_extractor=lambda text: "https://www.novostroy-m.ru/a", url_card_fetcher=lambda url: card)
+    outcome = asyncio.run(runtime.run("Что есть по ссылке?", CoreState()))
+    assert outcome.status == "completed" and outcome.url_card_status == "accepted"
+    assert not p1_port.calls and len(p2_port.calls) == 1
+    payload = p2_port.calls[0][0]
+    assert payload["property_material"]["url_card"]["card"] == {"complex_name": "ЖК А", "price_rub": 5_000_000}
+    assert "source_url" not in str(payload)
+
+
+def test_url_card_fetch_failure_cannot_fall_through_to_models():
+    p1_port, p2_port = Port(p1()), Port(reply())
+    runtime = CoreRuntime(p1_port, p2_port, phone_backend=PhoneBackend(), url_card_extractor=lambda text: "https://www.novostroy-m.ru/a", url_card_fetcher=lambda url: (_ for _ in ()).throw(OSError()))
+    outcome = asyncio.run(runtime.run("ссылка", CoreState()))
+    assert outcome.status == "safe_failure" and outcome.text == URL_CARD_FAILURE_TEXT
+    assert outcome.failure_stage == "url_card" and not p1_port.calls and not p2_port.calls

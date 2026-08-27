@@ -356,17 +356,25 @@ def build_prompt1_input(current_message: str, dialogue_history: list[dict[str, s
     return {"current_message": current_message, "dialogue_history": dialogue_history, "dialogue_policy": {"pending_offer": pending_offer}}
 
 
-def build_prompt2_input(current_message: str, dialogue_history: list[dict[str, str]], result: Prompt1Document, *, offer_specialist_now: bool) -> dict[str, Any]:
+def build_prompt2_input(current_message: str, dialogue_history: list[dict[str, str]], result: Prompt1Document | None, *, offer_specialist_now: bool, url_card: Mapping[str, Any] | None = None) -> dict[str, Any]:
     if type(offer_specialist_now) is not bool:
         raise CoreContractError("invalid_dialogue_policy")
-    plain = result.plain()
+    if result is None and url_card is None:
+        raise CoreContractError("missing_prompt2_material")
+    plain = result.plain() if result is not None else {"facts": [], "near": [], "params": {}, "missing": [], "ambiguity": None}
     facts = plain["facts"][:3]
     near = plain["near"][:3 - len(facts)]
+    property_material: dict[str, Any] = {"facts": facts, "near": near, "params": plain["params"]}
+    missing = list(plain["missing"])
+    if url_card is not None:
+        projection = project_url_card_for_prompt2(url_card)
+        property_material["url_card"] = projection
+        missing = [*missing, *projection["missing"]][:12]
     return {
         "current_message": current_message,
         "dialogue_history": dialogue_history,
-        "property_material": {"facts": facts, "near": near, "params": plain["params"]},
-        "missing": list(plain["missing"]),
+        "property_material": property_material,
+        "missing": missing,
         "ambiguity": plain["ambiguity"],
         "dialogue_policy": {"offer_specialist_now": offer_specialist_now},
     }

@@ -9,6 +9,7 @@ from typing import Any
 from .contract import CoreContractError, Prompt1Action, build_prompt1_input, build_prompt2_input, parse_prompt1, parse_prompt2
 from .phone import PhoneMetadataBackend, PrivatePhone, parse_phone
 from .state import CoreState
+from .url_card import extract_novostroy_url, fetch_card
 
 
 TECHNICAL_TEXT = "Сейчас не получилось обработать запрос. Попробуйте, пожалуйста, ещё раз."
@@ -18,6 +19,7 @@ CLARIFICATION_FAILURE = "Не получилось уточнить запрос
 PHONE_QUESTION = "На какой номер вам позвонить?"
 MULTIPLE_PHONES_TEXT = "Пришлите, пожалуйста, один номер для связи."
 INVALID_PHONE_TEXT = "Похоже, номер указан неверно. Пришлите его, пожалуйста, в формате +7 999 123-45-67."
+URL_CARD_FAILURE_TEXT = "Не получилось получить карточку по ссылке. Пришлите, пожалуйста, другую ссылку или уточните название ЖК."
 _CANDIDATE = re.compile(r"(?<!\d)(?:\+?\d[\s().-]*){10,18}(?!\d)")
 _SHORT_PHONE = re.compile(r"(?=.*\d)[\d\s().+-]+")
 _CONTACT = re.compile(r"(?:позови(?:те)?|пригласи(?:те)?|подключи(?:те)?|соедини(?:те)?|перезвони(?:те)?|позвони(?:те)?|обратн(?:ый|ого)\s+звон(?:ок|ка))", re.IGNORECASE)
@@ -38,6 +40,7 @@ class RuntimeResult:
     tool_observation: str | None = None
     error_code: str | None = None
     request_phone: bool = False
+    url_card_status: str | None = None
 
 
 def _contact_intent(text: str) -> bool:
@@ -62,8 +65,9 @@ def _phone_guard(text: str, backend: PhoneMetadataBackend | None) -> tuple[str, 
 
 
 class CoreRuntime:
-    def __init__(self, prompt1: Any, prompt2: Any, *, phone_backend: PhoneMetadataBackend | None = None) -> None:
+    def __init__(self, prompt1: Any, prompt2: Any, *, phone_backend: PhoneMetadataBackend | None = None, url_card_fetcher: Any = fetch_card, url_card_extractor: Any = extract_novostroy_url) -> None:
         self._prompt1, self._prompt2, self._phone_backend = prompt1, prompt2, phone_backend
+        self._url_card_fetcher, self._url_card_extractor = url_card_fetcher, url_card_extractor
 
     async def run(self, message: str, state: CoreState) -> RuntimeResult:
         if not isinstance(message, str) or not message.strip() or not isinstance(state, CoreState):
@@ -94,6 +98,22 @@ class CoreRuntime:
             except CoreContractError:
                 remembered = state
             return RuntimeResult("safe_failure", remembered, SPECIALIST_OFFER_ON_FAILURE, failure_stage=stage, model_calls=calls, prompt1_attempt_ref=p1_attempt, prompt2_attempt_ref=p2_attempt, mcp_call_count=mcp_calls, material_status=material, error_code=code)
+
+        source_url = self._url_card_extractor(public_message) if callable(self._url_card_extractor) else None
+        if source_url:
+            try:
+                raw_card = self._url_card_fetcher(source_url)
+                payload = build_prompt2_input(public_message, history, None, offer_specialist_now=False, url_card=raw_card)
+                calls += 1
+                p2_result = await self._prompt2.run(payload)
+                p2 = parse_prompt2(p2_result.output, allow_request_phone=False)
+                text = p2.response + ("\n\n" + p2.final_question if p2.final_question else "")
+                next_state = state.accepted(public_message, text, awaiting_phone=False)
+                return RuntimeResult("completed", next_state, text, model_calls=calls, prompt2_attempt_ref=p2_result.attempt_ref, tool_observation="unavailable", url_card_status="accepted")
+            except CoreContractError as exc:
+                return failure("url_card", exc.code, material="url_card")
+            except Exception:
+                return RuntimeResult("safe_failure", state, URL_CARD_FAILURE_TEXT, failure_stage="url_card", error_code="url_card_fetch_failed", url_card_status="fetch_failed")
 
         try:
             calls += 1

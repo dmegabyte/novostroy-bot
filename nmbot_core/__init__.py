@@ -22,6 +22,8 @@ from .phone import PhoneParseResult, PrivatePhone, parse_phone
 from .gateway import DirectTransport, GatewayResult, PromptGateway, ToolTrace
 from .runtime import CoreRuntime, RuntimeResult
 from .state import CoreState, SCHEMA_VERSION
+from .journal import JournalError, append_event
+from .outbox import LocalCallbackOutbox, OutboxResult
 from .url_card import UrlCardError, extract_novostroy_url, fetch_card, parse_html_card, validate_source_url
 
 __all__ = [
@@ -29,6 +31,8 @@ __all__ = [
     "CoreRuntime",
     "DirectTransport",
     "GatewayResult",
+    "JournalError",
+    "LocalCallbackOutbox",
     "Ambiguity",
     "CoreState",
     "PhoneParseResult",
@@ -38,6 +42,7 @@ __all__ = [
     "Prompt2Action",
     "Prompt2Document",
     "PromptGateway",
+    "OutboxResult",
     "RuntimeResult",
     "SCHEMA_VERSION",
     "TerminalResponse",
@@ -46,6 +51,7 @@ __all__ = [
     "UrlCardError",
     "build_prompt1_input",
     "build_prompt2_input",
+    "append_event",
     "parse_prompt1",
     "parse_prompt2",
     "parse_phone",

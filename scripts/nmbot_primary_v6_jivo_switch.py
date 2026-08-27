@@ -108,7 +108,7 @@ for key, value in EXPECTED.items():
     if key != "schema" and cfg.get(key) != value:
         fail("target_contract_mismatch")
 operation = cfg.get("operation")
-if operation not in {"preflight", "recon", "switch", "rollback"}:
+if operation not in {"preflight", "recon", "switch", "rollback", "reconcile"}:
     fail("operation_not_allowed")
 release_id = str(cfg.get("expected_v6_release") or "")
 if not SAFE_RELEASE.fullmatch(release_id):
@@ -224,13 +224,38 @@ def restart_bridge():
 def backup_path():
     return root / "backups" / (release_id + ".env")
 
+def status_record():
+    if not status_path.exists():
+        return None
+    try:
+        details = status_path.lstat()
+        if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
+            fail("switch_status_unsafe")
+        record = json.loads(status_path.read_text(encoding="utf-8"))
+    except SystemExit:
+        raise
+    except Exception:
+        fail("switch_status_unreadable")
+    if not isinstance(record, dict):
+        fail("switch_status_invalid")
+    state = record.get("status")
+    recorded_release = str(record.get("release_id") or "")
+    backup_sha256 = record.get("backup_sha256")
+    if state not in {"active", "rolled_back", "reconciled"} or not SAFE_RELEASE.fullmatch(recorded_release) or not isinstance(backup_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", backup_sha256):
+        fail("switch_status_invalid")
+    return record
+
+def status_backup(record):
+    return root / "backups" / (record["release_id"] + ".env")
+
 def preflight():
     current = read_env()
     if upstream_from(current) != EXPECTED["current_upstream"]:
         fail("primary_upstream_not_current")
     if not protected_snapshot()["healthy"] or not bridge_ready() or not v6_ready():
         fail("preflight_health_failed")
-    if status_path.exists():
+    status = status_record()
+    if status and status["status"] == "active":
         fail("switch_status_already_exists")
     return current
 
@@ -248,13 +273,45 @@ if operation in {"preflight", "recon"}:
     current = read_env()
     upstream = upstream_from(current)
     route = "current" if upstream == EXPECTED["current_upstream"] else "v6" if upstream == EXPECTED["v6_upstream"] else "other"
-    ok = protected_snapshot()["healthy"] and bridge_ready() and v6_ready()
+    ready = protected_snapshot()["healthy"] and bridge_ready() and v6_ready()
+    status = status_record()
+    ok = ready
     if operation == "preflight":
-        ok = ok and route == "current" and not status_path.exists()
+        ok = ok and route == "current" and (status is None or status["status"] != "active")
     if not ok:
+        if operation == "preflight" and ready and route == "current" and status and status["status"] == "active":
+            fail("switch_status_already_exists")
         fail("preflight_health_failed" if operation == "preflight" else "recon_health_failed")
     bridge = unit_state(EXPECTED["primary_bridge"])
-    emit({"ok": True, "schema": EXPECTED["schema"], "operation": operation, "v6_release_id": release_id, "primary_bridge_ready": True, "primary_bridge_route": route, "primary_bridge_systemd": {"result": bridge["result"], "exec_main_code": bridge["exec_main_code"], "exec_main_status": bridge["exec_main_status"]}, "switch_status_exists": status_path.exists(), "protected_services_healthy": True, "mutation": False})
+    emit({"ok": True, "schema": EXPECTED["schema"], "operation": operation, "v6_release_id": release_id, "primary_bridge_ready": True, "primary_bridge_route": route, "primary_bridge_systemd": {"result": bridge["result"], "exec_main_code": bridge["exec_main_code"], "exec_main_status": bridge["exec_main_status"]}, "switch_status_exists": status is not None, "switch_status": status["status"] if status else None, "protected_services_healthy": True, "mutation": False})
+
+if operation == "reconcile":
+    before = protected_snapshot()
+    current = read_env()
+    status = status_record()
+    if status is None or status["status"] != "active":
+        fail("switch_status_not_active")
+    if upstream_from(current) != EXPECTED["current_upstream"]:
+        fail("primary_upstream_not_current")
+    if not before["healthy"] or not bridge_ready() or not v6_ready():
+        fail("reconcile_health_failed")
+    backup = status_backup(status)
+    if not backup.is_file() or backup.is_symlink():
+        fail("switch_backup_unsafe")
+    try:
+        original = backup.read_bytes()
+    except Exception:
+        fail("switch_backup_unreadable")
+    if status["backup_sha256"] != hashlib.sha256(original).hexdigest():
+        fail("switch_backup_hash_mismatch")
+    if upstream_from(original) != EXPECTED["current_upstream"]:
+        fail("switch_backup_not_current")
+    status["status"] = "reconciled"
+    status["reconciled_for_release"] = release_id
+    write_atomic(status_path, (json.dumps(status, sort_keys=True) + "\n").encode("utf-8"), 0o600)
+    if not same_protected(before, protected_snapshot()) or upstream_from(read_env()) != EXPECTED["current_upstream"]:
+        fail("reconcile_invariant_failed")
+    emit({"ok": True, "schema": EXPECTED["schema"], "operation": operation, "v6_release_id": release_id, "primary_bridge_route": "current", "switch_status": "reconciled", "protected_services_unchanged": True, "mutation": True})
 
 if operation == "switch":
     before = protected_snapshot()
@@ -290,11 +347,11 @@ if operation == "switch":
 if operation == "rollback":
     before = protected_snapshot()
     try:
-        status = json.loads(status_path.read_text(encoding="utf-8"))
+        status = status_record()
     except Exception:
         fail("switch_status_missing")
     backup = backup_path()
-    if status.get("release_id") != release_id or status.get("status") != "active" or not backup.is_file() or backup.is_symlink():
+    if not status or status.get("release_id") != release_id or status.get("status") != "active" or not backup.is_file() or backup.is_symlink():
         fail("switch_status_mismatch")
     try:
         if status.get("backup_sha256") != hashlib.sha256(backup.read_bytes()).hexdigest():
@@ -313,7 +370,7 @@ if operation == "rollback":
 
 
 def target_payload(operation: str, *, expected_v6_release: str) -> dict[str, str]:
-    if operation not in {"preflight", "recon", "switch", "rollback"}:
+    if operation not in {"preflight", "recon", "switch", "rollback", "reconcile"}:
         raise PrimaryV6SwitchError("unsupported operation")
     if not RELEASE_RE.fullmatch(expected_v6_release):
         raise PrimaryV6SwitchError("invalid V6 release ID")
@@ -375,10 +432,10 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("plan")
-    for name in ("preflight", "recon", "switch", "rollback"):
+    for name in ("preflight", "recon", "switch", "rollback", "reconcile"):
         child = commands.add_parser(name)
         child.add_argument("--expected-v6-release", required=name != "plan")
-        if name in {"switch", "rollback"}:
+        if name in {"switch", "rollback", "reconcile"}:
             child.add_argument("--apply", action="store_true")
             child.add_argument("--confirm", default="")
     return parser
@@ -391,7 +448,7 @@ def main(argv: list[str] | None = None, *, client: RemoteClient | None = None) -
             result = TargetContract().as_dict()
         else:
             payload = target_payload(args.command, expected_v6_release=args.expected_v6_release)
-            if args.command in {"switch", "rollback"}:
+            if args.command in {"switch", "rollback", "reconcile"}:
                 _require_confirmation(args.command, args.expected_v6_release, args.apply, args.confirm)
             result = (client or RemoteClient()).operation(payload, timeout=150 if args.command == "switch" else 90)
     except (OSError, ValueError, PrimaryV6SwitchError) as exc:

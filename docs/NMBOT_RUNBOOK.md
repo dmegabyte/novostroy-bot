@@ -10,6 +10,21 @@ python3 scripts/nmbot_atomic_release.py \
 The builder rejects a dirty worktree and records exact Git commit/tree identity plus a
 clean-tree receipt inside the immutable manifest.
 
+## Fast repeatable V6 version path
+
+For a new V6 version, reuse the same small sequence instead of manually changing VPS files:
+
+1. Build one immutable artifact from a clean Git commit.
+2. Activate that exact artifact in the isolated API-only TEST and verify its health.
+3. If a Jivo route check is required, run primary bridge preflight, then make the separately
+   approved bridge switch.
+4. Run one separately approved correlated Jivo smoke. If it fails, use the owner rollback.
+
+The artifact manifest and release ID are the version passport for every step. A local test or
+isolated TEST health receipt does not prove Jivo delivery; it only makes the next step safe to
+attempt. Do not combine build, TEST deployment, bridge routing, external smoke, rollback, commit,
+push, or production activation into one approval.
+
 ## Safe activation sequence
 
 1. Name the explicit TEST or PROD contour and verify its current live identity separately.
@@ -105,6 +120,22 @@ python3 scripts/nmbot_primary_v6_jivo_switch.py preflight \
 The preflight is read-only. It requires primary API/bridge and both client-production services to
 be healthy, their protected process identities unchanged, V6 TEST health to match the requested
 release, and the current primary bridge upstream to be exactly `127.0.0.1:8088`.
+
+If preflight reports `switch_status_already_exists`, do not delete the private status or bridge
+environment files manually. First run the read-only `recon`. When it proves the bridge route is
+already `current`, the expected isolated V6 TEST release is healthy, and the saved backup is still
+valid, the separately approved recovery is:
+
+```bash
+python3 scripts/nmbot_primary_v6_jivo_switch.py reconcile \
+  --expected-v6-release <release-id> --apply \
+  --confirm RECONCILE-PRIMARY-BRIDGE-<release-id>-TO-CURRENT
+```
+
+`reconcile` does not change the bridge route or restart services. It only marks a verified stale
+active status as reconciled after validating the current route, protected health, status schema,
+backup integrity, and backup hash. Run preflight again after its receipt; any other reconciliation
+failure is fail-closed and needs diagnosis, not manual cleanup.
 
 After separate switch approval, use the exact confirmation printed by the command. The owner saves
 a private, restrictive backup of the primary bridge environment, atomically changes only

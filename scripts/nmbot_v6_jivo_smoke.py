@@ -234,7 +234,7 @@ def _read_chat_events(chat_id: str, *, journal: Path, offset: int = 0, root: Pat
             event = json.loads(raw)
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
-        if isinstance(event, dict) and event.get("chat_id_ref") == ref:
+        if isinstance(event, dict) and event.get("chat_ref") == ref:
             events.append(event)
     return events
 
@@ -249,7 +249,6 @@ def _read_bridge_events(*, event_id_ref: str, chat_id: str, offset: int, path: P
             continue
         if (
             isinstance(event, dict)
-            and event.get("event") == "nmbot_jivo_n8n_bridge"
             and event.get("event_id_ref") == event_id_ref
             and event.get("chat_id_ref") == chat_ref
         ):

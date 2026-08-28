@@ -79,6 +79,15 @@ CONTROL_UNIT = ".config/systemd/user/nmbot-v6-slot@.service"
 AUTHORIZED_HOST = "neiro@193.107.155.236"
 AUTHORIZED_PORT = "1905"
 REMOTE_HOME = "/home/neiro"
+SLOT_ENV_KEYS = (
+    "GATEWAY_POLL_TOKEN",
+    "NMBOT_MAIN_SEARCH_FALLBACK_ENABLED",
+    "NMBOT_MAIN_SEARCH_FALLBACK_MODELS",
+    "NMBOT_OPENROUTER_EXCLUDE_REASONING",
+    "OPENROUTER_API_KEY",
+    "OVERMIND_TOKEN",
+    "OVERMIND_URL",
+)
 
 
 class ReleaseControlError(RuntimeError):
@@ -731,6 +740,35 @@ class ReleaseController:
         manifest = json.loads(self._stored_manifest(release_id).read_text(encoding="utf-8"))
         return self.artifacts_dir / validate_release_id(release_id) / str(manifest["archive_name"])
 
+    def project_slot_environment(self, *, profile: str, source_env: Path) -> dict[str, Any]:
+        """Copy only gateway settings into a private profile environment file."""
+        normalized_profile = normalize_profile(profile)
+        source = Path(source_env).expanduser().resolve()
+        if not source.is_file() or source.is_symlink():
+            raise ReleaseControlError("source env file must be a regular non-symlink file")
+        try:
+            lines = source.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            raise ReleaseControlError("source env file cannot be read") from exc
+        selected: dict[str, str] = {}
+        for raw in lines:
+            line = raw.strip()
+            if line.startswith("export "):
+                line = line[7:].lstrip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key = key.strip()
+            if key in SLOT_ENV_KEYS:
+                selected[key] = value
+        if not (selected.get("OVERMIND_TOKEN", "").strip() or selected.get("GATEWAY_POLL_TOKEN", "").strip()):
+            raise ReleaseControlError("slot environment has no gateway token")
+        if not selected.get("OPENROUTER_API_KEY", "").strip():
+            raise ReleaseControlError("slot environment has no model API key")
+        target = self.profiles_dir / normalized_profile.lower() / "gateway.env"
+        _atomic_text(target, "".join(f"{key}={selected[key]}\n" for key in SLOT_ENV_KEYS if key in selected))
+        return {"profile": normalized_profile, "env_file": str(target), "keys": sorted(selected)}
+
     def install_artifact(self, *, manifest: Path, archive: Path) -> dict[str, Any]:
         inspected = inspect_artifact(manifest, archive)
         with self._locked():
@@ -993,6 +1031,11 @@ def _parser() -> argparse.ArgumentParser:
     show = commands.add_parser("show"); show.add_argument("release_id")
     commands.add_parser("status")
     commands.add_parser("journal")
+    project_env = commands.add_parser("project-env")
+    project_env.add_argument("--profile", choices=("TEST", "PROD"), required=True)
+    project_env.add_argument("--source-env", type=Path, required=True)
+    project_env.add_argument("--apply", action="store_true")
+    project_env.add_argument("--confirm", required=True)
     bundle = commands.add_parser("bundle-control")
     bundle.add_argument("--source-root", type=Path, required=True); bundle.add_argument("--out-dir", type=Path, required=True)
     bootstrap = commands.add_parser("bootstrap-control")
@@ -1023,6 +1066,9 @@ def main() -> None:
         elif args.command == "show": result = controller.registry.show_release(args.release_id)
         elif args.command == "status": result = controller.status()
         elif args.command == "journal": result = controller.registry.journal_events()
+        elif args.command == "project-env":
+            _require_apply(args, f"ENV:{args.profile}")
+            result = controller.project_slot_environment(profile=args.profile, source_env=args.source_env)
         elif args.command == "bundle-control":
             bundle = build_control_bundle(source_root=args.source_root, out_dir=args.out_dir); result = {"schema": CONTROL_BUNDLE_SCHEMA, "source_git_sha": bundle.source_git_sha, "archive": str(bundle.archive), "manifest": str(bundle.manifest), "archive_sha256": bundle.archive_sha256, "files": len(bundle.files)}
         elif args.command == "bootstrap-control":

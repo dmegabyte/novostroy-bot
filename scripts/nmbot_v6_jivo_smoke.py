@@ -371,7 +371,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-release", required=True)
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--start-settle-seconds", type=float, default=3.0)
-    parser.add_argument("--journal-wait-seconds", type=float, default=15.0)
+    parser.add_argument("--journal-wait-seconds", type=float, default=45.0)
     parser.add_argument("--require-accepted", action="store_true")
     return parser
 

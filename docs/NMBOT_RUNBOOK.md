@@ -156,6 +156,9 @@ check restores the backup and restarts that bridge back to its former route. A c
 
 The strict smoke owner reads the same fixed controller route and canonical TEST profile journal.
 It rejects a release mismatch, unsafe route file, non-A/B slot, or non-loopback upstream.
+It polls only the new matching journal and bridge records for a bounded 45 seconds, because a
+valid gateway answer can complete after the initial bridge acknowledgement. Do not treat an early
+partial trace as a failed release; only the final strict receipt decides the result.
 
 Rollback is also explicit and restores the saved primary bridge environment:
 

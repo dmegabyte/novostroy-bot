@@ -35,3 +35,18 @@ def test_gateway_rejects_invalid_endpoint_and_task_id():
     try: GatewayHttpClient("ftp://unsafe")
     except ValueError as exc: assert str(exc) == "invalid_gateway_endpoint"
     else: raise AssertionError("invalid endpoint accepted")
+
+
+def test_gateway_projects_failed_task_to_safe_provider_code(monkeypatch):
+    async def create(request): return web.json_response({"id": "task-failed"})
+    async def status(request): return web.json_response({"status": "failed"})
+    async def result(request): return web.json_response({"result": {"error": "corrupted thought signature: private upstream detail"}})
+    async def run():
+        app = web.Application(); app.router.add_post("/api/v1/tasks/api", create); app.router.add_get("/api/v1/tasks/api/task-failed/status", status); app.router.add_get("/api/v1/tasks/api/task-failed/result", result)
+        async with TestServer(app) as server:
+            monkeypatch.setenv("OVERMIND_TOKEN", "test-token")
+            gateway = PromptGateway(DirectTransport(GatewayHttpClient(str(server.make_url("/")).rstrip("/"), poll_interval=0.01), timeout=5), "v6_simple_prompt1", system_prompt="prompt", model="google/gemini-test")
+            try: await gateway.run({"message": "test"})
+            except RuntimeError as exc: assert str(exc) == "provider_corrupted_thought_signature"
+            else: raise AssertionError("failed task accepted")
+    asyncio.run(run())

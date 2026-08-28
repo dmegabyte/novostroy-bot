@@ -24,17 +24,18 @@ HOST = "neiro@193.107.155.236"
 SSH_PORT = "1905"
 PRIMARY_ENV = "/home/neiro/novostroy-bot/.env"
 SWITCH_ROOT = "/home/neiro/.local/state/nmbot-v6-primary-jivo-switch"
+RELEASE_CONTROL_ROOT = "/home/neiro/.local/state/nmbot-v6-release"
+TEST_ROUTE = RELEASE_CONTROL_ROOT + "/routes/test.json"
 PRIMARY_BRIDGE = "novostroy-bot-n8n-bridge.service"
 PRIMARY_API = "novostroy-bot-api.service"
 CLIENT_API = "novostroy-bot-client-production-api.service"
 CLIENT_BRIDGE = "novostroy-bot-client-production-n8n-bridge.service"
-V6_HEALTH = "http://127.0.0.1:18088/health"
 PRIMARY_BRIDGE_HEALTH = "http://127.0.0.1:8093/health"
 PRIMARY_API_HEALTH = "http://127.0.0.1:8088/health"
 CLIENT_API_HEALTH = "http://127.0.0.1:8188/health"
 CLIENT_BRIDGE_HEALTH = "http://127.0.0.1:8193/health"
 CURRENT_UPSTREAM = "http://127.0.0.1:8088"
-V6_UPSTREAM = "http://127.0.0.1:18088"
+TEST_UPSTREAMS = ("http://127.0.0.1:18088", "http://127.0.0.1:18089")
 SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=8")
 RELEASE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 
@@ -48,14 +49,14 @@ class TargetContract:
     def as_dict(self) -> dict[str, Any]:
         return {
             "schema": SCHEMA,
-            "target_kind": "primary_jivo_bridge_to_isolated_v6_test",
+            "target_kind": "primary_jivo_bridge_to_active_v6_test_slot",
             "host": HOST,
             "primary_env": PRIMARY_ENV,
             "switch_root": SWITCH_ROOT,
             "primary_bridge": PRIMARY_BRIDGE,
             "current_upstream": CURRENT_UPSTREAM,
-            "v6_upstream": V6_UPSTREAM,
-            "v6_health": V6_HEALTH,
+            "test_route": TEST_ROUTE,
+            "allowed_test_upstreams": list(TEST_UPSTREAMS),
             "rollback": "restore_primary_bridge_backup",
             "do_not_touch": [PRIMARY_API, CLIENT_API, CLIENT_BRIDGE],
             "jivo_smoke": "separate_approval_required",
@@ -81,17 +82,17 @@ EXPECTED = {
     "schema": "nmbot.primary_v6_jivo_switch.v1",
     "primary_env": "/home/neiro/novostroy-bot/.env",
     "switch_root": "/home/neiro/.local/state/nmbot-v6-primary-jivo-switch",
+    "test_route": "/home/neiro/.local/state/nmbot-v6-release/routes/test.json",
+    "allowed_test_upstreams": ["http://127.0.0.1:18088", "http://127.0.0.1:18089"],
     "primary_bridge": "novostroy-bot-n8n-bridge.service",
     "primary_api": "novostroy-bot-api.service",
     "client_api": "novostroy-bot-client-production-api.service",
     "client_bridge": "novostroy-bot-client-production-n8n-bridge.service",
-    "v6_health": "http://127.0.0.1:18088/health",
     "primary_bridge_health": "http://127.0.0.1:8093/health",
     "primary_api_health": "http://127.0.0.1:8088/health",
     "client_api_health": "http://127.0.0.1:8188/health",
     "client_bridge_health": "http://127.0.0.1:8193/health",
     "current_upstream": "http://127.0.0.1:8088",
-    "v6_upstream": "http://127.0.0.1:18088",
 }
 SAFE_RELEASE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 
@@ -117,6 +118,7 @@ if not SAFE_RELEASE.fullmatch(release_id):
 env_path = Path(EXPECTED["primary_env"])
 root = Path(EXPECTED["switch_root"])
 status_path = root / "status.json"
+test_route_path = Path(EXPECTED["test_route"])
 
 def run(args, timeout=30):
     try:
@@ -148,8 +150,32 @@ def protected_snapshot():
 def same_protected(before, after):
     return before["healthy"] and after["healthy"] and before["services"] == after["services"]
 
-def v6_ready():
-    item = health(EXPECTED["v6_health"])
+def test_target():
+    try:
+        details = test_route_path.lstat()
+        if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
+            fail("test_route_unsafe")
+        route = json.loads(test_route_path.read_text(encoding="utf-8"))
+    except SystemExit:
+        raise
+    except Exception:
+        fail("test_route_unreadable")
+    active = route.get("active") if isinstance(route, dict) else None
+    if (
+        not isinstance(route, dict)
+        or route.get("schema") != "nmbot.active_route.v1"
+        or route.get("profile") != "TEST"
+        or not isinstance(active, dict)
+        or set(active) != {"slot", "release_id", "upstream"}
+        or active.get("slot") not in {"A", "B"}
+        or active.get("release_id") != release_id
+        or active.get("upstream") not in EXPECTED["allowed_test_upstreams"]
+    ):
+        fail("test_route_invalid")
+    return {"slot": active["slot"], "release_id": active["release_id"], "upstream": active["upstream"]}
+
+def v6_ready(target):
+    item = health(target["upstream"] + "/health")
     return item["ok"] and item["runtime"] == "V6" and item["profile"] == "TEST" and item["release_id"] == release_id
 
 def bridge_ready():
@@ -250,14 +276,15 @@ def status_backup(record):
 
 def preflight():
     current = read_env()
+    target = test_target()
     if upstream_from(current) != EXPECTED["current_upstream"]:
         fail("primary_upstream_not_current")
-    if not protected_snapshot()["healthy"] or not bridge_ready() or not v6_ready():
+    if not protected_snapshot()["healthy"] or not bridge_ready() or not v6_ready(target):
         fail("preflight_health_failed")
     status = status_record()
     if status and status["status"] == "active":
         fail("switch_status_already_exists")
-    return current
+    return current, target
 
 def restore(backup):
     try:
@@ -271,9 +298,10 @@ def restore(backup):
 
 if operation in {"preflight", "recon"}:
     current = read_env()
+    target = test_target()
     upstream = upstream_from(current)
-    route = "current" if upstream == EXPECTED["current_upstream"] else "v6" if upstream == EXPECTED["v6_upstream"] else "other"
-    ready = protected_snapshot()["healthy"] and bridge_ready() and v6_ready()
+    route = "current" if upstream == EXPECTED["current_upstream"] else "v6" if upstream == target["upstream"] else "other"
+    ready = protected_snapshot()["healthy"] and bridge_ready() and v6_ready(target)
     status = status_record()
     ok = ready
     if operation == "preflight":
@@ -283,17 +311,18 @@ if operation in {"preflight", "recon"}:
             fail("switch_status_already_exists")
         fail("preflight_health_failed" if operation == "preflight" else "recon_health_failed")
     bridge = unit_state(EXPECTED["primary_bridge"])
-    emit({"ok": True, "schema": EXPECTED["schema"], "operation": operation, "v6_release_id": release_id, "primary_bridge_ready": True, "primary_bridge_route": route, "primary_bridge_systemd": {"result": bridge["result"], "exec_main_code": bridge["exec_main_code"], "exec_main_status": bridge["exec_main_status"]}, "switch_status_exists": status is not None, "switch_status": status["status"] if status else None, "protected_services_healthy": True, "mutation": False})
+    emit({"ok": True, "schema": EXPECTED["schema"], "operation": operation, "v6_release_id": release_id, "v6_test_slot": target["slot"], "primary_bridge_ready": True, "primary_bridge_route": route, "primary_bridge_systemd": {"result": bridge["result"], "exec_main_code": bridge["exec_main_code"], "exec_main_status": bridge["exec_main_status"]}, "switch_status_exists": status is not None, "switch_status": status["status"] if status else None, "protected_services_healthy": True, "mutation": False})
 
 if operation == "reconcile":
     before = protected_snapshot()
     current = read_env()
+    target = test_target()
     status = status_record()
     if status is None or status["status"] != "active":
         fail("switch_status_not_active")
     if upstream_from(current) != EXPECTED["current_upstream"]:
         fail("primary_upstream_not_current")
-    if not before["healthy"] or not bridge_ready() or not v6_ready():
+    if not before["healthy"] or not bridge_ready() or not v6_ready(target):
         fail("reconcile_health_failed")
     backup = status_backup(status)
     if not backup.is_file() or backup.is_symlink():
@@ -315,7 +344,7 @@ if operation == "reconcile":
 
 if operation == "switch":
     before = protected_snapshot()
-    original = preflight()
+    original, target = preflight()
     backup = backup_path()
     backup.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if backup.exists():
@@ -331,21 +360,22 @@ if operation == "switch":
     else:
         write_atomic(backup, original, 0o600)
     try:
-        write_atomic(env_path, replace_upstream(original, EXPECTED["v6_upstream"]), stat.S_IMODE(env_path.stat().st_mode))
-        if upstream_from(read_env()) != EXPECTED["v6_upstream"] or not restart_bridge() or not bridge_ready() or not v6_ready() or not same_protected(before, protected_snapshot()):
+        write_atomic(env_path, replace_upstream(original, target["upstream"]), stat.S_IMODE(env_path.stat().st_mode))
+        if upstream_from(read_env()) != target["upstream"] or test_target() != target or not restart_bridge() or not bridge_ready() or not v6_ready(target) or not same_protected(before, protected_snapshot()):
             restore(backup)
             fail("switch_failed_rolled_back")
-        receipt = {"schema": EXPECTED["schema"], "release_id": release_id, "status": "active", "backup_sha256": hashlib.sha256(original).hexdigest()}
+        receipt = {"schema": EXPECTED["schema"], "release_id": release_id, "status": "active", "test_slot": target["slot"], "test_upstream": target["upstream"], "backup_sha256": hashlib.sha256(original).hexdigest()}
         write_atomic(status_path, (json.dumps(receipt, sort_keys=True) + "\n").encode("utf-8"), 0o600)
     except SystemExit:
         raise
     except Exception:
         restore(backup)
         fail("switch_failed_rolled_back")
-    emit({"ok": True, "schema": EXPECTED["schema"], "operation": operation, "v6_release_id": release_id, "primary_bridge_route": "v6", "protected_services_unchanged": True, "rollback": "restore_primary_bridge_backup", "mutation": True})
+    emit({"ok": True, "schema": EXPECTED["schema"], "operation": operation, "v6_release_id": release_id, "v6_test_slot": target["slot"], "primary_bridge_route": "v6", "protected_services_unchanged": True, "rollback": "restore_primary_bridge_backup", "mutation": True})
 
 if operation == "rollback":
     before = protected_snapshot()
+    target = test_target()
     try:
         status = status_record()
     except Exception:
@@ -361,7 +391,7 @@ if operation == "rollback":
     except Exception:
         fail("switch_backup_unreadable")
     restore(backup)
-    if not v6_ready() or not same_protected(before, protected_snapshot()):
+    if not v6_ready(target) or not same_protected(before, protected_snapshot()):
         fail("rollback_invariant_failed")
     status["status"] = "rolled_back"
     write_atomic(status_path, (json.dumps(status, sort_keys=True) + "\n").encode("utf-8"), 0o600)
@@ -369,7 +399,7 @@ if operation == "rollback":
 '''
 
 
-def target_payload(operation: str, *, expected_v6_release: str) -> dict[str, str]:
+def target_payload(operation: str, *, expected_v6_release: str) -> dict[str, Any]:
     if operation not in {"preflight", "recon", "switch", "rollback", "reconcile"}:
         raise PrimaryV6SwitchError("unsupported operation")
     if not RELEASE_RE.fullmatch(expected_v6_release):
@@ -384,13 +414,13 @@ def target_payload(operation: str, *, expected_v6_release: str) -> dict[str, str
         "primary_api": PRIMARY_API,
         "client_api": CLIENT_API,
         "client_bridge": CLIENT_BRIDGE,
-        "v6_health": V6_HEALTH,
+        "test_route": TEST_ROUTE,
+        "allowed_test_upstreams": list(TEST_UPSTREAMS),
         "primary_bridge_health": PRIMARY_BRIDGE_HEALTH,
         "primary_api_health": PRIMARY_API_HEALTH,
         "client_api_health": CLIENT_API_HEALTH,
         "client_bridge_health": CLIENT_BRIDGE_HEALTH,
         "current_upstream": CURRENT_UPSTREAM,
-        "v6_upstream": V6_UPSTREAM,
     }
 
 

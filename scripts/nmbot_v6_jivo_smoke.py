@@ -19,11 +19,13 @@ from typing import Any
 
 ENV_PATH = Path("/home/neiro/novostroy-bot/.env")
 PRIMARY_JOURNAL_PATH = Path("/home/neiro/novostroy-bot/logs/dialogue_journal.jsonl")
-ISOLATED_TEST_ROOT = Path("/home/neiro/.local/state/nmbot-v6-clean-test")
+CANONICAL_TEST_ROOT = Path("/home/neiro/.local/state/nmbot-v6-release")
+CANONICAL_TEST_ROUTE = CANONICAL_TEST_ROOT / "routes" / "test.json"
+CANONICAL_TEST_DATA_ROOT = CANONICAL_TEST_ROOT / "profiles" / "test" / "data"
 BRIDGE_LOG_PATH = Path("/home/neiro/novostroy-bot/logs/n8n_bridge_structured.jsonl")
 BRIDGE_LOG_DEFAULT = Path("/home/neiro/.local/state/nmbot-v6/prod/bridge/n8n_bridge_structured.jsonl")
 PRIMARY_API_BASE = "http://127.0.0.1:8088"
-ISOLATED_TEST_API_BASE = "http://127.0.0.1:18088"
+CANONICAL_TEST_UPSTREAMS = {"http://127.0.0.1:18088", "http://127.0.0.1:18089"}
 BRIDGE_BASE = "http://127.0.0.1:8093"
 SAFE_RELEASE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 MAX_NEW_LOG_BYTES = 2 * 1024 * 1024
@@ -64,6 +66,31 @@ def _release_id(value: str | None, *, required: bool) -> str | None:
     return release_id
 
 
+def _canonical_test_target(expected_release: str) -> tuple[str, str]:
+    try:
+        details = CANONICAL_TEST_ROUTE.lstat()
+        if stat.S_ISLNK(details.st_mode) or not stat.S_ISREG(details.st_mode):
+            raise SmokeError("test_route_unsafe")
+        route = json.loads(CANONICAL_TEST_ROUTE.read_text(encoding="utf-8"))
+    except SmokeError:
+        raise
+    except Exception as exc:
+        raise SmokeError("test_route_unreadable") from exc
+    active = route.get("active") if isinstance(route, dict) else None
+    if (
+        not isinstance(route, dict)
+        or route.get("schema") != "nmbot.active_route.v1"
+        or route.get("profile") != "TEST"
+        or not isinstance(active, dict)
+        or set(active) != {"slot", "release_id", "upstream"}
+        or active.get("slot") not in {"A", "B"}
+        or active.get("release_id") != expected_release
+        or active.get("upstream") not in CANONICAL_TEST_UPSTREAMS
+    ):
+        raise SmokeError("test_route_invalid")
+    return str(active["upstream"]), str(active["slot"])
+
+
 def target_contract(target: str, expected_release: str | None) -> TargetContract:
     if target == "primary":
         return TargetContract(
@@ -77,13 +104,13 @@ def target_contract(target: str, expected_release: str | None) -> TargetContract
     if target == "isolated-test":
         release_id = _release_id(expected_release, required=True)
         assert release_id is not None
-        data_root = ISOLATED_TEST_ROOT / "data" / release_id
+        api_base, _slot = _canonical_test_target(release_id)
         return TargetContract(
             name=target,
-            api_base=ISOLATED_TEST_API_BASE,
+            api_base=api_base,
             profile="TEST",
-            journal=data_root / "dialogue" / "dialogue.jsonl",
-            journal_root=data_root,
+            journal=CANONICAL_TEST_DATA_ROOT / "dialogue" / "dialogue.jsonl",
+            journal_root=CANONICAL_TEST_DATA_ROOT,
             expected_release=release_id,
         )
     raise SmokeError("target_not_allowed")

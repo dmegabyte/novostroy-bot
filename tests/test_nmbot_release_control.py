@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
 from scripts import nmbot_atomic_release as atomic
+from scripts import nmbot_release_control as control
 from scripts.nmbot_release_control import ReleaseControlError, ReleaseController
 
 
@@ -248,3 +250,79 @@ def test_promotion_rejects_unapproved_release(tmp_path: Path, artifacts) -> None
 
     with pytest.raises(ReleaseControlError, match="approved quality"):
         source.promote_to(destination, "v6-r41")
+
+
+def test_control_bundle_is_exact_immutable_and_tamper_evident(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(control, "_clean_git_sha", lambda _root: "3" * 40)
+    bundle = control.build_control_bundle(source_root=ROOT, out_dir=tmp_path / "bundle")
+
+    inspected = control.inspect_control_bundle(manifest=bundle.manifest, archive=bundle.archive)
+
+    assert inspected.source_git_sha == "3" * 40
+    assert tuple(path for path, _sha in inspected.files) == control.CONTROL_BUNDLE_FILES
+    assert inspected.archive_sha256 == hashlib.sha256(bundle.archive.read_bytes()).hexdigest()
+
+    bundle.archive.write_bytes(bundle.archive.read_bytes() + b"tampered")
+    with pytest.raises(ReleaseControlError, match="archive sha256 mismatch"):
+        control.inspect_control_bundle(manifest=bundle.manifest, archive=bundle.archive)
+
+
+class FakeRemote:
+    def __init__(self, receipt: dict) -> None:
+        self.receipt = receipt
+        self.commands: list[str] = []
+        self.uploads: list[tuple[Path, str]] = []
+
+    def run(self, command: str) -> subprocess.CompletedProcess[str]:
+        self.commands.append(command)
+        stdout = "" if len(self.commands) == 1 else json.dumps(self.receipt)
+        return subprocess.CompletedProcess([], 0, stdout, "")
+
+    def upload(self, local: Path, remote_path: str) -> subprocess.CompletedProcess[str]:
+        self.uploads.append((Path(local), remote_path))
+        return subprocess.CompletedProcess([], 0, "", "")
+
+
+def test_remote_bootstrap_installs_only_control_plane(tmp_path: Path, monkeypatch) -> None:
+    source_sha = "4" * 40
+    monkeypatch.setattr(control, "_clean_git_sha", lambda _root: source_sha)
+    bundle = control.build_control_bundle(source_root=ROOT, out_dir=tmp_path / "bundle")
+    receipt = {
+        "schema": "nmbot.release_control_bootstrap_receipt.v1",
+        "ok": True,
+        "source_git_sha": source_sha,
+        "control_root": "/home/neiro/.local/state/nmbot-v6-release",
+        "unit_installed": True,
+        "api_touched": False,
+        "bridge_touched": False,
+    }
+    remote = FakeRemote(receipt)
+
+    observed = control.bootstrap_remote(manifest=bundle.manifest, archive=bundle.archive, remote=remote)
+
+    assert observed == receipt
+    assert len(remote.uploads) == 2
+    bootstrap_command = remote.commands[-1]
+    assert "nmbot-v6-slot@.service" in bootstrap_command
+    assert "novostroy-bot-api.service" not in bootstrap_command
+    assert "novostroy-bot-n8n-bridge.service" not in bootstrap_command
+
+
+def test_prod_prepare_requires_approved_passing_test_receipt(tmp_path: Path, artifacts) -> None:
+    first, _ = artifacts
+    controller = ReleaseController(tmp_path / "control", service_manager=FakeServiceManager(), health_probe=FakeHealth())
+    _install(controller, first)
+    env_file = tmp_path / "prod.env"
+    env_file.write_text("", encoding="utf-8")
+
+    with pytest.raises(ReleaseControlError, match="approved quality"):
+        controller.prepare_slot(profile="PROD", release_id="v6-r41", port=18090, env_file=env_file, slot="A")
+
+    controller.registry.set_quality("v6-r41", verdict="approved", receipt_ref="review:owner")
+    with pytest.raises(ReleaseControlError, match="passing TEST"):
+        controller.prepare_slot(profile="PROD", release_id="v6-r41", port=18090, env_file=env_file, slot="A")
+
+    controller.registry.record_check("v6-r41", profile="TEST", outcome="passed", reason_code="strict_smoke", receipt_ref="smoke:passed")
+    prepared = controller.prepare_slot(profile="PROD", release_id="v6-r41", port=18090, env_file=env_file, slot="A")
+    assert prepared["profile"] == "PROD"
+    assert prepared["release_id"] == "v6-r41"

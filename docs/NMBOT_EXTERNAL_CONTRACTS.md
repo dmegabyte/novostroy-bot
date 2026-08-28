@@ -10,6 +10,10 @@ work starts. Client-visible PROD text passes the V6 egress guard.
 
 The V6 simple gateway uses exactly two prompts and the configured private gateway client.
 Provider calls are never part of local release verification unless separately authorized.
+The gateway create-task response may return `id` as a positive integer or a safe string;
+the client normalizes either wire form to a string before polling `/status` and `/result`.
+Missing, zero, negative, fractional, boolean or unsafe IDs are rejected. This is a wire
+compatibility rule, not an MCP tool or prompt change.
 
 ## Callback and CRM
 

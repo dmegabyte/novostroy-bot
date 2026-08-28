@@ -47,6 +47,22 @@ class FakeHealth:
         return f"health:{profile.lower()}-{release_id}"
 
 
+class FakeRemote:
+    def __init__(self, receipt: dict) -> None:
+        self.receipt = receipt
+        self.commands: list[str] = []
+        self.uploads: list[tuple[Path, str]] = []
+
+    def run(self, command: str) -> subprocess.CompletedProcess[str]:
+        self.commands.append(command)
+        stdout = json.dumps(self.receipt) if "prepare-test" in command else ""
+        return subprocess.CompletedProcess(["ssh"], 0, stdout=stdout, stderr="")
+
+    def upload(self, local: Path, remote_path: str) -> subprocess.CompletedProcess[str]:
+        self.uploads.append((Path(local), remote_path))
+        return subprocess.CompletedProcess(["scp"], 0, stdout="", stderr="")
+
+
 @pytest.fixture
 def artifacts(tmp_path: Path):
     out = tmp_path / "build"
@@ -180,6 +196,40 @@ def test_project_slot_environment_rejects_missing_gateway_credentials(tmp_path: 
 
     with pytest.raises(ReleaseControlError, match="gateway token"):
         controller.project_slot_environment(profile="TEST", source_env=source)
+
+
+def test_prepare_test_installs_projects_and_activates_one_test_slot(tmp_path: Path, artifacts, monkeypatch) -> None:
+    first, _ = artifacts
+    source = tmp_path / "primary.env"
+    source.write_text("OVERMIND_TOKEN=private\nOPENROUTER_API_KEY=private\n", encoding="utf-8")
+    monkeypatch.setattr(control, "PRIMARY_GATEWAY_ENV", source)
+    services = FakeServiceManager()
+    controller = ReleaseController(tmp_path / "control", service_manager=services, health_probe=FakeHealth())
+
+    receipt = controller.prepare_test(manifest=first.manifest, archive=first.archive)
+
+    assert receipt["release_id"] == "v6-r41"
+    assert receipt["profile"] == "TEST"
+    assert receipt["slot"] == "A"
+    assert receipt["prepared"]["upstream"] == "http://127.0.0.1:18088"
+    assert receipt["route"]["active"] == {"slot": "A", "release_id": "v6-r41", "upstream": "http://127.0.0.1:18088"}
+    assert services.restarted == ["test-a"]
+
+
+def test_deploy_test_remote_uploads_exact_artifact_and_requires_matching_receipt(tmp_path: Path, artifacts) -> None:
+    first, _ = artifacts
+    remote = FakeRemote({
+        "release_id": "v6-r41",
+        "profile": "TEST",
+        "route": {"active": {"slot": "A", "release_id": "v6-r41", "upstream": "http://127.0.0.1:18088"}},
+    })
+
+    receipt = control.deploy_test_remote(manifest=first.manifest, archive=first.archive, remote=remote)
+
+    assert receipt["release_id"] == "v6-r41"
+    assert len(remote.uploads) == 2
+    assert "prepare-test" in remote.commands[-1]
+    assert "TEST:v6-r41" in remote.commands[-1]
 
 
 def test_prepare_failure_marks_slot_failed_and_stops_inactive_process(tmp_path: Path, artifacts) -> None:

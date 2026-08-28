@@ -216,6 +216,27 @@ def test_prepare_test_installs_projects_and_activates_one_test_slot(tmp_path: Pa
     assert services.restarted == ["test-a"]
 
 
+def test_prepare_test_cleans_derived_bytecode_and_uses_b_after_failed_a(tmp_path: Path, artifacts, monkeypatch) -> None:
+    first, _ = artifacts
+    source = tmp_path / "primary.env"
+    source.write_text("OVERMIND_TOKEN=private\nOPENROUTER_API_KEY=private\n", encoding="utf-8")
+    monkeypatch.setattr(control, "PRIMARY_GATEWAY_ENV", source)
+    controller = ReleaseController(tmp_path / "control", service_manager=FakeServiceManager(), health_probe=FakeHealth())
+    installed = _install(controller, first)
+    release_root = Path(installed["release_root"])
+    cache = release_root / "nmbot_core" / "__pycache__"
+    cache.mkdir()
+    (cache / "app.cpython-312.pyc").write_bytes(b"derived")
+    controller.registry.begin_slot_prepare(profile="TEST", slot="A", release_id="v6-r41", upstream="http://127.0.0.1:18088")
+    controller.registry.fail_slot_prepare(profile="TEST", slot="A", release_id="v6-r41", reason_code="health_failed", receipt_ref="health-failed:test")
+
+    receipt = controller.prepare_test(manifest=first.manifest, archive=first.archive)
+
+    assert receipt["slot"] == "B"
+    assert receipt["prepared"]["upstream"] == "http://127.0.0.1:18089"
+    assert not cache.exists()
+
+
 def test_deploy_test_remote_uploads_exact_artifact_and_requires_matching_receipt(tmp_path: Path, artifacts) -> None:
     first, _ = artifacts
     remote = FakeRemote({

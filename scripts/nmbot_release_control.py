@@ -429,10 +429,11 @@ def bootstrap_remote(*, manifest: Path, archive: Path, remote: Any) -> dict[str,
     return receipt
 
 
-def _last_json_line(output: str, *, error: str) -> dict[str, Any]:
-    lines = [line for line in output.splitlines() if line.strip()]
+def _json_receipt(output: str, *, error: str) -> dict[str, Any]:
+    """Parse the remote CLI's complete JSON receipt, including pretty output."""
+    document = output.strip()
     try:
-        payload = json.loads(lines[-1]) if lines else None
+        payload = json.loads(document) if document else None
     except json.JSONDecodeError as exc:
         raise ReleaseControlError(error) from exc
     if not isinstance(payload, dict):
@@ -468,7 +469,7 @@ def deploy_test_remote(*, manifest: Path, archive: Path, remote: Any) -> dict[st
     if result.returncode != 0:
         failure = hashlib.sha256((result.stdout + result.stderr).encode("utf-8", "replace")).hexdigest()[:24]
         raise ReleaseControlError(f"remote TEST preparation failed (test-prepare-failed:{failure})")
-    receipt = _last_json_line(result.stdout, error="remote TEST receipt is malformed")
+    receipt = _json_receipt(result.stdout, error="remote TEST receipt is malformed")
     route = receipt.get("route")
     active = route.get("active") if isinstance(route, dict) else None
     if receipt.get("release_id") != inspected.release_id or receipt.get("profile") != "TEST" or not isinstance(active, dict) or active.get("release_id") != inspected.release_id:

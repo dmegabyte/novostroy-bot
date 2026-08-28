@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -55,7 +57,7 @@ class FakeRemote:
 
     def run(self, command: str) -> subprocess.CompletedProcess[str]:
         self.commands.append(command)
-        stdout = json.dumps(self.receipt) if "prepare-test" in command else ""
+        stdout = json.dumps(self.receipt, indent=2) if "prepare-test" in command else ""
         return subprocess.CompletedProcess(["ssh"], 0, stdout=stdout, stderr="")
 
     def upload(self, local: Path, remote_path: str) -> subprocess.CompletedProcess[str]:
@@ -251,6 +253,35 @@ def test_deploy_test_remote_uploads_exact_artifact_and_requires_matching_receipt
     assert len(remote.uploads) == 2
     assert "prepare-test" in remote.commands[-1]
     assert "TEST:v6-r41" in remote.commands[-1]
+
+
+def test_release_cli_receipt_crosses_real_subprocess_boundary(tmp_path: Path) -> None:
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "nmbot_release_control.py"), "--root", str(tmp_path / "control"), "status"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("\n") > 1
+    receipt = control._json_receipt(result.stdout, error="bad receipt")
+    assert receipt["runtime_version"] == "V6"
+    assert tuple(receipt["profiles"]) == ("PROD", "TEST")
+    assert receipt["profiles"]["TEST"]["route"] is None
+    assert receipt["profiles"]["PROD"]["route"] is None
+
+
+def test_release_cli_surface_is_frozen() -> None:
+    parser = control._parser()
+    action = next(item for item in parser._actions if isinstance(item, argparse._SubParsersAction))
+
+    assert tuple(action.choices) == (
+        "list", "show", "status", "journal", "project-env", "prepare-test", "deploy-test",
+        "bundle-control", "bootstrap-control", "register", "quality", "check", "prepare",
+        "activate", "rollback", "sync", "promote",
+    )
 
 
 def test_prepare_failure_marks_slot_failed_and_stops_inactive_process(tmp_path: Path, artifacts) -> None:

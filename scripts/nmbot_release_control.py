@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import gzip
 import hashlib
+import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -63,6 +66,19 @@ MAX_TOTAL_BYTES = 100 * 1024 * 1024
 DEFAULT_ROOT = Path.home() / ".local" / "state" / "nmbot-v6-release"
 IDENTITY_IN_RELEASE = RELEASE_IDENTITY_PATH
 CANONICAL_RUNTIME_PACKAGE = "nmbot_core"
+CONTROL_BUNDLE_SCHEMA = "nmbot.release_control_bundle.v1"
+CONTROL_BUNDLE_FILES = (
+    "deploy/systemd/nmbot-v6-slot@.service",
+    "scripts/nmbot_atomic_release.py",
+    "scripts/nmbot_release_control.py",
+    "scripts/nmbot_release_registry.py",
+    "scripts/nmbot_slot_runner.py",
+)
+CONTROL_ROOT = ".local/state/nmbot-v6-release"
+CONTROL_UNIT = ".config/systemd/user/nmbot-v6-slot@.service"
+AUTHORIZED_HOST = "neiro@193.107.155.236"
+AUTHORIZED_PORT = "1905"
+REMOTE_HOME = "/home/neiro"
 
 
 class ReleaseControlError(RuntimeError):
@@ -81,6 +97,41 @@ class InspectedArtifact:
     source_git_tree_sha: str
     source_clean_receipt_sha256: str
     files: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True)
+class ControlBundle:
+    source_git_sha: str
+    archive: Path
+    manifest: Path
+    archive_sha256: str
+    files: tuple[tuple[str, str], ...]
+
+
+class SshRemote:
+    def __init__(self, *, host: str, port: str) -> None:
+        if host != AUTHORIZED_HOST or str(port) != AUTHORIZED_PORT:
+            raise ReleaseControlError("remote target is not the authorized primary host")
+        self.host = host
+        self.port = str(port)
+
+    def run(self, command: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["ssh", "-p", self.port, "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", self.host, command],
+            text=True,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+
+    def upload(self, local: Path, remote_path: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["scp", "-P", self.port, "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", str(local), f"{self.host}:{remote_path}"],
+            text=True,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
 
 
 def _sha256_file(path: Path) -> str:
@@ -117,6 +168,253 @@ def _atomic_text(path: Path, text: str, *, mode: int = 0o600) -> None:
     finally:
         if os.path.exists(temp_name):
             os.unlink(temp_name)
+
+
+def _clean_git_sha(source_root: Path) -> str:
+    root = Path(source_root).resolve()
+    if not root.is_dir() or root.is_symlink():
+        raise ReleaseControlError("control bundle source root is invalid")
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        status = subprocess.run(
+            ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"],
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ReleaseControlError("control bundle Git identity is unavailable") from exc
+    sha = validate_git_sha(head.stdout.strip()) if head.returncode == 0 else ""
+    if not sha or status.returncode != 0 or status.stdout.strip():
+        raise ReleaseControlError("control bundle requires an exact clean Git source")
+    return sha
+
+
+def build_control_bundle(*, source_root: Path, out_dir: Path) -> ControlBundle:
+    root = Path(source_root).resolve()
+    source_git_sha = _clean_git_sha(root)
+    rows: list[tuple[str, str]] = []
+    payloads: dict[str, bytes] = {}
+    for relative in CONTROL_BUNDLE_FILES:
+        path = root / relative
+        if not path.is_file() or path.is_symlink():
+            raise ReleaseControlError(f"control bundle source missing: {relative}")
+        payload = path.read_bytes()
+        if len(payload) > MAX_FILE_BYTES:
+            raise ReleaseControlError(f"control bundle source too large: {relative}")
+        payloads[relative] = payload
+        rows.append((relative, hashlib.sha256(payload).hexdigest()))
+    out = Path(out_dir).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    archive = out / f"nmbot-release-control-{source_git_sha[:12]}.tar.gz"
+    manifest_path = out / f"nmbot-release-control-{source_git_sha[:12]}.manifest.json"
+    if os.path.lexists(archive) or os.path.lexists(manifest_path):
+        raise ReleaseControlError("refusing to overwrite immutable control bundle")
+    with archive.open("wb") as raw, gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as compressed, tarfile.open(fileobj=compressed, mode="w", format=tarfile.PAX_FORMAT) as bundle:
+        for relative, _digest in rows:
+            payload = payloads[relative]
+            info = tarfile.TarInfo(relative)
+            info.size = len(payload)
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
+            info.mtime = 0
+            info.mode = 0o644
+            bundle.addfile(info, io.BytesIO(payload))
+    archive_sha256 = _sha256_file(archive)
+    manifest = {
+        "schema": CONTROL_BUNDLE_SCHEMA,
+        "source_git_sha": source_git_sha,
+        "archive_name": archive.name,
+        "archive_sha256": archive_sha256,
+        "files": [{"path": path, "sha256": digest} for path, digest in rows],
+    }
+    manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    return ControlBundle(source_git_sha, archive, manifest_path, archive_sha256, tuple(rows))
+
+
+def inspect_control_bundle(*, manifest: Path, archive: Path) -> ControlBundle:
+    manifest_path = Path(manifest)
+    archive_path = Path(archive)
+    if not manifest_path.is_file() or manifest_path.is_symlink() or not archive_path.is_file() or archive_path.is_symlink():
+        raise ReleaseControlError("control bundle files must be regular non-symlink files")
+    try:
+        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ReleaseControlError("control bundle manifest is malformed") from exc
+    if not isinstance(raw, dict) or set(raw) != {"schema", "source_git_sha", "archive_name", "archive_sha256", "files"} or raw.get("schema") != CONTROL_BUNDLE_SCHEMA:
+        raise ReleaseControlError("control bundle manifest schema mismatch")
+    source_git_sha = validate_git_sha(raw.get("source_git_sha"))
+    if not source_git_sha or raw.get("archive_name") != archive_path.name:
+        raise ReleaseControlError("control bundle identity mismatch")
+    archive_sha256 = str(raw.get("archive_sha256") or "")
+    if len(archive_sha256) != 64 or archive_sha256 != _sha256_file(archive_path):
+        raise ReleaseControlError("control bundle archive sha256 mismatch")
+    rows = raw.get("files")
+    if not isinstance(rows, list):
+        raise ReleaseControlError("control bundle file list is invalid")
+    files: list[tuple[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"path", "sha256"}:
+            raise ReleaseControlError("control bundle file row is invalid")
+        path = _safe_relative(row["path"])
+        digest = str(row["sha256"] or "")
+        if len(digest) != 64:
+            raise ReleaseControlError("control bundle file hash is invalid")
+        files.append((path, digest))
+    if tuple(path for path, _digest in files) != CONTROL_BUNDLE_FILES:
+        raise ReleaseControlError("control bundle file set is not exact")
+    expected = dict(files)
+    with tarfile.open(archive_path, "r:gz") as bundle:
+        members = bundle.getmembers()
+        if [member.name for member in members] != list(CONTROL_BUNDLE_FILES):
+            raise ReleaseControlError("control bundle tar member set is not exact")
+        for member in members:
+            source = bundle.extractfile(member)
+            payload = source.read(MAX_FILE_BYTES + 1) if source is not None and member.isfile() and not member.issym() and not member.islnk() else b""
+            if len(payload) != member.size or hashlib.sha256(payload).hexdigest() != expected[member.name]:
+                raise ReleaseControlError("control bundle tar member hash mismatch")
+    return ControlBundle(source_git_sha, archive_path, manifest_path, archive_sha256, tuple(files))
+
+
+def _bootstrap_remote_command(bundle: ControlBundle, *, remote_archive: str, remote_manifest: str) -> str:
+    config = {
+        "schema": CONTROL_BUNDLE_SCHEMA,
+        "source_git_sha": bundle.source_git_sha,
+        "archive": remote_archive,
+        "manifest": remote_manifest,
+        "archive_sha256": bundle.archive_sha256,
+        "manifest_sha256": _sha256_file(bundle.manifest),
+        "files": [{"path": path, "sha256": digest} for path, digest in bundle.files],
+        "control_root": f"{REMOTE_HOME}/{CONTROL_ROOT}",
+        "unit_path": f"{REMOTE_HOME}/{CONTROL_UNIT}",
+    }
+    program = r'''
+import hashlib, json, os, pathlib, shutil, subprocess, sys, tarfile, tempfile
+cfg=json.loads(sys.argv[1]); root=pathlib.Path(cfg["control_root"]); tools=root/"tools"; final=tools/cfg["source_git_sha"]
+unit=pathlib.Path(cfg["unit_path"]); archive=pathlib.Path(cfg["archive"]); manifest_path=pathlib.Path(cfg["manifest"])
+def fail(message): raise RuntimeError(message)
+def digest(path):
+    h=hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024*1024), b""): h.update(chunk)
+    return h.hexdigest()
+def regular(path): return path.is_file() and not path.is_symlink()
+def atomic_bytes(path, payload, mode):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd,tmp=tempfile.mkstemp(prefix="."+path.name+".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd,"wb") as handle: handle.write(payload); handle.flush(); os.fsync(handle.fileno())
+        os.chmod(tmp, mode); os.replace(tmp,path)
+    finally:
+        try: os.unlink(tmp)
+        except FileNotFoundError: pass
+def run(args, **kwargs):
+    proc=subprocess.run(args, text=True, capture_output=True, timeout=30, **kwargs)
+    if proc.returncode != 0: fail("bootstrap command failed")
+    return proc
+if cfg.get("schema") != "nmbot.release_control_bundle.v1": fail("bootstrap schema mismatch")
+if not regular(archive) or not regular(manifest_path): fail("bootstrap inputs invalid")
+if digest(archive) != cfg["archive_sha256"] or digest(manifest_path) != cfg["manifest_sha256"]: fail("bootstrap input hash mismatch")
+manifest=json.loads(manifest_path.read_text(encoding="utf-8"))
+if manifest != {"schema":cfg["schema"],"source_git_sha":cfg["source_git_sha"],"archive_name":archive.name,"archive_sha256":cfg["archive_sha256"],"files":cfg["files"]}: fail("bootstrap manifest mismatch")
+for path in (root, tools, unit.parent):
+    if path.exists() and path.is_symlink(): fail("bootstrap destination is a symlink")
+    path.mkdir(parents=True, exist_ok=True)
+expected={row["path"]:row["sha256"] for row in cfg["files"]}
+created=False
+if final.exists():
+    if final.is_symlink() or not final.is_dir(): fail("installed tools path invalid")
+else:
+    staging=pathlib.Path(tempfile.mkdtemp(prefix=".bootstrap-", dir=str(tools)))
+    try:
+        with tarfile.open(archive,"r:gz") as bundle:
+            members=bundle.getmembers()
+            if [m.name for m in members] != list(expected): fail("bootstrap tar members mismatch")
+            for member in members:
+                if not member.isfile() or member.issym() or member.islnk() or member.size > 10*1024*1024: fail("bootstrap tar member invalid")
+                source=bundle.extractfile(member); payload=source.read(10*1024*1024+1) if source else b""
+                if len(payload) != member.size or hashlib.sha256(payload).hexdigest() != expected[member.name]: fail("bootstrap tar member hash mismatch")
+                target=staging/member.name; target.parent.mkdir(parents=True, exist_ok=True); target.write_bytes(payload); target.chmod(0o644)
+        (staging/"control-manifest.json").write_bytes(manifest_path.read_bytes()); (staging/"control-manifest.json").chmod(0o600)
+        os.replace(staging,final); created=True
+    finally:
+        if staging.exists(): shutil.rmtree(staging,ignore_errors=True)
+for rel,sha in expected.items():
+    path=final/rel
+    if not regular(path) or digest(path) != sha: fail("installed tools hash mismatch")
+unit_source=final/"deploy/systemd/nmbot-v6-slot@.service"
+old_unit=unit.read_bytes() if regular(unit) else None
+current=tools/"current"; old_current=os.readlink(current) if current.is_symlink() else None
+backup=root/"bootstrap-backups"/cfg["source_git_sha"]; backup.mkdir(parents=True,exist_ok=True)
+if old_unit is not None and not (backup/"slot-unit.service").exists(): atomic_bytes(backup/"slot-unit.service",old_unit,0o600)
+try:
+    atomic_bytes(unit,unit_source.read_bytes(),0o644)
+    temp=tools/(".current."+cfg["source_git_sha"])
+    try: temp.unlink()
+    except FileNotFoundError: pass
+    os.symlink(cfg["source_git_sha"],temp); os.replace(temp,current)
+    run(["systemctl","--user","daemon-reload"])
+    env=dict(os.environ); env["PYTHONPATH"]=str(final)
+    status=run([sys.executable,"-B",str(final/"scripts/nmbot_release_control.py"),"--root",str(root),"status"],cwd=final,env=env)
+    payload=json.loads(status.stdout)
+    if payload.get("runtime_version") != "V6": fail("controller status invalid")
+except Exception:
+    if old_unit is None:
+        try: unit.unlink()
+        except FileNotFoundError: pass
+    else: atomic_bytes(unit,old_unit,0o644)
+    try: current.unlink()
+    except FileNotFoundError: pass
+    if old_current is not None: os.symlink(old_current,current)
+    try: subprocess.run(["systemctl","--user","daemon-reload"],timeout=30,check=False)
+    except Exception: pass
+    if created: shutil.rmtree(final,ignore_errors=True)
+    raise
+print(json.dumps({"schema":"nmbot.release_control_bootstrap_receipt.v1","ok":True,"source_git_sha":cfg["source_git_sha"],"control_root":str(root),"unit_installed":True,"api_touched":False,"bridge_touched":False},sort_keys=True,separators=(",",":")))
+'''.strip()
+    return "python3 -c " + shlex.quote(program) + " " + shlex.quote(json.dumps(config, sort_keys=True, separators=(",", ":")))
+
+
+def bootstrap_remote(*, manifest: Path, archive: Path, remote: Any) -> dict[str, Any]:
+    bundle = inspect_control_bundle(manifest=manifest, archive=archive)
+    incoming = f"{REMOTE_HOME}/{CONTROL_ROOT}/incoming/{bundle.source_git_sha}"
+    create = remote.run("umask 077; mkdir -p " + shlex.quote(incoming))
+    if create.returncode != 0:
+        raise ReleaseControlError("remote bootstrap staging cannot be created")
+    remote_archive = f"{incoming}/{bundle.archive.name}"
+    remote_manifest = f"{incoming}/{bundle.manifest.name}"
+    for local, remote_path in ((bundle.archive, remote_archive), (bundle.manifest, remote_manifest)):
+        uploaded = remote.upload(local, remote_path)
+        if uploaded.returncode != 0:
+            raise ReleaseControlError("remote bootstrap upload failed")
+    result = remote.run(_bootstrap_remote_command(bundle, remote_archive=remote_archive, remote_manifest=remote_manifest))
+    if result.returncode != 0:
+        failure = hashlib.sha256((result.stdout + result.stderr).encode("utf-8", "replace")).hexdigest()[:24]
+        raise ReleaseControlError(f"remote bootstrap failed (bootstrap-failed:{failure})")
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    try:
+        receipt = json.loads(lines[-1]) if lines else None
+    except json.JSONDecodeError as exc:
+        raise ReleaseControlError("remote bootstrap receipt is malformed") from exc
+    expected = {
+        "schema": "nmbot.release_control_bootstrap_receipt.v1",
+        "ok": True,
+        "source_git_sha": bundle.source_git_sha,
+        "control_root": f"{REMOTE_HOME}/{CONTROL_ROOT}",
+        "unit_installed": True,
+        "api_touched": False,
+        "bridge_touched": False,
+    }
+    if receipt != expected:
+        raise ReleaseControlError("remote bootstrap receipt does not match request")
+    return receipt
 
 
 def inspect_artifact(manifest_path: Path, archive_path: Path) -> InspectedArtifact:
@@ -568,6 +866,13 @@ class ReleaseController:
         if not environment_path.is_file() or environment_path.is_symlink():
             raise ReleaseControlError("contour env file must be a regular non-symlink file")
         release = self.registry.show_release(rid)
+        if normalized_profile == "PROD":
+            quality = release.get("quality")
+            check = release.get("last_check")
+            if not isinstance(quality, dict) or quality.get("verdict") != "approved":
+                raise ReleaseControlError("PROD preparation requires approved quality")
+            if not isinstance(check, dict) or check.get("profile") != "TEST" or check.get("outcome") != "passed":
+                raise ReleaseControlError("PROD preparation requires a passing TEST check")
         release_root = self.releases_dir / rid
         if not release_root.is_dir() or release_root.is_symlink():
             raise ReleaseControlError("immutable release is not installed")
@@ -688,6 +993,10 @@ def _parser() -> argparse.ArgumentParser:
     show = commands.add_parser("show"); show.add_argument("release_id")
     commands.add_parser("status")
     commands.add_parser("journal")
+    bundle = commands.add_parser("bundle-control")
+    bundle.add_argument("--source-root", type=Path, required=True); bundle.add_argument("--out-dir", type=Path, required=True)
+    bootstrap = commands.add_parser("bootstrap-control")
+    bootstrap.add_argument("--manifest", type=Path, required=True); bootstrap.add_argument("--archive", type=Path, required=True); bootstrap.add_argument("--host", default=AUTHORIZED_HOST); bootstrap.add_argument("--port", default=AUTHORIZED_PORT); bootstrap.add_argument("--apply", action="store_true"); bootstrap.add_argument("--confirm", required=True)
     register = commands.add_parser("register")
     register.add_argument("--manifest", type=Path, required=True); register.add_argument("--archive", type=Path, required=True); register.add_argument("--apply", action="store_true"); register.add_argument("--confirm", required=True)
     quality = commands.add_parser("quality")
@@ -714,6 +1023,10 @@ def main() -> None:
         elif args.command == "show": result = controller.registry.show_release(args.release_id)
         elif args.command == "status": result = controller.status()
         elif args.command == "journal": result = controller.registry.journal_events()
+        elif args.command == "bundle-control":
+            bundle = build_control_bundle(source_root=args.source_root, out_dir=args.out_dir); result = {"schema": CONTROL_BUNDLE_SCHEMA, "source_git_sha": bundle.source_git_sha, "archive": str(bundle.archive), "manifest": str(bundle.manifest), "archive_sha256": bundle.archive_sha256, "files": len(bundle.files)}
+        elif args.command == "bootstrap-control":
+            bundle = inspect_control_bundle(manifest=args.manifest, archive=args.archive); _require_apply(args, f"BOOTSTRAP:{bundle.source_git_sha}"); result = bootstrap_remote(manifest=args.manifest, archive=args.archive, remote=SshRemote(host=args.host, port=args.port))
         elif args.command == "register":
             inspected = inspect_artifact(args.manifest, args.archive); _require_apply(args, inspected.release_id); result = controller.install_artifact(manifest=args.manifest, archive=args.archive)
         elif args.command == "quality":

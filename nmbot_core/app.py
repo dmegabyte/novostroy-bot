@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
+import hashlib
+import hmac
 import json
 import os
 import tempfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -26,35 +30,68 @@ class JsonStateStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = asyncio.Lock()
+        self._lock_path = self.path.with_suffix(self.path.suffix + ".lock")
         self._sessions: dict[str, asyncio.Lock] = {}
+        self._session_lock_dir = self.path.parent / f".{self.path.name}.sessions"
+        self._session_lock_dir.mkdir(mode=0o700, exist_ok=True)
+
+    def _locked_file(self) -> int:
+        descriptor = os.open(self._lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        return descriptor
+
+    def _locked_session(self, key: str) -> int:
+        token = hashlib.sha256(str(key).encode("utf-8")).hexdigest()
+        descriptor = os.open(self._session_lock_dir / f"{token}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        return descriptor
 
     async def get(self, key: str) -> dict[str, Any]:
         async with self._lock:
+            descriptor = self._locked_file()
             try:
-                data = json.loads(self.path.read_text(encoding="utf-8"))
-            except (FileNotFoundError, OSError, ValueError):
-                data = {}
+                try:
+                    data = json.loads(self.path.read_text(encoding="utf-8"))
+                except (FileNotFoundError, OSError, ValueError):
+                    data = {}
+            finally:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
             value = data.get(key, {}) if isinstance(data, dict) else {}
             return dict(value) if isinstance(value, dict) else {}
 
     async def save(self, key: str, value: Mapping[str, Any]) -> None:
         async with self._lock:
+            lock_descriptor = self._locked_file()
             try:
-                data = json.loads(self.path.read_text(encoding="utf-8"))
-            except (FileNotFoundError, OSError, ValueError):
-                data = {}
-            data[str(key)] = dict(value)
-            descriptor, temporary = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent))
-            try:
-                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                    json.dump(data, handle, ensure_ascii=False, sort_keys=True)
-                    handle.flush(); os.fsync(handle.fileno())
-                os.replace(temporary, self.path)
+                try:
+                    data = json.loads(self.path.read_text(encoding="utf-8"))
+                except (FileNotFoundError, OSError, ValueError):
+                    data = {}
+                data[str(key)] = dict(value)
+                descriptor, temporary = tempfile.mkstemp(prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent))
+                try:
+                    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                        json.dump(data, handle, ensure_ascii=False, sort_keys=True)
+                        handle.flush(); os.fsync(handle.fileno())
+                    os.replace(temporary, self.path)
+                finally:
+                    if os.path.exists(temporary): os.unlink(temporary)
             finally:
-                if os.path.exists(temporary): os.unlink(temporary)
+                fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+                os.close(lock_descriptor)
 
+    @asynccontextmanager
     async def session_lock(self, key: str):
-        return self._sessions.setdefault(str(key), asyncio.Lock())
+        token = hashlib.sha256(str(key).encode("utf-8")).hexdigest()
+        local_lock = self._sessions.setdefault(token, asyncio.Lock())
+        async with local_lock:
+            descriptor = await asyncio.to_thread(self._locked_session, key)
+            try:
+                yield
+            finally:
+                await asyncio.to_thread(fcntl.flock, descriptor, fcntl.LOCK_UN)
+                os.close(descriptor)
 
 
 def _profile(value: str) -> str:
@@ -75,9 +112,22 @@ def _jivo_bot(payload: Mapping[str, Any], text: str) -> dict[str, Any]:
     return {"event": "BOT_MESSAGE", "client_id": payload.get("client_id"), "chat_id": payload.get("chat_id"), "message": {"type": "TEXT", "text": text}}
 
 
+def _authorized(request: web.Request) -> bool:
+    expected = request.app["api_token"]
+    if request.app["profile"] == "PROD" and not expected:
+        return False
+    return not expected or hmac.compare_digest(request.headers.get("Authorization", ""), f"Bearer {expected}")
+
+
+def _jivo_authorized(request: web.Request) -> bool:
+    provider, bridge = request.app["provider_token"], request.app["bridge_token"]
+    if request.app["profile"] == "PROD" and (not provider or not bridge):
+        return False
+    return ((not provider or hmac.compare_digest(str(request.match_info.get("provider_token") or ""), provider)) and (not bridge or hmac.compare_digest(request.headers.get("X-NMBOT-Bridge-Token", ""), bridge)))
+
+
 async def _turn(app: web.Application, user_id: str, message: str, channel: str, meta: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    lock = await app["state_store"].session_lock(user_id)
-    async with lock:
+    async with app["state_store"].session_lock(user_id):
         envelope = await app["state_store"].get(user_id)
         raw_state = envelope.get(CANONICAL_STATE_KEY)
         state = CoreState.from_mapping(raw_state) if isinstance(raw_state, Mapping) and raw_state else CoreState()
@@ -95,24 +145,36 @@ async def _turn(app: web.Application, user_id: str, message: str, channel: str, 
         return {"ok": result.status in {"completed", "safe_failure", "multiple_phones", "invalid_phone"}, "answer": result.text or TECHNICAL_TEXT, "intent": "v6", "awaiting_phone": result.state.awaiting_phone, "handoff_to_operator": False, "buttons": [], "meta": {"runtime": "v6", "status": result.status, "state_commit": result.status in {"completed", "safe_failure"}, "model_calls": result.model_calls, "url_card_status": result.url_card_status}}
 
 
-def create_app(*, prompt1: Any, prompt2: Any, state_path: Path | str, outbox_path: Path | str, journal_path: Path | str, profile: str = "TEST", release_id: str = "") -> web.Application:
+def create_app(*, prompt1: Any, prompt2: Any, state_path: Path | str, outbox_path: Path | str, journal_path: Path | str, profile: str = "TEST", release_id: str = "", api_token: str = "", provider_token: str = "", bridge_token: str = "") -> web.Application:
     app = web.Application()
     profile = _profile(profile)
-    app.update({"profile": profile, "release_id": release_id, "state_store": JsonStateStore(state_path), "outbox": LocalCallbackOutbox(outbox_path), "journal_path": Path(journal_path), "runtime": CoreRuntime(prompt1, prompt2)})
+    app.update({"profile": profile, "release_id": release_id, "api_token": str(api_token), "provider_token": str(provider_token), "bridge_token": str(bridge_token), "state_store": JsonStateStore(state_path), "outbox": LocalCallbackOutbox(outbox_path), "journal_path": Path(journal_path), "runtime": CoreRuntime(prompt1, prompt2)})
 
     async def health(request: web.Request) -> web.Response:
         return _reply({"ok": True, "service": "nmbot-api", "runtime": "V6", "profile": profile, "release_id": release_id})
 
     async def chat(request: web.Request) -> web.Response:
+        if not _authorized(request): return _reply({"ok": False, "error": "unauthorized"}, 401)
         try: payload = await request.json()
         except (json.JSONDecodeError, TypeError): return _reply({"ok": False, "error": "invalid_json"}, 400)
         message, user_id = str(payload.get("message") or ""), str(payload.get("user_id") or "api:anonymous")[:240]
         if _start(message):
-            await app["state_store"].save(user_id, {CANONICAL_STATE_KEY: CoreState().plain()})
+            async with app["state_store"].session_lock(user_id):
+                await app["state_store"].save(user_id, {CANONICAL_STATE_KEY: CoreState().plain()})
             return _reply({"ok": True, "answer": ("[TEST] " if profile == "TEST" else "") + V6_GREETING, "meta": {"runtime": "v6", "status": "start_reset"}})
         return _reply(await _turn(app, user_id, message, "api", payload.get("meta") if isinstance(payload.get("meta"), dict) else {}))
 
+    async def reset(request: web.Request) -> web.Response:
+        if not _authorized(request): return _reply({"ok": False, "error": "unauthorized"}, 401)
+        try: payload = await request.json()
+        except (json.JSONDecodeError, TypeError): return _reply({"ok": False, "error": "invalid_json"}, 400)
+        user_id = str(payload.get("user_id") or "api:anonymous")[:240]
+        async with app["state_store"].session_lock(user_id):
+            await app["state_store"].save(user_id, {CANONICAL_STATE_KEY: CoreState().plain()})
+        return _reply({"ok": True, "runtime_version": "V6"})
+
     async def jivo(request: web.Request) -> web.Response:
+        if not _jivo_authorized(request): return _reply({"ok": False, "error": "unauthorized"}, 401)
         try: payload = await request.json()
         except (json.JSONDecodeError, TypeError): return _reply({"ok": False, "error": "invalid_json"}, 400)
         if payload.get("event") != "CLIENT_MESSAGE": return _reply({"ok": True, "ignored": True})
@@ -123,5 +185,5 @@ def create_app(*, prompt1: Any, prompt2: Any, state_path: Path | str, outbox_pat
         append_event(key, "bot", result["answer"], event_id=str(payload.get("id") or ""), refs=payload, path=app["journal_path"], release_id=release_id)
         return _reply(_jivo_bot(payload, result["answer"]))
 
-    app.router.add_get("/health", health); app.router.add_post("/api/chat", chat); app.router.add_post("/jivo/{provider_token}", jivo)
+    app.router.add_get("/health", health); app.router.add_post("/api/chat", chat); app.router.add_post("/api/reset", reset); app.router.add_post("/jivo/{provider_token}", jivo)
     return app

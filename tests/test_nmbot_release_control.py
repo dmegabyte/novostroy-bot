@@ -145,6 +145,43 @@ def test_prepare_activate_and_rollback_keep_previous_slot_warm(tmp_path: Path, a
     assert services.stopped == []
 
 
+def test_project_slot_environment_copies_only_gateway_allowlist(tmp_path: Path) -> None:
+    controller = ReleaseController(tmp_path / "control", service_manager=FakeServiceManager(), health_probe=FakeHealth())
+    source = tmp_path / "primary.env"
+    source.write_text(
+        "OVERMIND_URL=https://gateway.example\n"
+        "OVERMIND_TOKEN=private-token\n"
+        "OPENROUTER_API_KEY=private-key\n"
+        "NMBOT_API_TOKEN=must-not-copy\n"
+        "JIVO_PROVIDER_TOKEN=must-not-copy\n",
+        encoding="utf-8",
+    )
+
+    receipt = controller.project_slot_environment(profile="TEST", source_env=source)
+    projected = Path(receipt["env_file"])
+
+    assert receipt == {
+        "profile": "TEST",
+        "env_file": str(projected),
+        "keys": ["OPENROUTER_API_KEY", "OVERMIND_TOKEN", "OVERMIND_URL"],
+    }
+    assert projected.read_text(encoding="utf-8") == (
+        "OPENROUTER_API_KEY=private-key\n"
+        "OVERMIND_TOKEN=private-token\n"
+        "OVERMIND_URL=https://gateway.example\n"
+    )
+    assert oct(projected.stat().st_mode & 0o777) == "0o600"
+
+
+def test_project_slot_environment_rejects_missing_gateway_credentials(tmp_path: Path) -> None:
+    controller = ReleaseController(tmp_path / "control", service_manager=FakeServiceManager(), health_probe=FakeHealth())
+    source = tmp_path / "primary.env"
+    source.write_text("OPENROUTER_API_KEY=private-key\n", encoding="utf-8")
+
+    with pytest.raises(ReleaseControlError, match="gateway token"):
+        controller.project_slot_environment(profile="TEST", source_env=source)
+
+
 def test_prepare_failure_marks_slot_failed_and_stops_inactive_process(tmp_path: Path, artifacts) -> None:
     first, _ = artifacts
     services = FakeServiceManager()

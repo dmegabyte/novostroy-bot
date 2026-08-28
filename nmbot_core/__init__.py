@@ -19,7 +19,7 @@ from .contract import (
     project_url_card_for_prompt2,
 )
 from .phone import PhoneParseResult, PrivatePhone, parse_phone
-from .gateway import DirectTransport, GatewayResult, PromptGateway, ToolTrace
+from .gateway import DirectTransport, GatewayHttpClient, GatewayResult, PromptGateway, ToolTrace, build_prompt_pair
 from .runtime import CoreRuntime, RuntimeResult
 from .state import CoreState, SCHEMA_VERSION
 from .journal import JournalError, append_event
@@ -32,6 +32,7 @@ __all__ = [
     "CoreRuntime",
     "DirectTransport",
     "GatewayResult",
+    "GatewayHttpClient",
     "JournalError",
     "JsonStateStore",
     "LocalCallbackOutbox",
@@ -53,6 +54,7 @@ __all__ = [
     "UrlCardError",
     "build_prompt1_input",
     "build_prompt2_input",
+    "build_prompt_pair",
     "create_app",
     "append_event",
     "parse_prompt1",

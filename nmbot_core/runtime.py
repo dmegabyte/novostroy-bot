@@ -23,6 +23,8 @@ URL_CARD_FAILURE_TEXT = "Не получилось получить карточ
 _CANDIDATE = re.compile(r"(?<!\d)(?:\+?\d[\s().-]*){10,18}(?!\d)")
 _SHORT_PHONE = re.compile(r"(?=.*\d)[\d\s().+-]+")
 _CONTACT = re.compile(r"(?:позови(?:те)?|пригласи(?:те)?|подключи(?:те)?|соедини(?:те)?|перезвони(?:те)?|позвони(?:те)?|обратн(?:ый|ого)\s+звон(?:ок|ка))", re.IGNORECASE)
+_DIRECT_SPECIALIST = re.compile(r"хочу\s+поговорить\s+с(?:о)?\s+специалистом", re.IGNORECASE)
+_CONTACT_EDGE = " \t\r\n.,!?;:\"'«»"
 
 
 @dataclass(frozen=True)
@@ -44,7 +46,8 @@ class RuntimeResult:
 
 
 def _contact_intent(text: str) -> bool:
-    return bool(_CONTACT.search(text)) and len(text.split()) <= 6
+    normalized = str(text or "").casefold().replace("ё", "е").strip(_CONTACT_EDGE)
+    return (bool(_CONTACT.search(normalized)) and len(normalized.split()) <= 6) or bool(_DIRECT_SPECIALIST.fullmatch(normalized))
 
 
 def _phone_guard(text: str, backend: PhoneMetadataBackend | None) -> tuple[str, PrivatePhone | None]:

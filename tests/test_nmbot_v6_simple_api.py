@@ -8,7 +8,7 @@ from aiohttp.test_utils import TestClient, TestServer
 import pytest
 
 from nmbot_v6.simple_state import SimpleState
-from scripts.nmbot_api_server import JsonStateStore, create_app
+from scripts.nmbot_v6_api import JsonStateStore, create_app
 from scripts import nmbot_v6_api as api_module
 
 

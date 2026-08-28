@@ -42,6 +42,7 @@ V6_API_FILES = (
     "scripts/__init__.py",
     "scripts/nmbot_api_server.py",
     "scripts/nmbot_release_identity.py",
+    "scripts/nmbot_v6_jivo_smoke.py",
 )
 @dataclass(frozen=True)
 class BuildResult:

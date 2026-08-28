@@ -18,6 +18,9 @@ _EMAIL = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _ROLE = frozenset({"user", "bot", "system"})
 _CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _RELEASE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+_DIAGNOSTIC_STATUS = frozenset({"completed", "safe_failure", "failed"})
+_TRACE_STAGE = frozenset({"prompt1", "mcp", "prompt2", "state", "bot_message"})
+_TRACE_STATUS = frozenset({"accepted", "not_called", "failed", "prepared"})
 
 
 class JournalError(ValueError):
@@ -41,7 +44,44 @@ def _code(value: Any, field: str) -> str:
     return result
 
 
-def append_event(session_key: str, role: str, text: Any = "", *, event_id: str = "", refs: Mapping[str, Any] | None = None, answer_kind: str = "", event_type: str = "", source: str = "api", release_id: str = "", path: Path | str) -> dict[str, Any]:
+def _runtime_diagnostic(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Project the bounded receipt required by strict smoke, never turn data."""
+    if value is None:
+        return None
+    if not isinstance(value, Mapping) or set(value) - {"status", "state_commit", "trace", "error_code"}:
+        raise JournalError("invalid_runtime_diagnostic")
+    status = str(value.get("status") or "").strip().lower()
+    if status not in _DIAGNOSTIC_STATUS or not isinstance(value.get("state_commit"), bool):
+        raise JournalError("invalid_runtime_diagnostic")
+    trace = value.get("trace")
+    if not isinstance(trace, Mapping) or set(trace) - {"stages", "url_card"}:
+        raise JournalError("invalid_runtime_diagnostic")
+    stages = trace.get("stages")
+    if not isinstance(stages, list) or len(stages) > 5:
+        raise JournalError("invalid_runtime_diagnostic")
+    safe_stages: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in stages:
+        if not isinstance(item, Mapping) or set(item) != {"stage", "status"}:
+            raise JournalError("invalid_runtime_diagnostic")
+        stage, stage_status = str(item["stage"]), str(item["status"])
+        if stage not in _TRACE_STAGE or stage_status not in _TRACE_STATUS or stage in seen:
+            raise JournalError("invalid_runtime_diagnostic")
+        seen.add(stage)
+        safe_stages.append({"stage": stage, "status": stage_status})
+    safe_trace: dict[str, Any] = {"stages": safe_stages}
+    url_card = trace.get("url_card")
+    if url_card is not None:
+        if not isinstance(url_card, Mapping) or set(url_card) != {"status"} or url_card.get("status") not in {"accepted", "fetch_failed"}:
+            raise JournalError("invalid_runtime_diagnostic")
+        safe_trace["url_card"] = {"status": str(url_card["status"])}
+    result: dict[str, Any] = {"status": status, "state_commit": value["state_commit"], "trace": safe_trace}
+    if value.get("error_code"):
+        result["error_code"] = _code(value["error_code"], "error_code")
+    return result
+
+
+def append_event(session_key: str, role: str, text: Any = "", *, event_id: str = "", refs: Mapping[str, Any] | None = None, answer_kind: str = "", event_type: str = "", source: str = "api", release_id: str = "", runtime_diagnostic: Mapping[str, Any] | None = None, path: Path | str) -> dict[str, Any]:
     """Persist one safe row. Never persist message text, contact data, or payload."""
 
     if not str(session_key or ""):
@@ -70,6 +110,9 @@ def append_event(session_key: str, role: str, text: Any = "", *, event_id: str =
         if not _RELEASE.fullmatch(safe_release) or safe_release == "UNKNOWN":
             raise JournalError("invalid_release_id")
         row["release_id"] = safe_release
+    diagnostic = _runtime_diagnostic(runtime_diagnostic)
+    if diagnostic is not None:
+        row["runtime_diagnostic"] = diagnostic
     target = Path(path).expanduser()
     if target.exists() and (target.is_dir() or target.is_symlink()):
         raise JournalError("unsafe_journal_path")

@@ -17,6 +17,21 @@ def test_journal_is_private_opaque_and_v6_only(tmp_path) -> None:
         assert value not in rendered
 
 
+def test_journal_accepts_only_bounded_strict_smoke_receipt(tmp_path) -> None:
+    row = append_event(
+        "session", "bot", "Ответ", path=tmp_path / "journal.jsonl", release_id="v6-canonical-r1",
+        runtime_diagnostic={"status": "completed", "state_commit": True, "trace": {"stages": [
+            {"stage": "prompt1", "status": "accepted"}, {"stage": "mcp", "status": "accepted"},
+            {"stage": "prompt2", "status": "accepted"}, {"stage": "state", "status": "accepted"},
+            {"stage": "bot_message", "status": "prepared"},
+        ]}},
+    )
+    assert row["runtime_diagnostic"]["status"] == "completed"
+    import pytest
+    with pytest.raises(Exception, match="invalid_runtime_diagnostic"):
+        append_event("session", "bot", path=tmp_path / "bad.jsonl", runtime_diagnostic={"status": "completed", "state_commit": True, "trace": {"stages": [], "raw": "secret"}})
+
+
 def test_outbox_is_private_idempotent_and_public_result_is_opaque(tmp_path) -> None:
     outbox = LocalCallbackOutbox(tmp_path / "outbox")
     arguments = {"session_key": "chat-secret", "event_id": "event-secret", "normalized_phone": "+79991234567", "context": {"runtime": "V6", "phone": "+79991234567", "selected": "ЖК А"}}

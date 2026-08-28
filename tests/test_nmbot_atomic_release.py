@@ -54,7 +54,7 @@ def test_v6_api_build_is_deterministic_exact_and_controller_compatible(tmp_path:
     runtime_roots = {Path(path).parts[0] for path in expected if Path(path).parts[0] == "nmbot_core"}
     assert runtime_roots == {"nmbot_core"}
     assert "scripts/nmbot_release_control.py" not in expected
-    assert "scripts/nmbot_v6_jivo_smoke.py" not in expected
+    assert "scripts/nmbot_v6_jivo_smoke.py" in expected
     assert "nmbot_core/app.py" in expected
 
 

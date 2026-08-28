@@ -111,6 +111,23 @@ def _start(value: str) -> bool:
     return str(value).strip().lower() in {"/start", "start", "/start_6"}
 
 
+def _smoke_receipt(result: Any, *, state_commit: bool) -> dict[str, Any]:
+    direct_url_card = result.url_card_status == "accepted"
+    stages = [
+        {"stage": "prompt1", "status": "not_called" if direct_url_card else ("accepted" if result.prompt1_attempt_ref else "failed")},
+        {"stage": "mcp", "status": "not_called" if direct_url_card else "accepted"},
+        {"stage": "prompt2", "status": "accepted" if result.prompt2_attempt_ref else "failed"},
+        {"stage": "state", "status": "accepted" if state_commit else "failed"},
+        {"stage": "bot_message", "status": "prepared"},
+    ]
+    receipt: dict[str, Any] = {"status": "completed" if result.status == "completed" and state_commit else "safe_failure", "state_commit": state_commit, "trace": {"stages": stages}}
+    if direct_url_card:
+        receipt["trace"]["url_card"] = {"status": "accepted"}
+    if result.error_code:
+        receipt["error_code"] = result.error_code
+    return receipt
+
+
 def _jivo_bot(payload: Mapping[str, Any], text: str) -> dict[str, Any]:
     return {"event": "BOT_MESSAGE", "client_id": payload.get("client_id"), "chat_id": payload.get("chat_id"), "message": {"type": "TEXT", "text": text}}
 
@@ -164,7 +181,8 @@ async def _turn(app: web.Application, user_id: str, message: str, channel: str, 
             return {"ok": True, "answer": "Спасибо, специалист свяжется с вами.", "intent": "v6", "awaiting_phone": False, "meta": {"runtime": "v6", "status": "phone_accepted", "outbox_enqueue": queued.status, "state_commit": True}}
         if result.status in {"completed", "safe_failure"}:
             await app["state_store"].save(user_id, {**envelope, CANONICAL_STATE_KEY: result.state.plain()})
-        return {"ok": result.status in {"completed", "safe_failure", "multiple_phones", "invalid_phone"}, "answer": result.text or TECHNICAL_TEXT, "intent": "v6", "awaiting_phone": result.state.awaiting_phone, "handoff_to_operator": False, "buttons": [], "meta": {"runtime": "v6", "status": result.status, "state_commit": result.status in {"completed", "safe_failure"}, "model_calls": result.model_calls, "url_card_status": result.url_card_status}}
+        state_commit = result.status in {"completed", "safe_failure"}
+        return {"ok": result.status in {"completed", "safe_failure", "multiple_phones", "invalid_phone"}, "answer": result.text or TECHNICAL_TEXT, "intent": "v6", "awaiting_phone": result.state.awaiting_phone, "handoff_to_operator": False, "buttons": [], "meta": {"runtime": "v6", "status": result.status, "state_commit": state_commit, "model_calls": result.model_calls, "url_card_status": result.url_card_status}, "_journal_runtime_diagnostic": _smoke_receipt(result, state_commit=state_commit)}
 
 
 def create_app(*, prompt1: Any, prompt2: Any, state_path: Path | str, outbox_path: Path | str, journal_path: Path | str, profile: str = "TEST", release_id: str = "", api_token: str = "", provider_token: str = "", bridge_token: str = "") -> web.Application:
@@ -184,7 +202,9 @@ def create_app(*, prompt1: Any, prompt2: Any, state_path: Path | str, outbox_pat
             async with app["state_store"].session_lock(user_id):
                 await app["state_store"].save(user_id, {CANONICAL_STATE_KEY: CoreState().plain()})
             return _reply({"ok": True, "answer": ("[TEST] " if profile == "TEST" else "") + V6_GREETING, "meta": {"runtime": "v6", "status": "start_reset"}})
-        return _reply(await _turn(app, user_id, message, "api", payload.get("meta") if isinstance(payload.get("meta"), dict) else {}))
+        result = await _turn(app, user_id, message, "api", payload.get("meta") if isinstance(payload.get("meta"), dict) else {})
+        result.pop("_journal_runtime_diagnostic", None)
+        return _reply(result)
 
     async def reset(request: web.Request) -> web.Response:
         if not _authorized(request): return _reply({"ok": False, "error": "unauthorized"}, 401)
@@ -204,7 +224,7 @@ def create_app(*, prompt1: Any, prompt2: Any, state_path: Path | str, outbox_pat
         key = f"jivo:{payload.get('site_id')}:{payload.get('chat_id')}:{payload.get('client_id')}"
         append_event(key, "user", text, event_id=str(payload.get("id") or ""), refs=payload, path=app["journal_path"], release_id=release_id)
         result = await _turn(app, key, text, "jivo", {"event_id": payload.get("id")})
-        append_event(key, "bot", result["answer"], event_id=str(payload.get("id") or ""), refs=payload, path=app["journal_path"], release_id=release_id)
+        append_event(key, "bot", result["answer"], event_id=str(payload.get("id") or ""), refs=payload, path=app["journal_path"], release_id=release_id, runtime_diagnostic=result.pop("_journal_runtime_diagnostic", None))
         return _reply(_jivo_bot(payload, result["answer"]))
 
     app.router.add_get("/health", health); app.router.add_post("/api/chat", chat); app.router.add_post("/api/reset", reset); app.router.add_post("/jivo/{provider_token}", jivo)

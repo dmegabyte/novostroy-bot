@@ -27,6 +27,10 @@ def test_core_api_health_start_chat_and_jivo_journal(tmp_path):
     asyncio.run(run())
     rendered = (tmp_path / "journal.jsonl").read_text(encoding="utf-8")
     assert "студия" not in rendered and len(rendered.splitlines()) == 2
+    journal_rows = [json.loads(line) for line in rendered.splitlines()]
+    diagnostic = journal_rows[-1]["runtime_diagnostic"]
+    assert diagnostic["status"] == "completed" and diagnostic["state_commit"] is True
+    assert {item["stage"] for item in diagnostic["trace"]["stages"]} == {"prompt1", "mcp", "prompt2", "state", "bot_message"}
     state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
     assert set(state["a"]) == {"core"}
 

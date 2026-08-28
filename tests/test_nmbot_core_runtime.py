@@ -54,6 +54,15 @@ def test_prompt1_failure_is_fixed_specialist_offer():
     assert outcome.state.pending_offer == "specialist_contact" and outcome.request_phone is False
 
 
+def test_prompt1_preserves_allowlisted_gateway_failure_code_only():
+    known = run(Port(RuntimeError("gateway_task_failed")), Port())
+    provider = run(Port(RuntimeError("provider_corrupted_thought_signature")), Port())
+    unknown = run(Port(RuntimeError("provider response with private detail")), Port())
+    assert known.error_code == "gateway_task_failed"
+    assert provider.error_code == "provider_corrupted_thought_signature"
+    assert unknown.error_code == "transport_failure"
+
+
 def test_prompt2_phone_is_repaired_then_cannot_enter_phone_flow():
     outcome = run(Port(p1()), Port({"action": "request_phone", "response": "", "final_question": ""}, reply("Продолжаю")))
     assert outcome.text == "Продолжаю" and not outcome.request_phone and outcome.model_calls == 3

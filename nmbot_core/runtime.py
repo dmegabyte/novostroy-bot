@@ -25,6 +25,23 @@ _SHORT_PHONE = re.compile(r"(?=.*\d)[\d\s().+-]+")
 _CONTACT = re.compile(r"(?:позови(?:те)?|пригласи(?:те)?|подключи(?:те)?|соедини(?:те)?|перезвони(?:те)?|позвони(?:те)?|обратн(?:ый|ого)\s+звон(?:ок|ка))", re.IGNORECASE)
 _DIRECT_SPECIALIST = re.compile(r"хочу\s+поговорить\s+с(?:о)?\s+специалистом", re.IGNORECASE)
 _CONTACT_EDGE = " \t\r\n.,!?;:\"'«»"
+_SAFE_GATEWAY_FAILURE_CODES = frozenset({
+    "gateway_create_failed",
+    "gateway_missing_task_id",
+    "gateway_status_failed",
+    "gateway_task_failed",
+    "gateway_result_failed",
+    "gateway_empty_response",
+    "gateway_timeout",
+    "upstream_error",
+    "missing_attempt_ref",
+    "invalid_transport_result",
+    "prompt2_tool_trace",
+    "provider_corrupted_thought_signature",
+    "provider_invalid_argument",
+    "provider_choices_response_parse",
+    "provider_response_parse",
+})
 
 
 @dataclass(frozen=True)
@@ -48,6 +65,11 @@ class RuntimeResult:
 def _contact_intent(text: str) -> bool:
     normalized = str(text or "").casefold().replace("ё", "е").strip(_CONTACT_EDGE)
     return (bool(_CONTACT.search(normalized)) and len(normalized.split()) <= 6) or bool(_DIRECT_SPECIALIST.fullmatch(normalized))
+
+
+def _gateway_failure_code(exc: Exception, fallback: str = "transport_failure") -> str:
+    code = str(exc).strip() if isinstance(exc, RuntimeError) else ""
+    return code if code in _SAFE_GATEWAY_FAILURE_CODES else fallback
 
 
 def _phone_guard(text: str, backend: PhoneMetadataBackend | None) -> tuple[str, PrivatePhone | None]:
@@ -125,8 +147,8 @@ class CoreRuntime:
             p1 = parse_prompt1(p1_result.output)
         except CoreContractError as exc:
             return failure("prompt1", exc.code)
-        except Exception:
-            return failure("prompt1", "transport_failure")
+        except Exception as exc:
+            return failure("prompt1", _gateway_failure_code(exc))
         if p1.action is Prompt1Action.REQUEST_PHONE:
             try:
                 next_state = state.accepted(public_message, PHONE_QUESTION, awaiting_phone=True)
@@ -151,14 +173,14 @@ class CoreRuntime:
                 if clarification:
                     return self._clarification_failure(state, public_message, calls, p1_attempt, mcp_calls, exc.code)
                 return failure("prompt2", exc.code, mcp_calls=mcp_calls, material=material)
-            except Exception:
+            except Exception as exc:
                 if clarification:
-                    return self._clarification_failure(state, public_message, calls, p1_attempt, mcp_calls, "prompt2_failure")
-                return failure("prompt2", "prompt2_failure", mcp_calls=mcp_calls, material=material)
-        except Exception:
+                    return self._clarification_failure(state, public_message, calls, p1_attempt, mcp_calls, _gateway_failure_code(exc, "prompt2_failure"))
+                return failure("prompt2", _gateway_failure_code(exc, "prompt2_failure"), mcp_calls=mcp_calls, material=material)
+        except Exception as exc:
             if clarification:
-                return self._clarification_failure(state, public_message, calls, p1_attempt, mcp_calls, "transport_failure")
-            return failure("prompt2", "transport_failure", mcp_calls=mcp_calls, material=material)
+                return self._clarification_failure(state, public_message, calls, p1_attempt, mcp_calls, _gateway_failure_code(exc))
+            return failure("prompt2", _gateway_failure_code(exc), mcp_calls=mcp_calls, material=material)
         offer = not clarification and state.client_turn_count + 1 == 3
         question = SPECIALIST_CTA if offer else p2.final_question
         text = p2.response + ("\n\n" + question if question else "")

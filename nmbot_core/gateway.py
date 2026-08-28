@@ -20,6 +20,12 @@ MCP_TOOL = "get_flat_info"
 DEFAULT_MODEL = "google/gemini-3.1-flash-lite-preview"
 _ATTEMPT_REF = re.compile(r"[A-Za-z0-9._:-]{1,200}")
 _TASK_REF = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}")
+_SAFE_PROVIDER_FAILURE_CODES = frozenset({
+    "provider_corrupted_thought_signature",
+    "provider_invalid_argument",
+    "provider_choices_response_parse",
+    "provider_response_parse",
+})
 
 
 @dataclass(frozen=True)
@@ -54,6 +60,27 @@ class GatewayHttpClient:
             raise ValueError("invalid_gateway_endpoint")
         self._base, self._poll_interval = base, poll_interval
 
+    @staticmethod
+    def _provider_failure_code(value: Any) -> str | None:
+        """Return only an allowlisted provider code; never retain error text."""
+        text = str(value or "")[:4000].strip().lower()
+        if "corrupted thought signature" in text:
+            return "provider_corrupted_thought_signature"
+        if "invalid_argument" in text and "provider" in text:
+            return "provider_invalid_argument"
+        if "choices" in text and any(marker in text for marker in ("missing", "keyerror", "key error", "parse", "parser", "response", "no choices", "without choices")):
+            return "provider_choices_response_parse"
+        if "response parse" in text or "parse response" in text or "response parsing" in text:
+            return "provider_response_parse"
+        return None
+
+    @staticmethod
+    def _failed_task_code(result: Any) -> str:
+        result_obj = result.get("result") if isinstance(result, Mapping) else None
+        result_obj = result_obj if isinstance(result_obj, Mapping) else result
+        error = result_obj.get("error") if isinstance(result_obj, Mapping) else result_obj
+        return GatewayHttpClient._provider_failure_code(error) or "gateway_task_failed"
+
     async def _run_gateway_request_once(self, request_data: dict[str, Any], headers: dict[str, Any], timeout: int) -> tuple[str, dict[str, Any]]:
         if type(timeout) is not int or not 1 <= timeout <= 180:
             raise ValueError("invalid_gateway_timeout")
@@ -78,7 +105,11 @@ class GatewayHttpClient:
                     if response.status != 200: raise RuntimeError("gateway_status_failed")
                     status_data = await response.json()
                 status = str(status_data.get("status") or "").lower() if isinstance(status_data, Mapping) else ""
-                if status in {"failed", "cancelled"}: raise RuntimeError("gateway_task_failed")
+                if status in {"failed", "cancelled"}:
+                    async with session.get(f"{self._base}/api/v1/tasks/api/{task_id}/result", headers=headers) as response:
+                        if response.status != 200: raise RuntimeError("gateway_task_failed")
+                        failed_result = await response.json()
+                    raise RuntimeError(self._failed_task_code(failed_result))
                 if status == "completed":
                     async with session.get(f"{self._base}/api/v1/tasks/api/{task_id}/result", headers=headers) as response:
                         if response.status != 200: raise RuntimeError("gateway_result_failed")
@@ -86,7 +117,7 @@ class GatewayHttpClient:
                     result_obj = result.get("result") if isinstance(result, Mapping) else None
                     result_obj = result_obj if isinstance(result_obj, Mapping) else result
                     if not isinstance(result_obj, Mapping) or result_obj.get("error"):
-                        raise RuntimeError("gateway_task_failed")
+                        raise RuntimeError(self._failed_task_code(result))
                     response_payload = result_obj.get("response")
                     text = response_payload if isinstance(response_payload, str) else next((value for key in ("response", "text", "content", "answer") if isinstance(response_payload, Mapping) and isinstance((value := response_payload.get(key)), str) and value.strip()), "")
                     if not isinstance(text, str) or not text.strip(): raise RuntimeError("gateway_empty_response")

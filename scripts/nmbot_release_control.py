@@ -600,6 +600,18 @@ def _verify_installed(release_root: Path, files: tuple[tuple[str, str], ...]) ->
             raise ReleaseControlError("installed immutable release differs from artifact")
 
 
+def _remove_derived_bytecode(release_root: Path) -> None:
+    """Remove only CPython's derived cache files before manifest verification."""
+    for cache in release_root.rglob("__pycache__"):
+        if cache.is_symlink() or not cache.is_dir():
+            raise ReleaseControlError("release contains an unsafe bytecode cache path")
+        for child in cache.iterdir():
+            if child.is_symlink() or not child.is_file() or child.suffix != ".pyc":
+                raise ReleaseControlError("release contains an unsafe bytecode cache file")
+            child.unlink()
+        cache.rmdir()
+
+
 def preflight_extracted_release(release_root: Path, release_id: str) -> str:
     root = Path(release_root).resolve()
     rid = validate_release_id(release_id)
@@ -822,7 +834,11 @@ class ReleaseController:
     def prepare_test(self, *, manifest: Path, archive: Path) -> dict[str, Any]:
         """Install and activate one archive in a loopback-only TEST slot."""
         inspected = inspect_artifact(manifest, archive)
-        selected_slot = self._choose_slot("TEST", None)
+        route = self.registry.read_route("TEST", required=False)
+        if route is None and self.registry.slot_state(profile="TEST", slot="A").get("status") != "empty":
+            selected_slot = "B"
+        else:
+            selected_slot = self._choose_slot("TEST", None)
         installed = self.install_artifact(manifest=manifest, archive=archive)
         environment = self.project_slot_environment(profile="TEST", source_env=PRIMARY_GATEWAY_ENV)
         prepared = self.prepare_slot(
@@ -850,6 +866,7 @@ class ReleaseController:
             release_dir = self.releases_dir / inspected.release_id
             temp_release: Path | None = None
             if release_dir.exists():
+                _remove_derived_bytecode(release_dir)
                 _verify_installed(release_dir, inspected.files)
                 preflight_root = release_dir
             else:
@@ -991,6 +1008,7 @@ class ReleaseController:
         inspected = inspect_artifact(self._stored_manifest(rid), self._stored_archive(rid))
         if inspected.archive_sha256 != release.get("artifact_sha256") or inspected.manifest_sha256 != release.get("manifest_sha256"):
             raise ReleaseControlError("registered release provenance differs from stored artifact")
+        _remove_derived_bytecode(release_root)
         _verify_installed(release_root, inspected.files)
         instance = self._instance(normalized_profile, selected_slot)
         descriptor_path = self._descriptor_path(normalized_profile, selected_slot)

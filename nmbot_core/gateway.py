@@ -60,6 +60,9 @@ class GatewayHttpClient:
         stage = str(request_data.pop("_payload_stage", ""))
         if stage not in {PROMPT1_STAGE, PROMPT2_STAGE}:
             raise ValueError("invalid_payload_stage")
+        model = str(request_data.get("model") or "")
+        if os.getenv("NMBOT_OPENROUTER_EXCLUDE_REASONING", "").strip().lower() in {"1", "true", "yes", "on"} and model.startswith("google/gemini"):
+            request_data.setdefault("reasoning", {"exclude": True})
         payload = {"agent_name": "gateway-agent", "endpoint": "/process", "request_data": request_data, "timeout_seconds": timeout, "max_retries": 0}
         started = time.monotonic()
         async with ClientSession(timeout=ClientTimeout(total=min(timeout + 10, 190))) as session:

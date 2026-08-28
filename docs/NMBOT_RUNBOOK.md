@@ -68,6 +68,15 @@ routing or terminal delivery requires a separately authorized correlated Jivo tr
 
 ## Isolated API-only TEST
 
+The canonical release controller owns the current A/B TEST route at
+`/home/neiro/.local/state/nmbot-v6-release/routes/test.json`. Slot selection and the
+loopback port are controller state: operators and smoke commands must not choose
+`18088` or `18089` manually. The profile journal remains fixed at
+`/home/neiro/.local/state/nmbot-v6-release/profiles/test/data/dialogue/dialogue.jsonl`.
+
+The standalone owner below is the legacy initial TEST fallback only. Do not use it for a
+canonical release registered in the A/B controller.
+
 When no independently identified TEST contour exists, do not reuse `primary` or
 `client-production`. `scripts/nmbot_test_api_deploy.py` owns one fixed, loopback-only V6 TEST at
 `/home/neiro/.local/state/nmbot-v6-clean-test`, transient unit
@@ -105,8 +114,10 @@ new release attempt.
 ## Primary Jivo bridge switch to isolated V6 TEST
 
 `scripts/nmbot_primary_v6_jivo_switch.py` owns one narrow migration of the existing **primary**
-bridge from its current local API (`127.0.0.1:8088`) to the isolated V6 TEST API
-(`127.0.0.1:18088`). It does not deploy bridge code, alter V_exp, change the primary API, or touch
+bridge from its current local API (`127.0.0.1:8088`) to the active canonical V6 TEST slot. The
+owner reads the fixed controller TEST route, requires its exact release ID, accepts only slot A/B
+and loopback port 18088/18089, then health-checks that exact upstream. No caller supplies a port
+or evidence path. It does not deploy bridge code, alter V_exp, change the primary API, or touch
 either client-production service. The visible Jivo ingress may share this primary bridge; do not
 claim client isolation without a separately authorized route receipt.
 
@@ -142,6 +153,9 @@ a private, restrictive backup of the primary bridge environment, atomically chan
 `NMBOT_BRIDGE_UPSTREAM`, and restarts only `novostroy-bot-n8n-bridge.service`. A failed technical
 check restores the backup and restarts that bridge back to its former route. A correlated Jivo
 `CLIENT_MESSAGE` -> terminal `BOT_MESSAGE` smoke remains a separate external approval.
+
+The strict smoke owner reads the same fixed controller route and canonical TEST profile journal.
+It rejects a release mismatch, unsafe route file, non-A/B slot, or non-loopback upstream.
 
 Rollback is also explicit and restores the saved primary bridge environment:
 

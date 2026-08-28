@@ -17,8 +17,8 @@ def test_contract_is_fixed_to_primary_bridge_and_isolated_v6() -> None:
 
     assert contract["primary_bridge"] == switcher.PRIMARY_BRIDGE
     assert contract["current_upstream"] == "http://127.0.0.1:8088"
-    assert contract["v6_upstream"] == "http://127.0.0.1:18088"
-    assert contract["v6_health"] == "http://127.0.0.1:18088/health"
+    assert contract["test_route"] == "/home/neiro/.local/state/nmbot-v6-release/routes/test.json"
+    assert contract["allowed_test_upstreams"] == ["http://127.0.0.1:18088", "http://127.0.0.1:18089"]
     assert switcher.PRIMARY_API in contract["do_not_touch"]
     assert switcher.CLIENT_BRIDGE in contract["do_not_touch"]
 
@@ -51,13 +51,16 @@ def test_remote_program_is_syntax_valid_and_never_restarts_protected_units() -> 
     assert 'if backup.read_bytes() != original:' in source
     assert 'fail("switch_backup_mismatch")' in source
     assert 'fail("switch_backup_unsafe")' in source
+    assert 'fail("test_route_invalid")' in source
+    assert 'test_target() != target' in source
 
 
 def test_payload_and_ssh_command_are_fixed_and_redact_host_from_remote_program() -> None:
     payload = switcher.target_payload("preflight", expected_v6_release="v6-test-r1")
     command = switcher._remote_command(payload)
 
-    assert payload["v6_upstream"] == switcher.V6_UPSTREAM
+    assert payload["test_route"] == switcher.TEST_ROUTE
+    assert payload["allowed_test_upstreams"] == list(switcher.TEST_UPSTREAMS)
     assert command[:3] == ["ssh", "-p", "1905"]
     assert command[-2] == switcher.HOST
     assert "193.107.155.236" not in command[-1]
@@ -144,6 +147,15 @@ def _run_local_reconcile(
     root = tmp_path / "switch-state"
     backup = root / "backups" / "v6-old-test.env"
     backup.parent.mkdir(parents=True)
+    route_path = tmp_path / "test.json"
+    route_path.write_text(json.dumps({
+        "schema": "nmbot.active_route.v1",
+        "profile": "TEST",
+        "revision": 1,
+        "active": {"slot": "B", "release_id": "v6-test-r1", "upstream": "http://127.0.0.1:18089"},
+        "previous": None,
+        "switched_at": "2026-08-28T10:15:19Z",
+    }), encoding="utf-8")
     original = b"NMBOT_BRIDGE_UPSTREAM=http://127.0.0.1:8088\n"
     env_path.write_text(f"NMBOT_BRIDGE_UPSTREAM={upstream}\n", encoding="utf-8")
     backup.write_bytes(original)
@@ -165,10 +177,16 @@ def _run_local_reconcile(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: _HealthyResponse("v6-test-r1"))
-    source = switcher.REMOTE_PROGRAM.replace(switcher.PRIMARY_ENV, str(env_path)).replace(switcher.SWITCH_ROOT, str(root))
+    source = (
+        switcher.REMOTE_PROGRAM
+        .replace(switcher.PRIMARY_ENV, str(env_path))
+        .replace(switcher.SWITCH_ROOT, str(root))
+        .replace(switcher.TEST_ROUTE, str(route_path))
+    )
     payload = switcher.target_payload("reconcile", expected_v6_release="v6-test-r1")
     payload["primary_env"] = str(env_path)
     payload["switch_root"] = str(root)
+    payload["test_route"] = str(route_path)
     encoded = b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
     output: list[str] = []
     monkeypatch.setattr("builtins.print", lambda value: output.append(value))

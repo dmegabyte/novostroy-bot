@@ -29,11 +29,27 @@ def _bot(**overrides):
     return value
 
 
-def test_isolated_target_is_release_bound_and_has_no_free_path() -> None:
+def _write_test_route(path: Path, *, slot: str = "B", release_id: str = "v6-test-r1", port: int = 18089) -> None:
+    path.write_text(json.dumps({
+        "schema": "nmbot.active_route.v1",
+        "profile": "TEST",
+        "revision": 1,
+        "active": {"slot": slot, "release_id": release_id, "upstream": f"http://127.0.0.1:{port}"},
+        "previous": None,
+        "switched_at": "2026-08-28T10:15:19Z",
+    }), encoding="utf-8")
+
+
+def test_isolated_target_is_release_bound_and_has_no_free_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    route = tmp_path / "test.json"
+    data_root = tmp_path / "data"
+    _write_test_route(route)
+    monkeypatch.setattr(smoke, "CANONICAL_TEST_ROUTE", route)
+    monkeypatch.setattr(smoke, "CANONICAL_TEST_DATA_ROOT", data_root)
     contract = smoke.target_contract("isolated-test", "v6-test-r1")
-    assert contract.api_base == "http://127.0.0.1:18088"
+    assert contract.api_base == "http://127.0.0.1:18089"
     assert contract.profile == "TEST"
-    assert contract.journal == smoke.ISOLATED_TEST_ROOT / "data/v6-test-r1/dialogue/dialogue.jsonl"
+    assert contract.journal == data_root / "dialogue/dialogue.jsonl"
     with pytest.raises(smoke.SmokeError, match="expected_release_required"):
         smoke.target_contract("isolated-test", None)
     with pytest.raises(smoke.SmokeError, match="expected_release_invalid"):
@@ -47,6 +63,27 @@ def test_isolated_target_is_release_bound_and_has_no_free_path() -> None:
     assert smoke._bridge_log_paths({"NMBOT_BRIDGE_STRUCTURED_LOG": str(smoke.BRIDGE_LOG_PATH)}) == (smoke.BRIDGE_LOG_PATH, smoke.BRIDGE_LOG_DEFAULT)
     with pytest.raises(smoke.SmokeError, match="bridge_log_path_not_allowed"):
         smoke._bridge_log_paths({"NMBOT_BRIDGE_STRUCTURED_LOG": "/tmp/free-path.jsonl"})
+
+
+@pytest.mark.parametrize(("slot", "port"), [("A", 18088), ("B", 18089)])
+def test_canonical_test_route_accepts_only_controller_slots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, slot: str, port: int,
+) -> None:
+    route = tmp_path / "test.json"
+    _write_test_route(route, slot=slot, port=port)
+    monkeypatch.setattr(smoke, "CANONICAL_TEST_ROUTE", route)
+    assert smoke.target_contract("isolated-test", "v6-test-r1").api_base == f"http://127.0.0.1:{port}"
+
+    _write_test_route(route, slot=slot, port=19000)
+    with pytest.raises(smoke.SmokeError, match="test_route_invalid"):
+        smoke.target_contract("isolated-test", "v6-test-r1")
+
+    route.unlink()
+    target = tmp_path / "real.json"
+    _write_test_route(target, slot=slot, port=port)
+    route.symlink_to(target)
+    with pytest.raises(smoke.SmokeError, match="test_route_unsafe"):
+        smoke.target_contract("isolated-test", "v6-test-r1")
 
 
 def test_journal_reader_is_offset_bounded_and_rejects_symlink(tmp_path: Path) -> None:
@@ -95,7 +132,7 @@ def test_release_smoke_accepts_v6_simple_trace() -> None:
 
 
 def test_bridge_trace_requires_exact_upstream_and_terminal_delivery() -> None:
-    upstream = smoke._safe_url_ref("http://127.0.0.1:18088/jivo/private-token")
+    upstream = smoke._safe_url_ref("http://127.0.0.1:18089/jivo/private-token")
     common = {"trace_id": "trace-1", "event": "nmbot_jivo_n8n_bridge"}
     events = [
         {**common, "stage": "upstream_request_start", "upstream_ref": upstream},

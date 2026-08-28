@@ -24,7 +24,7 @@ from .runtime import CoreRuntime, RuntimeResult
 from .state import CoreState, SCHEMA_VERSION
 from .journal import JournalError, append_event
 from .outbox import LocalCallbackOutbox, OutboxResult
-from .app import JsonStateStore, create_app
+from .app import JsonStateStore, create_app, create_app_from_environment
 from .url_card import UrlCardError, extract_novostroy_url, fetch_card, parse_html_card, validate_source_url
 
 __all__ = [
@@ -56,6 +56,7 @@ __all__ = [
     "build_prompt2_input",
     "build_prompt_pair",
     "create_app",
+    "create_app_from_environment",
     "append_event",
     "parse_prompt1",
     "parse_prompt2",

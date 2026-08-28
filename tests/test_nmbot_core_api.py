@@ -5,7 +5,7 @@ import json
 
 from aiohttp.test_utils import TestClient, TestServer
 
-from nmbot_core import GatewayResult, create_app
+from nmbot_core import GatewayResult, create_app, create_app_from_environment
 
 
 class Port:
@@ -42,3 +42,17 @@ def test_core_api_requires_configured_tokens_and_uses_file_session_locks(tmp_pat
             assert (await (await client.post("/jivo/provider", headers={"X-NMBOT-Bridge-Token": "wrong"}, json={"event": "CLIENT_MESSAGE"})).json())["error"] == "unauthorized"
             assert (await (await client.post("/jivo/provider", headers={"X-NMBOT-Bridge-Token": "bridge"}, json={"event": "IGNORE"})).json())["ignored"] is True
     asyncio.run(run())
+
+
+def test_environment_factory_requires_existing_release_contract(tmp_path, monkeypatch):
+    root = tmp_path / "release"; (root / "prompts").mkdir(parents=True)
+    (root / "prompts" / "v6_simple_search_agent.txt").write_text("prompt1", encoding="utf-8")
+    (root / "prompts" / "v6_simple_answer_writer.txt").write_text("prompt2", encoding="utf-8")
+    identity = root / "identity.json"; identity.write_text('{"schema":"nmbot.release_identity.v1","release_id":"v6-canonical-r1"}', encoding="utf-8")
+    monkeypatch.setenv("OVERMIND_URL", "http://127.0.0.1:9999")
+    monkeypatch.setenv("NMBOT_API_STATE_FILE", str(tmp_path / "state.json"))
+    monkeypatch.setenv("NMBOT_CALLBACK_OUTBOX_DIR", str(tmp_path / "outbox"))
+    monkeypatch.setenv("NMBOT_DIALOGUE_JOURNAL", str(tmp_path / "journal.jsonl"))
+    monkeypatch.setenv("NMBOT_RELEASE_IDENTITY_FILE", str(identity))
+    app = create_app_from_environment(root)
+    assert app["release_id"] == "v6-canonical-r1" and app["profile"] == "TEST"

@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -19,10 +20,12 @@ from .journal import append_event
 from .outbox import LocalCallbackOutbox
 from .runtime import CoreRuntime, PHONE_QUESTION, TECHNICAL_TEXT
 from .state import CoreState
+from .gateway import build_prompt_pair
 
 
 V6_GREETING = "Здравствуйте! Я помогу подобрать квартиру в Москве и области — напишите район или метро, количество комнат и бюджет."
 CANONICAL_STATE_KEY = "core"
+_RELEASE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 
 class JsonStateStore:
@@ -126,6 +129,25 @@ def _jivo_authorized(request: web.Request) -> bool:
     return ((not provider or hmac.compare_digest(str(request.match_info.get("provider_token") or ""), provider)) and (not bridge or hmac.compare_digest(request.headers.get("X-NMBOT-Bridge-Token", ""), bridge)))
 
 
+def _required_env(key: str) -> str:
+    value = os.getenv(key, "").strip()
+    if not value:
+        raise RuntimeError(f"missing_configuration:{key}")
+    return value
+
+
+def _release_id_from_environment() -> str:
+    target = Path(_required_env("NMBOT_RELEASE_IDENTITY_FILE"))
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("invalid_release_identity") from exc
+    release_id = str(payload.get("release_id") or "").strip() if isinstance(payload, Mapping) and payload.get("schema") == "nmbot.release_identity.v1" else ""
+    if not _RELEASE_ID.fullmatch(release_id):
+        raise RuntimeError("invalid_release_identity")
+    return release_id
+
+
 async def _turn(app: web.Application, user_id: str, message: str, channel: str, meta: Mapping[str, Any] | None = None) -> dict[str, Any]:
     async with app["state_store"].session_lock(user_id):
         envelope = await app["state_store"].get(user_id)
@@ -187,3 +209,27 @@ def create_app(*, prompt1: Any, prompt2: Any, state_path: Path | str, outbox_pat
 
     app.router.add_get("/health", health); app.router.add_post("/api/chat", chat); app.router.add_post("/api/reset", reset); app.router.add_post("/jivo/{provider_token}", jivo)
     return app
+
+
+def create_app_from_environment(root: Path | str) -> web.Application:
+    """Build the canonical API only from the existing release env contract."""
+    release_root = Path(root)
+    prompt1_path = release_root / "prompts" / "v6_simple_search_agent.txt"
+    prompt2_path = release_root / "prompts" / "v6_simple_answer_writer.txt"
+    try:
+        system_prompt1, system_prompt2 = prompt1_path.read_text(encoding="utf-8"), prompt2_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError("canonical_prompt_missing") from exc
+    prompt1, prompt2 = build_prompt_pair(base_url=_required_env("OVERMIND_URL"), system_prompt1=system_prompt1, system_prompt2=system_prompt2)
+    return create_app(
+        prompt1=prompt1,
+        prompt2=prompt2,
+        state_path=_required_env("NMBOT_API_STATE_FILE"),
+        outbox_path=_required_env("NMBOT_CALLBACK_OUTBOX_DIR"),
+        journal_path=_required_env("NMBOT_DIALOGUE_JOURNAL"),
+        profile=os.getenv("NMBOT_CONTOUR_PROFILE", "TEST"),
+        release_id=_release_id_from_environment(),
+        api_token=os.getenv("NMBOT_API_TOKEN", ""),
+        provider_token=os.getenv("JIVO_PROVIDER_TOKEN", ""),
+        bridge_token=os.getenv("NMBOT_N8N_BRIDGE_TOKEN", ""),
+    )

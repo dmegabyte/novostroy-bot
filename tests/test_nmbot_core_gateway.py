@@ -22,11 +22,12 @@ def test_direct_gateway_http_transport_preserves_single_task_contract(monkeypatc
         app = web.Application(); app.router.add_post("/api/v1/tasks/api", create); app.router.add_get("/api/v1/tasks/api/task-1/status", status); app.router.add_get("/api/v1/tasks/api/task-1/result", result)
         async with TestServer(app) as server:
             monkeypatch.setenv("OVERMIND_TOKEN", "test-token")
-            gateway = PromptGateway(DirectTransport(GatewayHttpClient(str(server.make_url("/")).rstrip("/")), timeout=5), "v6_simple_prompt1", system_prompt="prompt", model="test-model")
+            monkeypatch.setenv("NMBOT_OPENROUTER_EXCLUDE_REASONING", "1")
+            gateway = PromptGateway(DirectTransport(GatewayHttpClient(str(server.make_url("/")).rstrip("/")), timeout=5), "v6_simple_prompt1", system_prompt="prompt", model="google/gemini-test")
             reply = await gateway.run({"message": "test"})
             assert reply.output == '{"action":"reply"}' and reply.attempt_ref == "task-1"
             assert reply.tool_trace is not None and reply.tool_trace.call_count == 0
-        assert received == [("Bearer test-token", {"agent_name": "gateway-agent", "endpoint": "/process", "timeout_seconds": 5, "max_retries": 0, "request_data": {"query": '{"message":"test"}', "service": "openrouter", "model": "test-model", "system_prompt": "prompt", "parameters": {"temperature": 0, "max_tokens": 1800}, "external_api_key": "", "mcp_servers": ["novostroym"]}})]
+        assert received == [("Bearer test-token", {"agent_name": "gateway-agent", "endpoint": "/process", "timeout_seconds": 5, "max_retries": 0, "request_data": {"query": '{"message":"test"}', "service": "openrouter", "model": "google/gemini-test", "system_prompt": "prompt", "parameters": {"temperature": 0, "max_tokens": 1800}, "external_api_key": "", "mcp_servers": ["novostroym"], "reasoning": {"exclude": True}}})]
     asyncio.run(run())
 
 

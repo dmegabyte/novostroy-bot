@@ -185,3 +185,8 @@ def test_bridge_reader_accepts_live_client_message_record_without_schema_label(t
         offset=0,
         path=log,
     )[0]["stage"] == "upstream_request_start"
+
+
+def test_strict_smoke_wait_default_covers_bounded_terminal_delivery() -> None:
+    args = smoke._parser().parse_args(["--target", "isolated-test", "--expected-release", "v6-test-r1"])
+    assert args.journal_wait_seconds == 45.0

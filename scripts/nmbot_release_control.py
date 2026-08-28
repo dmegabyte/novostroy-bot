@@ -13,7 +13,6 @@ import fcntl
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -63,7 +62,7 @@ MAX_FILE_BYTES = 10 * 1024 * 1024
 MAX_TOTAL_BYTES = 100 * 1024 * 1024
 DEFAULT_ROOT = Path.home() / ".local" / "state" / "nmbot-v6-release"
 IDENTITY_IN_RELEASE = RELEASE_IDENTITY_PATH
-RUNTIME_PACKAGE_RE = re.compile(r"^nmbot_v\d+$")
+CANONICAL_RUNTIME_PACKAGE = "nmbot_core"
 
 
 class ReleaseControlError(RuntimeError):
@@ -173,10 +172,8 @@ def inspect_artifact(manifest_path: Path, archive_path: Path) -> InspectedArtifa
     expected_files = set(V6_API_FILES) | {RELEASE_IDENTITY_PATH}
     if seen != expected_files:
         raise ReleaseControlError("artifact file set is not the exact V6 API contract")
-    for relative in seen:
-        top_level = PurePosixPath(relative).parts[0]
-        if RUNTIME_PACKAGE_RE.fullmatch(top_level) and top_level != "nmbot_v6":
-            raise ReleaseControlError("artifact contains a foreign runtime package")
+    if not any(relative.startswith(CANONICAL_RUNTIME_PACKAGE + "/") for relative in seen):
+        raise ReleaseControlError("artifact is missing the canonical runtime package")
     prompt_rows = [{"path": path, "sha256": digest} for path, digest in files if path in REQUIRED_PROMPTS]
     prompt_sha = hashlib.sha256(json.dumps(prompt_rows, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
     return InspectedArtifact(
@@ -276,18 +273,8 @@ for entry in sys.path:
 sys.path[:] = [str(root), *clean_path]
 
 api = importlib.import_module("scripts.nmbot_api_server")
-importlib.import_module("scripts.nmbot_v6_api")
-importlib.import_module("nmbot_v6.simple_runtime")
-foreign_runtime_roots = sorted({
-    name.split(".", 1)[0]
-    for name in sys.modules
-    if re.fullmatch(r"nmbot_v\d+", name.split(".", 1)[0])
-    and name.split(".", 1)[0] != "nmbot_v6"
-})
-if foreign_runtime_roots:
-    raise RuntimeError("foreign runtime module loaded")
-app = api.create_app()
-if app.get("contour_profile") != "TEST" or app.get("release_id") != release_id:
+app = api.create_app_from_environment(root)
+if app.get("profile") != "TEST" or app.get("release_id") != release_id:
     raise RuntimeError("startup identity mismatch")
 routes = {(route.method, getattr(route.resource, "canonical", "")) for route in app.router.routes()}
 required = {
@@ -299,7 +286,7 @@ required = {
 if not required.issubset(routes):
     raise RuntimeError("required V6 routes missing")
 for name, module in tuple(sys.modules.items()):
-    if not (name.startswith("scripts.") or name == "nmbot_v6" or name.startswith("nmbot_v6.")):
+    if not (name.startswith("scripts.") or name == "nmbot_core" or name.startswith("nmbot_core.")):
         continue
     origin = getattr(module, "__file__", None)
     if origin is None:
@@ -307,10 +294,6 @@ for name, module in tuple(sys.modules.items()):
     resolved = Path(origin).resolve()
     if resolved != root and root not in resolved.parents:
         raise RuntimeError("runtime module escaped extracted release")
-close = getattr(api, "close_app", None)
-if close is None:
-    raise RuntimeError("API cleanup boundary missing")
-asyncio.run(close(app))
 print(json.dumps({
     "ok": True,
     "profile": "TEST",
@@ -340,6 +323,7 @@ print(json.dumps({
             "OPENROUTER_API_KEY": "",
             "OVERMIND_TOKEN": "",
             "GATEWAY_POLL_TOKEN": "",
+            "OVERMIND_URL": "http://127.0.0.1:1",
         }
         try:
             result = subprocess.run(

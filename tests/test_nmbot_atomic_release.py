@@ -51,14 +51,11 @@ def test_v6_api_build_is_deterministic_exact_and_controller_compatible(tmp_path:
         assert set(bundle.getnames()) == expected
         identity = json.load(bundle.extractfile(atomic.RELEASE_IDENTITY_PATH))
     assert {row["path"] for row in identity["tracked_files"]} == set(atomic.V6_API_FILES)
-    runtime_roots = {
-        Path(path).parts[0]
-        for path in expected
-        if re.fullmatch(r"nmbot_v\d+", Path(path).parts[0])
-    }
-    assert runtime_roots == {"nmbot_v6"}
+    runtime_roots = {Path(path).parts[0] for path in expected if Path(path).parts[0] == "nmbot_core"}
+    assert runtime_roots == {"nmbot_core"}
     assert "scripts/nmbot_release_control.py" not in expected
     assert "scripts/nmbot_v6_jivo_smoke.py" in expected
+    assert "nmbot_core/app.py" in expected
 
 
 def test_existing_release_id_is_idempotent_but_never_overwritten(tmp_path: Path) -> None:

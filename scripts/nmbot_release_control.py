@@ -79,6 +79,9 @@ CONTROL_UNIT = ".config/systemd/user/nmbot-v6-slot@.service"
 AUTHORIZED_HOST = "neiro@193.107.155.236"
 AUTHORIZED_PORT = "1905"
 REMOTE_HOME = "/home/neiro"
+REMOTE_CONTROLLER = f"{REMOTE_HOME}/{CONTROL_ROOT}/tools/current/scripts/nmbot_release_control.py"
+PRIMARY_GATEWAY_ENV = Path(f"{REMOTE_HOME}/novostroy-bot/.env")
+TEST_SLOT_PORTS = {"A": 18088, "B": 18089}
 SLOT_ENV_KEYS = (
     "GATEWAY_POLL_TOKEN",
     "NMBOT_MAIN_SEARCH_FALLBACK_ENABLED",
@@ -426,6 +429,53 @@ def bootstrap_remote(*, manifest: Path, archive: Path, remote: Any) -> dict[str,
     return receipt
 
 
+def _last_json_line(output: str, *, error: str) -> dict[str, Any]:
+    lines = [line for line in output.splitlines() if line.strip()]
+    try:
+        payload = json.loads(lines[-1]) if lines else None
+    except json.JSONDecodeError as exc:
+        raise ReleaseControlError(error) from exc
+    if not isinstance(payload, dict):
+        raise ReleaseControlError(error)
+    return payload
+
+
+def deploy_test_remote(*, manifest: Path, archive: Path, remote: Any) -> dict[str, Any]:
+    """Upload one verified archive and prepare only its isolated TEST slot."""
+    inspected = inspect_artifact(manifest, archive)
+    incoming = f"{REMOTE_HOME}/{CONTROL_ROOT}/incoming/{inspected.release_id}"
+    create = remote.run("umask 077; mkdir -p " + shlex.quote(incoming))
+    if create.returncode != 0:
+        raise ReleaseControlError("remote TEST staging cannot be created")
+    remote_manifest = f"{incoming}/manifest.json"
+    remote_archive = f"{incoming}/{inspected.archive.name}"
+    for local, remote_path in ((inspected.manifest, remote_manifest), (inspected.archive, remote_archive)):
+        uploaded = remote.upload(local, remote_path)
+        if uploaded.returncode != 0:
+            raise ReleaseControlError("remote TEST artifact upload failed")
+    command = " ".join(
+        (
+            "python3",
+            shlex.quote(REMOTE_CONTROLLER),
+            "prepare-test",
+            "--manifest", shlex.quote(remote_manifest),
+            "--archive", shlex.quote(remote_archive),
+            "--apply",
+            "--confirm", shlex.quote(f"TEST:{inspected.release_id}"),
+        )
+    )
+    result = remote.run(command)
+    if result.returncode != 0:
+        failure = hashlib.sha256((result.stdout + result.stderr).encode("utf-8", "replace")).hexdigest()[:24]
+        raise ReleaseControlError(f"remote TEST preparation failed (test-prepare-failed:{failure})")
+    receipt = _last_json_line(result.stdout, error="remote TEST receipt is malformed")
+    route = receipt.get("route")
+    active = route.get("active") if isinstance(route, dict) else None
+    if receipt.get("release_id") != inspected.release_id or receipt.get("profile") != "TEST" or not isinstance(active, dict) or active.get("release_id") != inspected.release_id:
+        raise ReleaseControlError("remote TEST receipt does not match artifact")
+    return receipt
+
+
 def inspect_artifact(manifest_path: Path, archive_path: Path) -> InspectedArtifact:
     manifest_path = Path(manifest_path)
     archive_path = Path(archive_path)
@@ -769,6 +819,30 @@ class ReleaseController:
         _atomic_text(target, "".join(f"{key}={selected[key]}\n" for key in SLOT_ENV_KEYS if key in selected))
         return {"profile": normalized_profile, "env_file": str(target), "keys": sorted(selected)}
 
+    def prepare_test(self, *, manifest: Path, archive: Path) -> dict[str, Any]:
+        """Install and activate one archive in a loopback-only TEST slot."""
+        inspected = inspect_artifact(manifest, archive)
+        selected_slot = self._choose_slot("TEST", None)
+        installed = self.install_artifact(manifest=manifest, archive=archive)
+        environment = self.project_slot_environment(profile="TEST", source_env=PRIMARY_GATEWAY_ENV)
+        prepared = self.prepare_slot(
+            profile="TEST",
+            release_id=inspected.release_id,
+            port=TEST_SLOT_PORTS[selected_slot],
+            env_file=Path(environment["env_file"]),
+            slot=selected_slot,
+        )
+        route = self.activate(profile="TEST", slot=selected_slot, reason_code="canonical_test_prepare")
+        return {
+            "release_id": inspected.release_id,
+            "profile": "TEST",
+            "slot": selected_slot,
+            "environment_keys": environment["keys"],
+            "prepared": prepared,
+            "route": route,
+            "source_git_sha": installed["source_git_sha"],
+        }
+
     def install_artifact(self, *, manifest: Path, archive: Path) -> dict[str, Any]:
         inspected = inspect_artifact(manifest, archive)
         with self._locked():
@@ -1036,6 +1110,18 @@ def _parser() -> argparse.ArgumentParser:
     project_env.add_argument("--source-env", type=Path, required=True)
     project_env.add_argument("--apply", action="store_true")
     project_env.add_argument("--confirm", required=True)
+    prepare_test = commands.add_parser("prepare-test")
+    prepare_test.add_argument("--manifest", type=Path, required=True)
+    prepare_test.add_argument("--archive", type=Path, required=True)
+    prepare_test.add_argument("--apply", action="store_true")
+    prepare_test.add_argument("--confirm", required=True)
+    deploy_test = commands.add_parser("deploy-test")
+    deploy_test.add_argument("--manifest", type=Path, required=True)
+    deploy_test.add_argument("--archive", type=Path, required=True)
+    deploy_test.add_argument("--host", default=AUTHORIZED_HOST)
+    deploy_test.add_argument("--port", default=AUTHORIZED_PORT)
+    deploy_test.add_argument("--apply", action="store_true")
+    deploy_test.add_argument("--confirm", required=True)
     bundle = commands.add_parser("bundle-control")
     bundle.add_argument("--source-root", type=Path, required=True); bundle.add_argument("--out-dir", type=Path, required=True)
     bootstrap = commands.add_parser("bootstrap-control")
@@ -1069,6 +1155,14 @@ def main() -> None:
         elif args.command == "project-env":
             _require_apply(args, f"ENV:{args.profile}")
             result = controller.project_slot_environment(profile=args.profile, source_env=args.source_env)
+        elif args.command == "prepare-test":
+            inspected = inspect_artifact(args.manifest, args.archive)
+            _require_apply(args, f"TEST:{inspected.release_id}")
+            result = controller.prepare_test(manifest=args.manifest, archive=args.archive)
+        elif args.command == "deploy-test":
+            inspected = inspect_artifact(args.manifest, args.archive)
+            _require_apply(args, f"TEST:{inspected.release_id}")
+            result = deploy_test_remote(manifest=args.manifest, archive=args.archive, remote=SshRemote(host=args.host, port=args.port))
         elif args.command == "bundle-control":
             bundle = build_control_bundle(source_root=args.source_root, out_dir=args.out_dir); result = {"schema": CONTROL_BUNDLE_SCHEMA, "source_git_sha": bundle.source_git_sha, "archive": str(bundle.archive), "manifest": str(bundle.manifest), "archive_sha256": bundle.archive_sha256, "files": len(bundle.files)}
         elif args.command == "bootstrap-control":

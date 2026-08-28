@@ -37,6 +37,28 @@ def test_gateway_rejects_invalid_endpoint_and_task_id():
     else: raise AssertionError("invalid endpoint accepted")
 
 
+def test_gateway_accepts_numeric_wire_task_id(monkeypatch):
+    async def create(request): return web.json_response({"id": 2620265})
+    async def status(request): return web.json_response({"status": "completed"})
+    async def result(request): return web.json_response({"result": {"response": '{"action":"reply"}'}})
+
+    async def run():
+        app = web.Application()
+        app.router.add_post("/api/v1/tasks/api", create)
+        app.router.add_get("/api/v1/tasks/api/2620265/status", status)
+        app.router.add_get("/api/v1/tasks/api/2620265/result", result)
+        async with TestServer(app) as server:
+            monkeypatch.setenv("OVERMIND_TOKEN", "test-token")
+            gateway = PromptGateway(
+                DirectTransport(GatewayHttpClient(str(server.make_url("/")).rstrip("/"), poll_interval=0.01), timeout=5),
+                "v6_simple_prompt1", system_prompt="prompt", model="google/gemini-test",
+            )
+            reply = await gateway.run({"message": "test"})
+            assert reply.attempt_ref == "2620265"
+            assert reply.output == '{"action":"reply"}'
+    asyncio.run(run())
+
+
 def test_gateway_projects_failed_task_to_safe_provider_code(monkeypatch):
     async def create(request): return web.json_response({"id": "task-failed"})
     async def status(request): return web.json_response({"status": "failed"})

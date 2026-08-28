@@ -81,6 +81,17 @@ class GatewayHttpClient:
         error = result_obj.get("error") if isinstance(result_obj, Mapping) else result_obj
         return GatewayHttpClient._provider_failure_code(error) or "gateway_task_failed"
 
+    @staticmethod
+    def _normalize_task_id(value: Any) -> str | None:
+        """Normalize the gateway wire ID; Overmind returns int or safe string."""
+        if type(value) is int:
+            text = str(value) if value > 0 else ""
+        elif isinstance(value, str):
+            text = value.strip()
+        else:
+            return None
+        return text if _TASK_REF.fullmatch(text) else None
+
     async def _run_gateway_request_once(self, request_data: dict[str, Any], headers: dict[str, Any], timeout: int) -> tuple[str, dict[str, Any]]:
         if type(timeout) is not int or not 1 <= timeout <= 180:
             raise ValueError("invalid_gateway_timeout")
@@ -97,8 +108,9 @@ class GatewayHttpClient:
                 if response.status not in {200, 201}:
                     raise RuntimeError("gateway_create_failed")
                 created = await response.json()
-            task_id = created.get("id") if isinstance(created, Mapping) else None
-            if not isinstance(task_id, str) or not _TASK_REF.fullmatch(task_id):
+            raw_task_id = created.get("id") if isinstance(created, Mapping) else None
+            task_id = self._normalize_task_id(raw_task_id)
+            if task_id is None:
                 raise RuntimeError("gateway_missing_task_id")
             while time.monotonic() - started < timeout:
                 async with session.get(f"{self._base}/api/v1/tasks/api/{task_id}/status", headers=headers) as response:

@@ -16,7 +16,7 @@ Jivo smoke.
 
 V6 должен получать не только название ЖК, а подтверждённую карточку выбранного
 ЖК и конкретных лотов, после чего формировать человеческий ответ через
-существующий writer. V5 не является fallback для V6.
+существующий writer. Исторический V5-контур удалён и не является fallback для V6.
 
 ## 2. Архитектурное решение: один search prompt
 
@@ -226,7 +226,7 @@ code-owned operator offer
   → Jivo BOT_MESSAGE или operator handoff
 ```
 
-На ошибке V6 не вызывает V5. State, телефон, callback, journal и Jivo delivery
+На ошибке V6 не вызывает удалённый V5-контур. State, телефон, callback, journal и Jivo delivery
 остаются code-owned.
 
 ## 8. Подтверждённый diagnostic evidence

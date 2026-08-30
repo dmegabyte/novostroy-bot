@@ -132,7 +132,7 @@ test_identity_ok = (
 )
 payload = {{
     "feature_flags": {{key: (values[key].strip().lower() in {{"1", "true", "yes", "on"}}) if key in values else defaults[key] for key in {keys}}},
-    "runtime_v5": get_json("http://127.0.0.1:{TEST_API_PORT}/api/runtime-version").get("runtime_version") == "V5",
+    "runtime_v6": get_json("http://127.0.0.1:{TEST_API_PORT}/api/runtime-version").get("runtime_version") == "V6",
     "health_ok": get_json("http://127.0.0.1:{TEST_API_PORT}/health").get("ok") is True,
     "service_active": service.returncode == 0 and service.stdout.strip() == "active",
     "test_identity_ok": test_identity_ok,
@@ -140,7 +140,7 @@ payload = {{
 print(json.dumps(payload, ensure_ascii=False))
 expected = {expected}
 if expected and not (
-    payload["runtime_v5"]
+    payload["runtime_v6"]
     and payload["health_ok"]
     and payload["service_active"]
     and payload["test_identity_ok"]
@@ -262,7 +262,7 @@ def render_status(status: dict[str, Any]) -> dict[str, Any]:
         },
         "health": "healthy" if status.get("health_ok") is True else "unhealthy",
         "service": "active" if status.get("service_active") is True else "inactive",
-        "runtime": "V5" if status.get("runtime_v5") is True else "not_v5",
+        "runtime": "V6" if status.get("runtime_v6") is True else "not_v6",
     }
 
 
@@ -271,7 +271,7 @@ def _post_change_is_valid(status: dict[str, Any], assignments: list[tuple[str, s
     if not isinstance(flags, dict):
         return False
     return (
-        status.get("runtime_v5") is True
+        status.get("runtime_v6") is True
         and status.get("test_identity_ok") is True
         and status.get("health_ok") is True
         and status.get("service_active") is True
@@ -308,8 +308,8 @@ def main() -> int:
             raise FeatureFlagError("TEST feature-flag mutation requires --confirm; use --dry-run first")
 
         before = read_status()
-        if before.get("runtime_v5") is not True:
-            raise FeatureFlagError("TEST runtime is not V5; refusing feature-flag mutation")
+        if before.get("runtime_v6") is not True:
+            raise FeatureFlagError("TEST runtime is not V6; refusing feature-flag mutation")
         backup_name = _backup_name()
         result = run_remote(build_set_command(assignments, backup_name))
         if result.returncode != 0:

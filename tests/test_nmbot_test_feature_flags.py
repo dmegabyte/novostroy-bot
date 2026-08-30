@@ -157,7 +157,7 @@ def test_render_status_is_bounded_and_never_includes_dotenv_values() -> None:
         },
         "health_ok": True,
         "service_active": False,
-        "runtime_v5": True,
+        "runtime_v6": True,
         "dotenv_value": secret,
     })
 
@@ -169,7 +169,7 @@ def test_render_status_is_bounded_and_never_includes_dotenv_values() -> None:
         },
         "health": "healthy",
         "service": "inactive",
-        "runtime": "V5",
+        "runtime": "V6",
     }
     assert secret not in str(rendered)
 

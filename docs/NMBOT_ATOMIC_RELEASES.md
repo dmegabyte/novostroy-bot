@@ -190,9 +190,13 @@ Before any future production code change, take a fresh read-only source snapshot
 from the pinned VPS host/root first. The command is:
 
 ```bash
-python3 scripts/nmbot_atomic_release.py snapshot-vps-source \
+python3 -m scripts.nmbot_atomic_release snapshot-vps-source \
   --out-dir /tmp/opencode/nmbot-vps-source-snapshots
 ```
+
+The module form is the preferred invocation. Direct invocation remains supported
+for existing owner commands: the script bootstraps its project root before it
+imports the `scripts` package.
 
 The command is intentionally source-only and read-only. It connects only to
 `neiro@193.107.155.236:1905` and `/home/neiro/novostroy-bot`; callers cannot pass

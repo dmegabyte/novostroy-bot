@@ -40,7 +40,7 @@ from aiohttp import web
 # Direct production execution starts with ``scripts/`` first on ``sys.path``.
 # Keep that precedence so stale/untracked root-level script copies can never
 # shadow the canonical runtime adapters.  The repository root is needed only
-# for ``nmbot_v2`` and root-level project modules.
+# for the V6 package and root-level project modules.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
@@ -54,12 +54,8 @@ from nmbot_gateway_client import (
 )
 from nmbot_crm_outbox import CallbackOutboxResult, LocalCallbackOutbox, build_callback_lead_context, build_callback_provenance
 from dialogue_journal import append_event as append_journal_event
-from nmbot_v1.execution_path import append_jivo_api_prepare as append_v1_jivo_api_prepare, sanitize_execution_path as sanitize_v1_execution_path
-from nmbot_v1.provider_adapters import V1GatewayOneModelResponsePort, V1GatewayPlannerPort, V1GatewaySearchPort
-from nmbot_v4.provider_adapter import V4GatewayOnePromptPort
 from nmbot_v6.simple_gateway import DirectTransport, SimpleGateway
 from nmbot_v6.simple_state import SimpleState
-from nmbot_v2.execution_path import append_jivo_api_prepare, sanitize_execution_path
 from nmbot_release_identity import current_release_id
 from nmbot_egress_policy import SAFE_CLIENT_FALLBACK_TEXT, guard_jivo_event, is_client_production
 from nmbot_planner_context import (
@@ -68,12 +64,7 @@ from nmbot_planner_context import (
     safe_planner_state as _neutral_safe_planner_state,
     safe_turn_context as _neutral_safe_turn_context,
 )
-from nmbot_runtime_adapter import _canonical_v0_envelope, _canonical_v1_envelope, _canonical_v4_envelope, _merge_runtime_namespace_envelope, run_runtime_turn
-from scripts.nmbot_v6_simple_adapter import establish_v6_unavailable_fallback
-from nmbot_v0.field_contract import V0_PRESENTATION_TRACE_FIELDS
-from nmbot_v1.state import V1ConversationState
-from nmbot_v2.contracts import OptionCard
-from nmbot_v2.state import ConversationState
+from scripts.nmbot_v6_simple_adapter import establish_v6_unavailable_fallback, run_v6_simple_turn
 
 
 _LEGACY_CHAT_MODULE: Any | None = None
@@ -98,7 +89,10 @@ def _validated_trace_ref(value: Any) -> str | None:
     return text if _SAFE_TRACE_REF_RE.fullmatch(text) else None
 
 
-import followup_intent_classifier  # noqa: E402
+try:
+    import followup_intent_classifier  # noqa: E402
+except ModuleNotFoundError:
+    followup_intent_classifier = None  # type: ignore[assignment]
 from search_profiles import select_search_profile  # noqa: E402
 
 DEFAULT_STATE_FILE = REPO_ROOT / "data" / "nmbot_api_state.json"
@@ -189,30 +183,24 @@ def _default_state() -> dict[str, Any]:
     }
 
 
-def _canonical_reset_state() -> dict[str, Any]:
-    """Возвращает пустое состояние V2 для нового диалога Jivo."""
-    return {"nmbot_v2": ConversationState().to_dict()}
-
-
 def _canonical_v6_envelope() -> dict[str, Any]:
     return {"nmbot_v6": SimpleState().plain()}
 
 
+def _canonical_reset_state() -> dict[str, Any]:
+    """Return the sole canonical state envelope for a fresh V6 dialogue."""
+    return _canonical_v6_envelope()
+
+
 def _canonical_reset_state_for_version(version: str) -> dict[str, Any]:
-    normalized = _normalize_runtime_version(version)
-    if normalized == "V0":
-        return _canonical_v0_envelope()
-    if normalized == "V1":
-        return _canonical_v1_envelope(V1ConversationState.clean())
-    if normalized == "V4":
-        return _canonical_v4_envelope()
-    if normalized == "V6":
-        return _canonical_v6_envelope()
-    return _canonical_reset_state()
+    _normalize_runtime_version(version)
+    return _canonical_v6_envelope()
 
 
 def _reset_active_namespace_envelope(existing: dict[str, Any] | None, version: str) -> dict[str, Any]:
-    return _merge_runtime_namespace_envelope(existing, _canonical_reset_state_for_version(version))
+    envelope = copy.deepcopy(existing) if isinstance(existing, dict) else {}
+    envelope.update(_canonical_reset_state_for_version(version))
+    return envelope
 
 
 def _strip_markdown(text: str) -> str:
@@ -654,37 +642,7 @@ JIVO_START_GREETING = (
     "для жизни, инвестиций или сдачи в аренду. Напишите, какой район или метро рассматриваете, "
     "сколько комнат нужно и какой бюджет планируете — я сразу начну подбор."
 )
-V0_START_GREETING = (
-    "Здравствуйте! Меня зовут Валерия, я помогаю подобрать квартиру в Москве и области — "
-    "для жизни, инвестиций или сдачи в аренду. Напишите, какой район или метро рассматриваете, "
-    "сколько комнат нужно и какой бюджет планируете — я сразу начну подбор."
-)
-V1_START_GREETING = (
-    "Здравствуйте! Меня зовут Татьяна, я помогу безопасно начать подбор квартиры в Москве и области. "
-    "Напишите район или метро, сколько комнат нужно и какой бюджет планируете — я соберу первые варианты."
-)
 RUNTIME_IDENTITIES = {
-    "V0": {"name": "Валерия", "start_greeting": V0_START_GREETING, "state_namespace": "nmbot_v0"},
-    "V1": {"name": "Татьяна", "start_greeting": V1_START_GREETING, "state_namespace": "nmbot_v1"},
-    "V2": {"name": "Ирина", "start_greeting": JIVO_START_GREETING, "state_namespace": "nmbot_v2"},
-    "V3": {
-        "name": "Светлана",
-        "start_greeting": (
-            "Здравствуйте! Меня зовут Светлана, я помогаю подобрать квартиру в Москве и области — "
-            "для жизни, инвестиций или сдачи в аренду. Напишите, какой район или метро рассматриваете, "
-            "сколько комнат нужно и какой бюджет планируете — я сразу начну подбор."
-        ),
-        "state_namespace": "nmbot_v2",
-    },
-    "V5": {
-        "name": "Светлана",
-        "start_greeting": (
-            "Здравствуйте! Меня зовут Светлана, я помогаю подобрать квартиру в Москве и области — "
-            "для жизни, инвестиций или сдачи в аренду. Напишите, какой район или метро рассматриваете, "
-            "сколько комнат нужно и какой бюджет планируете — я сразу начну подбор."
-        ),
-        "state_namespace": "nmbot_v2",
-    },
     "V6": {
         "name": "TBD",
         "start_greeting": (
@@ -693,14 +651,6 @@ RUNTIME_IDENTITIES = {
             "сколько комнат нужно и какой бюджет планируете — я сразу начну подбор."
         ),
         "state_namespace": "nmbot_v6",
-    },
-    "V4": {
-        "name": "Марина",
-        "start_greeting": (
-            "Здравствуйте! Меня зовут Марина, я подберу квартиры в новостройках Москвы и области. "
-            "Напишите район или ЖК, сколько комнат нужно и какой бюджет — я сразу предложу подходящие варианты."
-        ),
-        "state_namespace": "nmbot_v4",
     },
 }
 SUPPORTED_RUNTIME_VERSIONS = frozenset(RUNTIME_IDENTITIES)
@@ -721,7 +671,7 @@ def _runtime_version_line(version: str) -> str:
 
 def _jivo_start_greeting(version: str) -> str:
     normalized = _normalize_runtime_version(version)
-    identity = RUNTIME_IDENTITIES.get(normalized, RUNTIME_IDENTITIES["V2"])
+    identity = RUNTIME_IDENTITIES[normalized]
     return str(identity["start_greeting"]) + "\n\n" + _runtime_version_line(normalized)
 
 
@@ -735,7 +685,7 @@ def _client_visible_start_greeting(version: str) -> str:
     if not is_client_production():
         return _jivo_start_greeting(version)
     normalized = _normalize_runtime_version(version)
-    identity = RUNTIME_IDENTITIES.get(normalized, RUNTIME_IDENTITIES["V2"])
+    identity = RUNTIME_IDENTITIES[normalized]
     return str(identity["start_greeting"])
 
 
@@ -2363,16 +2313,16 @@ def build_jivo_invite_agent(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _is_start_command(text: str) -> bool:
     normalized = str(text or "").strip().lower()
-    return normalized in {"/start", "start", "/start_0", "/start_1", "/start_2", "/start_3", "/start_4", "/start_5", "/start_6"}
+    return normalized in {"/start", "start", "/start_6"}
 
 
 def _start_command_version(text: str) -> str | None:
     normalized = str(text or "").strip().lower()
-    return {"/start_0": "V0", "/start_1": "V1", "/start_2": "V2", "/start_3": "V3", "/start_4": "V4", "/start_5": "V5", "/start_6": "V6"}.get(normalized)
+    return {"/start_6": "V6"}.get(normalized)
 
 
 async def run_chat(app: web.Application, *, user_id: str, message: str, channel: str, meta: dict[str, Any] | None = None) -> dict[str, Any]:
-    return await run_runtime_turn(app, user_id=user_id, message=message, channel=channel, meta=meta)
+    return await run_v6_simple_turn(app, user_id=user_id, message=message, channel=channel, meta=meta)
 
 
 async def _active_runtime_version(app: web.Application) -> str:
@@ -3632,7 +3582,12 @@ def _journal_gateway_attempt_details(value: Any) -> list[dict[str, Any]]:
 def _journal_field_trace(value: Any) -> dict[str, Any]:
     trace = value if isinstance(value, dict) else {}
     cards = trace.get("cards") if isinstance(trace.get("cards"), list) else []
-    allowed = set(V0_PRESENTATION_TRACE_FIELDS) | set(OptionCard.__dataclass_fields__)
+    # Legacy presentation modules are intentionally absent from the V6-only
+    # release.  Keep this historical journal helper fail-closed when their
+    # optional imports are unavailable.
+    allowed = set(V0_PRESENTATION_TRACE_FIELDS)
+    if OptionCard is not None:
+        allowed.update(OptionCard.__dataclass_fields__)
 
     def safe_fields(raw: Any) -> list[str]:
         source = raw if isinstance(raw, list) else []
@@ -3702,7 +3657,7 @@ def _journal_param_key(value: Any) -> str | None:
 
 
 async def close_client(app: web.Application) -> None:
-    for key in ("overmind_client", "legacy_overmind_client"):
+    for key in ("overmind_client",):
         client = app.get(key) if hasattr(app, "get") else None
         close = getattr(client, "close", None)
         if close is not None:
@@ -3726,11 +3681,6 @@ def create_app() -> web.Application:
     if url_card_feature_enabled():
         app["v6_url_card_fetcher"] = fetch_card
         app["v6_url_card_extractor"] = extract_novostroy_url
-    app["v1_planner_port"] = V1GatewayPlannerPort(app["overmind_client"])
-    app["v1_search_port"] = V1GatewaySearchPort(app["overmind_client"])
-    app["v1_one_model_gpt55_port"] = V1GatewayOneModelResponsePort(app["overmind_client"])
-    app["v4_provider_port"] = V4GatewayOnePromptPort(app["overmind_client"])
-    app["v1_presenter_mode"] = "off"
     app["crm_callback_outbox"] = LocalCallbackOutbox(Path(os.getenv("NMBOT_CALLBACK_OUTBOX_DIR", str(DEFAULT_CALLBACK_OUTBOX_DIR))).expanduser())
     app["v6_callback_outbox"] = app["crm_callback_outbox"]
     app["jivo_session_locks"] = SessionLockRegistry()

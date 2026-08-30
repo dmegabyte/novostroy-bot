@@ -255,7 +255,7 @@ cat data/nmbot_runtime_version.json
 `current_runtime_version`. Если он `unverified` или `unknown`, нельзя подменять
 его значением selector-файла или audit-журнала.
 
-Диагностика принимает поддерживаемые live-версии V0, V2, V3, V5 и V6.
+Диагностика принимает поддерживаемые live-версии V0, V1, V2, V3, V4 и V6.
 Если endpoint возвращает другую или пустую версию, результат остаётся
 `unverified`; selector-файл по-прежнему не заменяет live proof.
 

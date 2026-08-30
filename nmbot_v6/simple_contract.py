@@ -8,7 +8,30 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from nmbot_v2.search_contract import COMMON_FACT_FIELDS
+# Kept inline because V6 is self-contained, but this is the same finite
+# source-backed MCP vocabulary previously shared with V2.  Prompt 1 may pass
+# through only observed fields from this set; it must not accept free-form
+# property attributes.
+COMMON_FACT_FIELDS = frozenset({
+    "id", "name", "alias", "type_object", "district", "location_id", "location", "street",
+    "new_building_class", "building_type", "rooms", "min_price", "max_price", "price1", "price2",
+    "price3", "price4", "price_s", "price_n", "price_square", "square_min", "square_max",
+    "floors_total", "delivered", "built_year", "ready_quarter", "ready", "status", "lat", "long",
+    "distance_from_mkad", "rating", "count_ads", "object_site", "developer", "developer_description",
+    "state", "link", "ipoteka", "fz214", "parking", "elevator", "concierge", "garage", "balcony",
+    "loggia", "territory", "security", "yard_without_cars", "children_ground", "sports_ground",
+    "heating_type", "conditioning_type", "finishing", "apartments", "taunhouse", "site_url",
+    "utility_fee", "park_near", "water_near", "trade_in", "is_investment", "school", "kindergarten",
+    "ddu_escrow", "ads_type_list", "total_area", "property_metro", "metro", "metro_line",
+    "property_railway", "highway_name", "location_2.ecology_rating", "ecology_rating", "house", "ads",
+    "ads.fullprice", "ads.id", "ads.price", "ads.area", "ads.rooms", "ads.floor", "ads.floors_total",
+    "ads.renovation", "ads.state", "ads.status", "ads.apart", "ads.house_id", "ads_add.stat_price",
+    "apartment_types", "mortgage_calc", "mortgage", "discount", "payment_by_installments",
+    "apartment_inventory", "available_apartments", "flats_available", "egrn_top_novos", "egrn_contracts",
+    "counter_novos", "novos.min_price", "novos.max_price", "infrastructure", "shops", "services",
+    "retail", "clinic", "clinics", "pharmacy", "pharmacies", "house.finishing_list", "parking_price",
+    "parking_inventory", "parking_count", "garage_price", "garage_count", "ceiling_height",
+})
 
 
 class SimpleContractError(ValueError):

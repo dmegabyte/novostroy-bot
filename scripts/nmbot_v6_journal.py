@@ -2,7 +2,7 @@
 
 The shared journal retains optional legacy sanitizers. During its import this
 facade makes those retired packages unavailable, selecting the journal's own
-standalone fallback without loading V0-V5 modules.
+standalone fallback without loading retired V0–V4 modules.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import sys
 
 class _RetiredRuntimeBlocker(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):  # type: ignore[no-untyped-def]
-        if fullname.split(".", 1)[0] in {"nmbot_v0", "nmbot_v1", "nmbot_v2", "nmbot_v3", "nmbot_v4", "nmbot_v5"}:
+        if fullname.split(".", 1)[0] in {"nmbot_v0", "nmbot_v1", "nmbot_v2", "nmbot_v3", "nmbot_v4"}:
             raise ModuleNotFoundError(f"retired runtime blocked: {fullname}", name=fullname)
         return None
 

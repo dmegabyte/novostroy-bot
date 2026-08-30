@@ -168,3 +168,13 @@
 - Verification: local build + HTML parser passed; remote HTML parser and marker checks passed with `REMOTE_PUBLIC_OVERVIEW_OK`; public webfetch confirmed both index and NMBOT pages are accessible.
 - Updated `docs/CHANGELOG.md` and `docs/BOT_ARCHITECTURE.md` to document the public overview.
 - Git commit/push pending from real VPS repo.
+# 2026-08-30 — V6-only migration completion
+
+- Began local-only migration repair. Recorded the two observed collection/import
+  failures and will preserve the existing deletion-based migration.
+- Added pytest collection boundaries, migrated V6 API tests away from the
+  deleted adapter, repaired reset state handling, and made the V6 artifact
+  allowlist include its direct imports. No deploy or external call was made.
+- Focused deterministic V6 verification passed: 165 tests plus source compile.
+- Plain pytest collection now succeeds with 1,581 collected tests; archive
+  bundles and source tests for removed runtime families are excluded.

@@ -1,3 +1,38 @@
+# Task Plan — 2026-08-30 V6-only migration completion
+
+Goal: make the current V6-only source transition locally testable and internally
+consistent, without deploying or changing VPS/Jivo state.
+
+## Phases
+
+1. Inventory remaining active V0–V5 dependencies and test-collection settings — complete.
+2. Replace or retire stale V6 API test dependencies on the deleted runtime adapter — complete.
+3. Prevent pytest from collecting immutable release artifacts as source tests — complete.
+4. Run focused V6 and release/contour checks; address only migration-caused failures — complete.
+5. Run the relevant local preflight/diagnostic checks and document results — complete (artifact preflight reached its declared local dependency gate).
+6. Summarize changes and leave the worktree ready for user review/commit — complete.
+
+## Constraints
+
+- Preserve the user's existing uncommitted V6 migration; do not restore deleted legacy code.
+- Local-only work: no VPS, Jivo, model, MCP, deploy, or secret access.
+- Do not broaden into unrelated historical test suites unless they are still active in the V6-only contour.
+
+## Errors encountered
+
+| Error | Attempt | Next action |
+|---|---|---|
+| Plain `pytest` collected an archived bootstrap bundle and failed to import its old V6 package. | 1 | Add a collection boundary for immutable release artifacts. |
+| Targeted V6 API test imports deleted `scripts.nmbot_runtime_adapter`. | 1 | Update/retire that stale test against the V6-only entry point. |
+| V6 reset still called the removed `_merge_runtime_namespace_envelope`. | 1 | Replaced it with a local V6 envelope merge and restored the canonical V6 reset helper. |
+| V6 artifact preflight required absent V2 sources. | 1 | Run the V6-only release profile and add its direct planner/search helper closure. |
+| Local artifact preflight lacks `phonenumbers==8.13.55`. | 1 | Dependency is declared in `requirements.txt`; do not install without user authorization. |
+| Broad URL-card test run did not finish promptly. | 1 | Stop it and retain a deterministic focused V6 suite; investigate separately only if it remains relevant. |
+| Full collection reached historical `chat_tester_bot` suites, which import the removed V2 planner through `followup_intent_classifier`. | 1 | Exclude only those legacy runtime suites from the V6 test boundary. |
+| Full collection later reached V2 card reformatter and V1 dialogue-report tests. | 1 | Exclude those historical owner suites; do not recreate their deleted runtime dependencies. |
+
+---
+
 # Task Plan — H026 Ideal Irina UX
 
 Goal: обеспечить лучший User Experience для nmbot: Ирина отвечает как живой консультант, продаёт объект по фактам MCP, задаёт правильный следующий вопрос, а каждый контрольный диалог сохраняется и оценивается.

@@ -28,6 +28,13 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Protocol
 
+# Support the documented direct-file invocation from any working directory.
+# Python otherwise adds only this file's ``scripts/`` directory to sys.path,
+# while the package imports below require the project root.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from scripts.nmbot_local_publish import (
     ReleaseError,
     cleanup_private_staging as _cleanup_private_staging,
@@ -39,7 +46,7 @@ from scripts.nmbot_local_publish import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = PROJECT_ROOT
 DEFAULT_OUT_DIR = ROOT / "release_bundles" / "atomic_full"
 DEFAULT_BOOTSTRAP_OUT_DIR = ROOT / "release_bundles" / "bootstrap"
 SCHEMA_VERSION = "nmbot.atomic_release.v1"
@@ -53,7 +60,7 @@ LIVE_API_HELPER_OVERLAY_LOCK = f"{DEFAULT_REMOTE_ROOT}/.live_api_helper_overlay_
 LIVE_API_HELPER_OVERLAY_STAGING = f"{DEFAULT_REMOTE_ROOT}/.live_api_helper_overlay_staging"
 LIVE_API_HELPER_SNAPSHOT_OUT_ROOT = Path("/tmp/opencode/nmbot-live-api-helper-overlay")
 DEFAULT_SNAPSHOT_CONTOUR = "test"
-SNAPSHOT_CONTOURS = ("test", "client-production")
+SNAPSHOT_CONTOURS = ("test", "primary", "client-production")
 AUTHORIZED_DEPLOY_HOST = "neiro@193.107.155.236"
 AUTHORIZED_DEPLOY_PORT = "1905"
 API_SERVICE = "novostroy-bot-api.service"
@@ -207,7 +214,7 @@ SECRET_ASSIGNMENT_RE = re.compile(
     re.IGNORECASE,
 )
 BENIGN_SECRET_VALUE_RE = re.compile(
-    r"^(?:None|True|False|[A-Z][A-Z0-9_]*|os\.getenv\(|os\.environ\.|environ\.get\(|getenv\(|settings\.|config\.|self\.|args\.|kwargs\.|[A-Za-z_][A-Za-z0-9_]*\(|[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?)"
+    r"^(?:None|True|False|[A-Z][A-Z0-9_]*|os\.getenv\(|os\.environ\.|environ\.get\(|getenv\(|bool\(|settings\.|config\.|self\.|args\.|kwargs\.|[A-Za-z_][A-Za-z0-9_]*\(|[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]+\])?)"
 )
 SECRET_ERROR_RE = re.compile(r"(?i)\b[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|API_KEY)[A-Za-z0-9_]*\b(?:\s*=\s*\S+)?")
 SECRET_ASSIGNMENT_LINE_RE = re.compile(
@@ -256,6 +263,7 @@ API_RUNTIME_SCRIPT_FILES = frozenset({
     "scripts/planner_trace.py",
 })
 V6_ONLY_RUNTIME_FILES = frozenset({
+    "search_profiles.py",
     "nmbot_v6/__init__.py",
     "nmbot_v6/phone.py",
     "nmbot_v6/simple_contract.py",
@@ -271,6 +279,8 @@ V6_ONLY_RUNTIME_FILES = frozenset({
     "scripts/nmbot_crm_outbox.py",
     "scripts/nmbot_egress_policy.py",
     "scripts/nmbot_gateway_client.py",
+    "scripts/nmbot_planner_context.py",
+    "scripts/planner_trace.py",
     "scripts/nmbot_prompt_ledger.py",
     "scripts/nmbot_release_identity.py",
     "scripts/nmbot_diag.sh",
@@ -593,20 +603,20 @@ def _manifest_has_dialogue_exporter(manifest: dict[str, Any]) -> bool:
 def _reject_secret_like(path: Path, rel: str) -> None:
     if SECRET_NAME_RE.search(PurePosixPath(rel).name) and not _is_name_allowed_for_test_api_overlay(rel):
         raise ReleaseError(f"secret-like filename rejected: {rel}")
-    if rel.endswith((".py", ".txt", ".json", ".yaml", ".yml", ".cfg", ".ini")):
+    if rel.endswith((".py", ".sh", ".txt", ".json", ".yaml", ".yml", ".cfg", ".ini")):
         text = path.read_text(encoding="utf-8", errors="ignore")
         if rel in NMBOT_DIALOGUE_EXPORTER_NAME_ONLY_SECRET_REFERENCE_FILES:
             if PRIVATE_KEY_RE.search(text) or BEARER_LITERAL_RE.search(text):
                 raise ReleaseError(f"secret-like content rejected: {rel}")
             return
-        if _has_secret_like_content(text, python_source=rel.endswith(".py")):
+        if _has_secret_like_content(text, source_code=rel.endswith((".py", ".sh"))):
             raise ReleaseError(f"secret-like content rejected: {rel}")
 
 
-def _has_secret_like_content(text: str, *, python_source: bool = False) -> bool:
+def _has_secret_like_content(text: str, *, source_code: bool = False) -> bool:
     if PRIVATE_KEY_RE.search(text) or BEARER_LITERAL_RE.search(text):
         return True
-    if python_source:
+    if source_code:
         return _has_secret_assignment_literal(text)
     return SECRET_CONTENT_RE.search(text) is not None
 
@@ -629,6 +639,8 @@ def _has_secret_assignment_literal(text: str) -> bool:
             quote = value[0]
             end = value.find(quote, 1)
             literal = value[1:end] if end >= 1 else value[1:]
+            if literal.upper().replace("-", "_") == name:
+                continue
             if literal and (strong_name or _looks_like_credential_literal(literal)):
                 return True
             continue
@@ -1174,17 +1186,17 @@ def _snapshot_id(value: str) -> str:
 
 def _snapshot_contour(value: str = DEFAULT_SNAPSHOT_CONTOUR) -> str:
     if value not in SNAPSHOT_CONTOURS:
-        raise ReleaseError("snapshot contour must be one of: test, client-production")
+        raise ReleaseError("snapshot contour must be one of: test, primary, client-production")
     return value
 
 
 def _snapshot_remote_root_for_contour(contour: str = DEFAULT_SNAPSHOT_CONTOUR) -> str:
     profile = _snapshot_contour(contour)
-    if profile == "test":
+    if profile in {"test", "primary"}:
         return DEFAULT_REMOTE_ROOT
     if profile == "client-production":
         return CLIENT_PRODUCTION_REMOTE_ROOT
-    raise ReleaseError("snapshot contour must be one of: test, client-production")
+    raise ReleaseError("snapshot contour must be one of: test, primary, client-production")
 
 
 def _validate_snapshot_contour_root(contour: str, remote_root: str) -> str:
@@ -1315,7 +1327,7 @@ excluded_suffixes=(".pyc",".pyo",".log",".jsonl",".bak",".tmp",".swp")
 deploy_re=re.compile(r"(^|/)(?:deploy|rollback|release|nmbot_atomic_release|nmbot_release)(?:[_-].*)?\.py$")
 def fail(msg): print(json.dumps({"ok": False, "error": msg}), file=sys.stderr); sys.exit(2)
 if configured_root != cfg["root"] or not canonical_root.is_absolute(): fail("snapshot root is fixed")
-if contour == "test":
+if contour in {"test", "primary"}:
     current=canonical_root/"current"
     if os.path.lexists(current):
         if not current.is_symlink(): fail("snapshot current must be a symlink")
@@ -1831,7 +1843,7 @@ def _write_bridge_manifest_driven_source_copy(*, source_dir: Path, dest_dir: Pat
     for row in manifest["files"]:
         rel = _bridge_manifest_path(row["path"])
         data, mode = _read_bridge_file_openat_no_follow(source_dir, rel, row)
-        if _has_secret_like_content(data.decode("utf-8", errors="ignore"), python_source=True):
+        if _has_secret_like_content(data.decode("utf-8", errors="ignore"), source_code=True):
             raise ReleaseError(f"secret-like bridge snapshot file rejected: {rel}")
         target = dest_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -2485,7 +2497,7 @@ def _write_manifest_driven_source_copy(*, source_dir: Path, dest_dir: Path, mani
     for row in manifest["files"]:
         rel = row["path"]
         data, mode = _read_file_openat_no_follow(source_dir, rel, row)
-        if SECRET_NAME_RE.search(PurePosixPath(rel).name) or _has_secret_like_content(data.decode("utf-8", errors="ignore"), python_source=rel.endswith(".py")):
+        if SECRET_NAME_RE.search(PurePosixPath(rel).name) or _has_secret_like_content(data.decode("utf-8", errors="ignore"), source_code=rel.endswith((".py", ".sh"))):
             raise ReleaseError(f"secret-like snapshot file rejected: {rel}")
         target = dest_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -3023,7 +3035,7 @@ def _read_overlay_source_no_follow(rel: str) -> tuple[bytes, dict[str, Any]]:
                 os.close(fd)
             except OSError:
                 pass
-    if (SECRET_NAME_RE.search(PurePosixPath(safe).name) and not _is_name_allowed_for_test_api_overlay(safe)) or _has_secret_like_content(data.decode("utf-8", errors="ignore"), python_source=safe.endswith(".py")):
+    if (SECRET_NAME_RE.search(PurePosixPath(safe).name) and not _is_name_allowed_for_test_api_overlay(safe)) or _has_secret_like_content(data.decode("utf-8", errors="ignore"), source_code=safe.endswith((".py", ".sh"))):
         raise ReleaseError(f"secret-like content rejected: {safe}")
     return data, expected
 

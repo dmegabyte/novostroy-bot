@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -24,6 +25,7 @@ def test_registry_requires_explicit_unverified_traffic_role() -> None:
 
     assert set(registry) == {"primary", "client-production"}
     assert {spec["traffic_role"] for spec in registry.values()} == {"unverified"}
+    assert all(set(spec["services"]) == {"api", "bridge"} for spec in registry.values())
 
 
 def test_recon_command_is_readonly_and_binds_selected_contour() -> None:
@@ -31,9 +33,23 @@ def test_recon_command_is_readonly_and_binds_selected_contour() -> None:
     spec = module.load_registry()["primary"]
 
     command = module.build_remote_command(contour="primary", spec=spec)
+    argv = shlex.split(command)
 
     assert '"contour":"primary"' in command
+    assert argv[:2] == ["python3", "-c"]
+    compile(argv[2], "<nmbot-contour-recon-remote>", "exec")
     assert "systemctl\", \"--user\", \"show\"" in command
+    assert "nmbot-dialogue-sheet-export.service" in command
+    assert "nmbot-dialogue-sheet-export.timer" in command
+    assert "dialogue_journal.jsonl" in command
+    assert 'root / "logs" / "dialogue_journal.jsonl"' in command
+    assert 'current / "logs" / "dialogue_journal.jsonl"' in command
+    assert 'root / "bridge-current" / "logs" / "dialogue_journal.jsonl"' in command
+    assert "journal_target" in command and "default_split" in command
+    assert "sheet_target" in command and "tab_target" in command
+    assert "journalctl" in command and "last_write" in command and "known_error_codes" in command
+    assert "valid_conversation_ref" in command
+    assert "2026-08-27" in command and "2026-08-28" in command
     assert "urlopen" in command
     assert not any(token in command for token in (" restart", " start", " stop", " deploy", "scp", "rsync"))
 

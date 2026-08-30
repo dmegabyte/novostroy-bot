@@ -27,12 +27,6 @@ UNKNOWN_RELEASE_ID = "UNKNOWN"
 SAFE_RELEASE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
 DEFAULT_TRACKED_FILES = tuple(sorted((
     "followup_intent_classifier.py",
-    "prompts/v2_response_composer.txt",
-    "prompts/v2_response_formatter.txt",
-    "prompts/v2_response_writer.txt",
-    "prompts/v2_manager_rewriter.txt",
-    "prompts/v5_manager_rewriter.txt",
-    "prompts/v2_search_mcp.txt",
     "search_profiles.py",
     "scripts/dialogue_journal.py",
     "scripts/nmbot_api_server.py",
@@ -41,8 +35,9 @@ DEFAULT_TRACKED_FILES = tuple(sorted((
     "scripts/nmbot_gateway_client.py",
     "scripts/nmbot_planner_context.py",
     "scripts/nmbot_release_identity.py",
-    "scripts/nmbot_runtime_adapter.py",
-    *(str(path.relative_to(ROOT)) for path in (ROOT / "nmbot_v2").glob("*.py")),
+    "scripts/nmbot_v6_simple_adapter.py",
+    "nmbot_v6/simple_runtime.py",
+    "nmbot_v6/simple_state.py",
 )))
 
 

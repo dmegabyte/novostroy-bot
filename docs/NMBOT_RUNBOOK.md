@@ -188,7 +188,7 @@ python3 scripts/nmbot_test_feature_flags.py \
 
 Значения задаются только как `on|off`. Скрипт делает backup TEST `.env`,
 использует удалённый безопасный env-helper, перезапускает только
-`novostroy-bot-api.service` и проверяет health, активность сервиса и runtime V5.
+`novostroy-bot-api.service` и проверяет health, активность сервиса и runtime V6.
 `--dry-run` не меняет конфигурацию. После изменения скриптом проверяется статус;
 Jivo smoke выполняется отдельно и автоматически этим инструментом не запускается.
 Скрипт фиксирован на TEST-контуре и не предназначен для production.

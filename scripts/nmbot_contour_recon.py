@@ -52,7 +52,7 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, dict[str, Any]]:
         health_urls = spec.get("health_urls")
         if (not SAFE_PORT.fullmatch(port) or not port.isdigit() or not 1 <= int(port) <= 65535 or
                 not host.count("@") == 1 or not root.startswith("/") or not env_file.startswith("/") or
-                not isinstance(services, dict) or set(services) != {"api", "bridge"} or
+                not isinstance(services, dict) or set(services) not in ({"api", "bridge"}, {"api", "bridge", "callback_worker"}) or
                 not isinstance(health_urls, dict) or set(health_urls) != {"api", "bridge"}):
             raise ReconError(f"invalid contour registry entry: {name}")
         for service in services.values():
@@ -68,7 +68,7 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, dict[str, Any]]:
             "port": port,
             "remote_root": root,
             "environment_file": env_file,
-            "services": dict(services),
+            "services": {key: services[key] for key in ("api", "bridge")},
             "health_urls": dict(health_urls),
             "traffic_role": "unverified",
         }
@@ -78,17 +78,95 @@ def load_registry(path: Path = REGISTRY_PATH) -> dict[str, dict[str, Any]]:
 def build_remote_command(*, contour: str, spec: dict[str, Any]) -> str:
     payload = json.dumps({"contour": contour, **spec}, sort_keys=True, separators=(",", ":"))
     program = r'''
-import json, pathlib, subprocess, sys, urllib.request
+import json, pathlib, re, subprocess, sys, urllib.request
 p = json.loads(sys.argv[1])
 root = pathlib.Path(p["remote_root"])
 services = p["services"]
 health_urls = p["health_urls"]
-def unit(name):
+def unit(name, *, execution=False, timer=False):
+    properties = ["Id", "LoadState", "ActiveState", "SubState", "FragmentPath", "WorkingDirectory", "ExecStart"]
+    if execution:
+        properties.extend(["Result", "ExecMainCode", "ExecMainStatus", "ActiveEnterTimestamp", "InactiveEnterTimestamp"])
+    if timer:
+        properties.extend(["Result", "LastTriggerUSec", "NextElapseUSecRealtime"])
     proc = subprocess.run(["systemctl", "--user", "show", name,
-        "--property=Id", "--property=LoadState", "--property=ActiveState",
-        "--property=SubState", "--property=FragmentPath", "--property=WorkingDirectory",
-        "--property=ExecStart", "--no-pager"], capture_output=True, text=True, check=False)
+        *["--property=" + item for item in properties], "--no-pager"], capture_output=True, text=True, check=False)
     return {"returncode": proc.returncode, "properties": proc.stdout.splitlines()}
+def journal_shape(path):
+    result = {"path": str(path), "exists": path.is_file(), "lines": 0, "malformed": 0,
+              "valid_conversation_ref": 0, "latest_ts": None,
+              "by_utc_date": {"2026-08-27": 0, "2026-08-28": 0}}
+    if not result["exists"] or path.is_symlink():
+        return result
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                result["lines"] += 1
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    result["malformed"] += 1
+                    continue
+                ref = row.get("conversation_ref") if isinstance(row, dict) else None
+                if not isinstance(ref, str) or not ref.startswith("sha256:"):
+                    continue
+                result["valid_conversation_ref"] += 1
+                raw_ts = row.get("ts") or row.get("timestamp") or row.get("created_at")
+                if isinstance(raw_ts, str):
+                    if result["latest_ts"] is None or raw_ts > result["latest_ts"]:
+                        result["latest_ts"] = raw_ts[:40]
+                    date = raw_ts[:10]
+                    if date in result["by_utc_date"]:
+                        result["by_utc_date"][date] += 1
+    except Exception as exc:
+        result["read_error"] = type(exc).__name__
+    return result
+def env_shape(path):
+    values = {}
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or "=" not in stripped:
+                continue
+            key, value = stripped.split("=", 1)
+            key = key.removeprefix("export ").strip()
+            value = value.strip().strip("\"'")
+            if key in {"NMBOT_DIALOGUE_JOURNAL", "NMBOT_DIALOGUE_EXPORT_SHEET_ID", "NMBOT_DIALOGUE_EXPORT_SHEET_TAB"}:
+                values[key] = value
+            elif key in {"NMBOT_DIALOGUE_EXPORT_GOOGLE_CREDENTIALS", "NMBOT_CALLBACK_GOOGLE_CREDENTIALS", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_SERVICE_ACCOUNT_JSON", "GOOGLE_SHEETS_CREDENTIALS", "GOOGLE_CREDENTIALS"}:
+                values[key] = bool(value)
+    except Exception as exc:
+        return {"readable": False, "error": type(exc).__name__}
+    journal = values.get("NMBOT_DIALOGUE_JOURNAL")
+    journal_targets = {
+        str(root / "logs" / "dialogue_journal.jsonl"): "fixed_root",
+        str(current / "logs" / "dialogue_journal.jsonl"): "api_current",
+        str(root / "bridge-current" / "logs" / "dialogue_journal.jsonl"): "bridge_current",
+    }
+    sheet = values.get("NMBOT_DIALOGUE_EXPORT_SHEET_ID")
+    tab = values.get("NMBOT_DIALOGUE_EXPORT_SHEET_TAB")
+    credential_keys = [key for key in values if key in {"NMBOT_DIALOGUE_EXPORT_GOOGLE_CREDENTIALS", "NMBOT_CALLBACK_GOOGLE_CREDENTIALS", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_SERVICE_ACCOUNT_JSON", "GOOGLE_SHEETS_CREDENTIALS", "GOOGLE_CREDENTIALS"} and values[key]]
+    return {
+        "readable": True,
+        "journal_target": "default_split" if journal is None else journal_targets.get(journal, "other"),
+        "sheet_target": "default_expected" if sheet is None else ("expected" if sheet == "1lE_aDxYGVtsl3SgFE9pZY-7ByxDu6zNkyZ1Qr1F0-EQ" else "other"),
+        "tab_target": "default_expected" if tab is None else ("expected" if tab == "Диалоги" else "other"),
+        "credentials_configured": bool(credential_keys),
+    }
+def exporter_log_result():
+    proc = subprocess.run(["journalctl", "--user", "--unit=nmbot-dialogue-sheet-export.service",
+        "--lines=80", "--no-pager", "--output=cat"], capture_output=True, text=True, check=False)
+    text = proc.stdout
+    writes = re.findall(r"mode=write\s+tab=\S+\s+total=(\d+)\s+updated=(\d+)\s+appended=(\d+)", text)
+    verifies = re.findall(r"verify=ok\s+headers=ok\s+first_id=(present|empty)", text)
+    known = [code for code in ("dialogue_sheet_header_mismatch", "dialogue_sheet_readback_header_mismatch",
+        "missing_google_credentials", "missing_google_credentials_file", "unsafe_google_credentials_permissions") if code in text]
+    return {
+        "returncode": proc.returncode,
+        "last_write": ({"total": int(writes[-1][0]), "updated": int(writes[-1][1]), "appended": int(writes[-1][2])} if writes else None),
+        "last_verify": ({"ok": True, "first_id": verifies[-1]} if verifies else None),
+        "known_error_codes": known,
+    }
 def health(url):
     try:
         return {"ok": True, "body": json.loads(urllib.request.urlopen(url, timeout=3).read().decode("utf-8"))}
@@ -105,6 +183,18 @@ print(json.dumps({
     "schema_version": "nmbot.contour_recon.v1", "contour": p["contour"],
     "remote_root": str(root), "current": str(current.resolve()) if current.exists() else None,
     "release_id": release_id, "services": {key: unit(value) for key, value in services.items()},
+    "dialogue_exporter": {
+        "service": unit("nmbot-dialogue-sheet-export.service", execution=True),
+        "timer": unit("nmbot-dialogue-sheet-export.timer", timer=True),
+        "journals": {
+            "fixed_root": journal_shape(root / "logs" / "dialogue_journal.jsonl"),
+            "api_current": journal_shape(current / "logs" / "dialogue_journal.jsonl"),
+            "bridge_current": journal_shape(root / "bridge-current" / "logs" / "dialogue_journal.jsonl"),
+        },
+        "environment": env_shape(pathlib.Path(p["environment_file"])),
+        "last_log_result": exporter_log_result(),
+        "script_present": (root / "scripts" / "nmbot_dialogue_sheet_exporter.py").is_file(),
+    },
     "health": {key: health(value) for key, value in health_urls.items()},
     "traffic_role": "unverified"
 }, ensure_ascii=False, sort_keys=True))

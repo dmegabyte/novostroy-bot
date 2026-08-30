@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import tarfile
 import threading
 from pathlib import Path
@@ -19,6 +20,19 @@ import scripts.nmbot_atomic_release as rel
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_direct_script_invocation_bootstraps_project_imports(tmp_path: Path) -> None:
+    proc = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "nmbot_atomic_release.py"), "--help"],
+        cwd=tmp_path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "snapshot-vps-source" in proc.stdout
 
 
 def test_v6_release_allowlist_contains_diagnostic_and_smoke_tools() -> None:
@@ -609,8 +623,8 @@ def _with_valid_source_provenance(artifact: rel.Artifact, tmp_path: Path, *, sna
     return path
 
 
-def test_build_excludes_secrets_runtime_noise_and_manifest_has_names_only(tmp_path: Path) -> None:
-    artifact = rel.build(release_id="REL-atomic-test", out_dir=tmp_path)
+def test_v6_only_build_excludes_secrets_runtime_noise_and_manifest_has_names_only(tmp_path: Path) -> None:
+    artifact = rel.build(release_id="REL-atomic-test", out_dir=tmp_path, profile=rel.V6_ONLY_PROFILE)
     manifest = rel.load_manifest(artifact.manifest)
     paths = {item["path"] for item in manifest["files"]}
 
@@ -619,24 +633,13 @@ def test_build_excludes_secrets_runtime_noise_and_manifest_has_names_only(tmp_pa
     assert "scripts/nmbot_api_server.py" in paths
     assert "scripts/nmbot_n8n_bridge_server.py" not in paths
     assert "scripts/nmbot_callback_sheet_worker.py" not in paths
-    assert "nmbot_v1" in rel.RUNTIME_DIRS
-    assert "nmbot_v1" in rel.SNAPSHOT_ROOTS
-    assert "nmbot_v4" in rel.RUNTIME_DIRS
-    assert "nmbot_v4" in rel.SNAPSHOT_ROOTS
-    assert "nmbot_v1/runtime.py" in paths
-    assert "nmbot_v1/state.py" in paths
-    assert "nmbot_v1/contracts.py" in paths
-    assert "nmbot_v1/ports.py" in paths
-    assert "nmbot_v1/search_contract.py" in paths
-    assert "nmbot_v1/search.py" in paths
-    assert "nmbot_v1/response.py" in paths
-    assert "nmbot_v4/runtime.py" in paths
-    assert "nmbot_v1/execution_path.py" in paths
+    assert not any(path.startswith(("nmbot_v0/", "nmbot_v1/", "nmbot_v2/", "nmbot_v4/")) for path in paths)
+    assert rel.V6_ONLY_RUNTIME_FILES <= paths
     encoded_requirements = json.dumps(manifest["config_schema_requirements"], ensure_ascii=False, sort_keys=True)
     assert "JIVO_PROVIDER_TOKEN" in encoded_requirements
     assert "=" not in encoded_requirements
-    assert manifest["import_modules"] == list(rel.IMPORT_MODULES)
-    assert manifest["config_schema_requirements"] == rel.CONFIG_REQUIREMENTS
+    assert manifest["import_modules"] == list(rel.V6_ONLY_IMPORT_MODULES)
+    assert manifest["config_schema_requirements"] == rel.V6_ONLY_CONFIG_REQUIREMENTS
     assert ".env.client-production" not in manifest["config_schema_requirements"]["external_runtime_paths"]
     assert ".env.client-production" not in manifest["external_runtime_strategy"]
     assert manifest["source_provenance"] == {"present": False}
@@ -727,6 +730,19 @@ def test_secret_filter_rejects_database_filenames_and_json_yaml_secret_assignmen
         else:  # pragma: no cover
             raise AssertionError(f"secret-like file/content must fail: {relative}")
         candidate.unlink()
+
+
+def test_secret_filter_accepts_runtime_env_lookup_but_rejects_shell_literal(tmp_path: Path) -> None:
+    root = tmp_path / "src"
+    _copy_contract_tree(root)
+    diagnostic = root / "scripts" / "nmbot_diag.sh"
+    diagnostic.write_text('token = env_value("NMBOT_API_TOKEN")\n', encoding="utf-8")
+
+    rel.build(release_id="secret-filter-shell-env", out_dir=tmp_path / "safe", root=root)
+
+    diagnostic.write_text('NMBOT_API_TOKEN="quoted-secret-value"\n', encoding="utf-8")
+    with pytest.raises(rel.ReleaseError, match="secret-like content"):
+        rel.build(release_id="secret-filter-shell-literal", out_dir=tmp_path / "unsafe", root=root)
 
 
 def test_manifest_and_archive_tamper_detection(tmp_path: Path) -> None:
@@ -2423,8 +2439,10 @@ def test_snapshot_contour_profiles_are_pinned_and_cli_defaults_to_test() -> None
     assert compare_args.contour == "test"
 
     test_command = rel._snapshot_vps_source_command()
+    primary_command = rel._snapshot_vps_source_command(contour="primary")
     prod_command = rel._snapshot_vps_source_command(contour="client-production")
     assert rel.DEFAULT_REMOTE_ROOT in test_command
+    assert rel.DEFAULT_REMOTE_ROOT in primary_command
     assert rel.CLIENT_PRODUCTION_REMOTE_ROOT in prod_command
 
     for bad in ("production", "", "../client-production"):
@@ -2435,7 +2453,7 @@ def test_snapshot_contour_profiles_are_pinned_and_cli_defaults_to_test() -> None
         else:  # pragma: no cover
             raise AssertionError("arbitrary snapshot contour must fail")
 
-    for contour, remote_root in (("test", rel.CLIENT_PRODUCTION_REMOTE_ROOT), ("client-production", rel.DEFAULT_REMOTE_ROOT), ("test", "/tmp/evil")):
+    for contour, remote_root in (("test", rel.CLIENT_PRODUCTION_REMOTE_ROOT), ("primary", rel.CLIENT_PRODUCTION_REMOTE_ROOT), ("client-production", rel.DEFAULT_REMOTE_ROOT), ("test", "/tmp/evil"), ("primary", "/tmp/evil")):
         try:
             rel._snapshot_vps_source_command(remote_root=remote_root, contour=contour)
         except rel.ReleaseError as exc:

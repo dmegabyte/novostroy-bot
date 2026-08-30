@@ -1,5 +1,4 @@
 import asyncio
-import ast
 import json
 import sys
 from pathlib import Path
@@ -11,7 +10,6 @@ from scripts.nmbot_api_server import (
     JsonStateStore, RuntimeVersionStore, _effective_session_runtime_version,
     _mark_v6_bot_message_returned, _reset_state_for_session_runtime, build_jivo_bot_message,
 )
-from scripts.nmbot_runtime_adapter import run_runtime_turn
 from scripts.nmbot_v6_simple_adapter import run_v6_simple_turn
 
 
@@ -34,7 +32,7 @@ def test_bot_message_wire_shape():
     assert event["message"]["text"] == "Ответ"
 
 
-def test_start_namespace_override_preserves_other_namespaces(tmp_path):
+def test_legacy_runtime_override_normalizes_to_v6(tmp_path):
     store = JsonStateStore(tmp_path / "state.json")
     versions = RuntimeVersionStore(tmp_path / "version.json")
     app = {"state_store": store, "runtime_version_store": versions}
@@ -44,35 +42,8 @@ def test_start_namespace_override_preserves_other_namespaces(tmp_path):
     assert value["nmbot_v0"] == {"kept": True}
     assert value["nmbot_v6"]["revision"] == 0
     assert value["runtime_version_override"] == "V6"
-    assert asyncio.run(_reset_state_for_session_runtime(app, "s", "V0")) == "V0"
-    assert asyncio.run(_effective_session_runtime_version(app, "s")) == "V0"
-
-
-def test_legacy_runtime_is_not_dispatched_to_simple_v6(monkeypatch):
-    called = {"v0": 0}
-    async def fake_v0(*args, **kwargs): called["v0"] += 1; return {"ok": True, "meta": {"runtime": "v0"}}
-    monkeypatch.setattr("scripts.nmbot_runtime_adapter._run_v0_authoritative", fake_v0)
-    class Store:
-        async def get(self, key): return {"runtime_version_override": "V0"}
-    result = asyncio.run(run_runtime_turn({"state_store": Store()}, user_id="s", message="x", channel="jivo"))
-    assert result["meta"]["runtime"] == "v0" and called["v0"] == 1
-
-
-def test_v1_and_v4_selectors_remain_isolated_from_simple_v6(monkeypatch):
-    called = []
-    async def fake_v1(*args, **kwargs): called.append("v1"); return {"ok": True, "meta": {"runtime": "v1"}}
-    async def fake_v4(*args, **kwargs): called.append("v4"); return {"ok": True, "meta": {"runtime": "v4"}}
-    async def forbidden_v6(*args, **kwargs): raise AssertionError("V6 simple dispatched")
-    monkeypatch.setattr("scripts.nmbot_runtime_adapter._run_v1_authoritative", fake_v1)
-    monkeypatch.setattr("scripts.nmbot_runtime_adapter._run_v4_authoritative", fake_v4)
-    monkeypatch.setattr("scripts.nmbot_runtime_adapter.run_v6_simple_turn", forbidden_v6)
-    class VersionStore:
-        def __init__(self, version): self.version = version
-        async def get(self, key): return {"runtime_version_override": self.version}
-    for version in ("V1", "V4"):
-        result = asyncio.run(run_runtime_turn({"state_store": VersionStore(version)}, user_id="s", message="x", channel="jivo"))
-        assert result["meta"]["runtime"] == version.casefold()
-    assert called == ["v1", "v4"]
+    assert asyncio.run(_reset_state_for_session_runtime(app, "s", "V0")) == "V6"
+    assert asyncio.run(_effective_session_runtime_version(app, "s")) == "V6"
 
 
 def test_actual_simple_operator_request_starts_callback_phone_flow():
@@ -162,34 +133,12 @@ def test_related_consent_after_saved_safe_offer_is_owned_by_p1():
     assert stages["prompt1"] == "accepted" and stages["prompt2"] == "not_called" and stages["state"] == "accepted"
 
 
-def test_v6_reset_preserves_v0_v1_v4_namespaces(tmp_path):
+def test_v6_reset_preserves_unrelated_persisted_state(tmp_path):
     store = JsonStateStore(tmp_path / "state.json")
     versions = RuntimeVersionStore(tmp_path / "version.json")
     app = {"state_store": store, "runtime_version_store": versions}
-    kept = {"nmbot_v0": {"v": 0}, "nmbot_v1": {"v": 1}, "nmbot_v4": {"v": 4}}
+    kept = {"historical_metadata": {"v": 0}, "operator_note": {"v": 1}}
     asyncio.run(store.save("s", {**kept, "nmbot_v6": {"old": True}}))
     asyncio.run(_reset_state_for_session_runtime(app, "s", "V6"))
     value = asyncio.run(store.get("s"))
     assert {key: value[key] for key in kept} == kept
-
-
-def test_adapter_has_only_simple_v6_graph_and_preserves_selector_dispatch():
-    adapter_path = Path(__file__).resolve().parents[1] / "scripts" / "nmbot_runtime_adapter.py"
-    tree = ast.parse(adapter_path.read_text(encoding="utf-8"))
-    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
-    definitions = {
-        node.name for node in ast.walk(tree)
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-    }
-    assert not ({"_run_v6_authoritative", "_isolated_v6_envelope", "_is_phone_consent"} & definitions)
-    assert not ({"V6State", "V6Runtime", "RuntimeStatus", "RuntimeFailureStage"} & names)
-
-    dispatcher = next(
-        node for node in tree.body
-        if isinstance(node, ast.AsyncFunctionDef) and node.name == "run_runtime_turn"
-    )
-    called = {
-        node.func.id for node in ast.walk(dispatcher)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
-    assert {"run_v6_simple_turn", "_run_v0_authoritative", "_run_v1_authoritative", "_run_v4_authoritative"} <= called

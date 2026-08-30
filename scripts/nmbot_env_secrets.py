@@ -36,21 +36,12 @@ KNOWN_KEYS = {
     "NMBOT_BRIDGE_STRUCTURED_LOG",
     "JIVO_PROVIDER_ID",
     "JIVO_API_ENDPOINT_BASE",
-    "NMBOT_V2_RESPONSE_COMPOSER_MODE",
-    "NMBOT_V3_RESPONSE_COMPOSER_MODE",
     "NMBOT_CARD_REFORMATTER_MODE",
-    "NMBOT_V2_RESPONSE_TIMEOUT",
     "NMBOT_RESPONSE_FORMATTER_TIMEOUT",
     "NMBOT_RESPONSE_FORMATTER_MODEL",
     "NMBOT_MANAGER_REWRITER_MODE",
-    "NMBOT_V2_MANAGER_REWRITER_MODE",
-    "NMBOT_V3_MANAGER_REWRITER_MODE",
     "NMBOT_MANAGER_REWRITER_MODEL",
     "NMBOT_MANAGER_REWRITER_TIMEOUT",
-    "NMBOT_V5_MANAGER_REWRITER_MODEL",
-    "NMBOT_V5_MANAGER_REWRITER_TIMEOUT",
-    "NMBOT_V5_MANAGER_REWRITER_MODE",
-    "NMBOT_V5_RESPONSE_COMPOSER_MODE",
     "NMBOT_BLUESMINDS_INTERCEPTOR",
     "NMBOT_BLUESMINDS_MODEL",
     "NMBOT_BLUESMINDS_TIMEOUT",
@@ -60,10 +51,6 @@ KNOWN_KEYS = {
     "NMBOT_BRIDGE_TIMEOUT_SECONDS",
     "NMBOT_BRIDGE_HARD_TIMEOUT_SECONDS",
     "NMBOT_BRIDGE_FALLBACK_TEXT",
-    "NMBOT_V0_MODEL",
-    "NMBOT_V0_SEARCH_MODEL",
-    "NMBOT_V0_ANSWER_MODEL",
-    "NMBOT_V1_ONE_MODEL_GPT55_MODE",
     "NMBOT_GATEWAY_FORENSIC_LOG_ENABLED",
     "NMBOT_GATEWAY_FORENSIC_LOG_RETENTION_DAYS",
     "NMBOT_GATEWAY_FORENSIC_LOG_MAX_BYTES",
@@ -72,13 +59,6 @@ KNOWN_KEYS = {
     "NMBOT_OPENROUTER_EXCLUDE_REASONING",
 }
 
-V0_SEARCH_MODEL_KEY = "NMBOT_V0_SEARCH_MODEL"
-V0_ANSWER_MODEL_KEY = "NMBOT_V0_ANSWER_MODEL"
-V0_LEGACY_MODEL_KEY = "NMBOT_V0_MODEL"
-V0_MODEL_KEYS = frozenset({V0_SEARCH_MODEL_KEY, V0_ANSWER_MODEL_KEY, V0_LEGACY_MODEL_KEY})
-DEFAULT_V0_MODEL_LABEL = "code-default"
-V1_ONE_MODEL_GPT55_MODE_KEY = "NMBOT_V1_ONE_MODEL_GPT55_MODE"
-V1_ONE_MODEL_GPT55_ALLOWED_MODES = frozenset({"off", "shadow", "publish"})
 GATEWAY_FORENSIC_LOG_ENABLED_KEY = "NMBOT_GATEWAY_FORENSIC_LOG_ENABLED"
 GATEWAY_FORENSIC_LOG_RETENTION_DAYS_KEY = "NMBOT_GATEWAY_FORENSIC_LOG_RETENTION_DAYS"
 GATEWAY_FORENSIC_LOG_MAX_BYTES_KEY = "NMBOT_GATEWAY_FORENSIC_LOG_MAX_BYTES"
@@ -102,9 +82,6 @@ def _quote_value(value: str) -> str:
 
 
 def _validate_key_value_before_set(key: str, value: str) -> None:
-    if key == V1_ONE_MODEL_GPT55_MODE_KEY and value not in V1_ONE_MODEL_GPT55_ALLOWED_MODES:
-        allowed = "|".join(sorted(V1_ONE_MODEL_GPT55_ALLOWED_MODES))
-        raise ValueError(f"{V1_ONE_MODEL_GPT55_MODE_KEY} must be one of: {allowed}")
     if key == GATEWAY_FORENSIC_LOG_ENABLED_KEY:
         if value.strip().lower() not in GATEWAY_FORENSIC_LOG_BOOLEAN_VALUES:
             allowed = "|".join(sorted(GATEWAY_FORENSIC_LOG_BOOLEAN_VALUES))
@@ -199,66 +176,13 @@ def _public_model_or_hidden(value: str | None) -> str:
     return "<hidden>"
 
 
-def resolve_v0_model(values: dict[str, str], specific_key: str) -> tuple[str, str | None]:
-    if specific_key not in {V0_SEARCH_MODEL_KEY, V0_ANSWER_MODEL_KEY}:
-        raise ValueError("invalid V0 model key")
-    if values.get(specific_key):
-        return specific_key, values[specific_key]
-    if values.get(V0_LEGACY_MODEL_KEY):
-        return V0_LEGACY_MODEL_KEY, values[V0_LEGACY_MODEL_KEY]
-    return DEFAULT_V0_MODEL_LABEL, None
-
-
-def v0_status_lines(path: Path) -> list[str]:
-    values = read_dotenv_values(path)
-    search_source, search_model = resolve_v0_model(values, V0_SEARCH_MODEL_KEY)
-    answer_source, answer_model = resolve_v0_model(values, V0_ANSWER_MODEL_KEY)
-    return [
-        f"env={path}",
-        f"present {V0_SEARCH_MODEL_KEY}={'yes' if bool(values.get(V0_SEARCH_MODEL_KEY)) else 'no'}",
-        f"present {V0_ANSWER_MODEL_KEY}={'yes' if bool(values.get(V0_ANSWER_MODEL_KEY)) else 'no'}",
-        f"present {V0_LEGACY_MODEL_KEY}={'yes' if bool(values.get(V0_LEGACY_MODEL_KEY)) else 'no'}",
-        f"effective search source={search_source} model={_public_model_or_hidden(search_model)}",
-        f"effective answer source={answer_source} model={_public_model_or_hidden(answer_model)}",
-    ]
-
-
-def _run_v0_models_command(args: argparse.Namespace) -> None:
-    env_path = Path(args.env).expanduser()
-    if args.v0_command == "status":
-        for line in v0_status_lines(env_path):
-            print(line)
-        return
-    if args.v0_command == "set-search":
-        status = set_key(env_path, V0_SEARCH_MODEL_KEY, args.model)
-        print(f"OK: {status} {V0_SEARCH_MODEL_KEY} in {args.env} (value hidden)")
-        return
-    if args.v0_command == "set-answer":
-        status = set_key(env_path, V0_ANSWER_MODEL_KEY, args.model)
-        print(f"OK: {status} {V0_ANSWER_MODEL_KEY} in {args.env} (value hidden)")
-        return
-    raise SystemExit("ERROR: unknown v0-models command")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Add/update nmbot Jivo/API dotenv values without printing secrets")
     subparsers = parser.add_subparsers(dest="command")
-    v0_parser = subparsers.add_parser("v0-models", help="Safely inspect or set V0 model keys")
-    v0_parser.add_argument("--env", default=".env", help="dotenv file path")
-    v0_subparsers = v0_parser.add_subparsers(dest="v0_command", required=True)
-    v0_subparsers.add_parser("status", help="Show V0 model key presence and effective sources")
-    set_search = v0_subparsers.add_parser("set-search", help="Set only NMBOT_V0_SEARCH_MODEL")
-    set_search.add_argument("model", help="public model id; value will not be printed")
-    set_answer = v0_subparsers.add_parser("set-answer", help="Set only NMBOT_V0_ANSWER_MODEL")
-    set_answer.add_argument("model", help="public model id; value will not be printed")
     parser.add_argument("--env", default=".env", help="dotenv file path")
     parser.add_argument("--key", help="dotenv key to set")
     parser.add_argument("--value", help="secret/config value; will not be printed")
     args = parser.parse_args()
-
-    if args.command == "v0-models":
-        _run_v0_models_command(args)
-        return
 
     if args.key is None or args.value is None:
         raise SystemExit("ERROR: --key and --value are required unless using a subcommand")
